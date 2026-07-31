@@ -29,9 +29,8 @@ from ..text import (
     write_languages,
 )
 from ..transcribers.catalog import (
-    REGISTRY,
-    SPECIALIST_MODELS,
     candidate_language_codes,
+    effective_specialists,
     language_display_name,
 )
 from .body import json_body
@@ -73,10 +72,9 @@ async def api_languages():
     return {
         "languages": [{"code": c, "name": language_display_name(c)} for c in candidate_language_codes()],
         "default": list(read_languages()),
-        # Registry-filtered so the readout drops exactly what `cover_models` drops
-        # (an env-overridden specialist absent from the catalog never runs), keeping
-        # the client-side "models that will run" union provably equal to the cover.
-        "specialists": {lang: m for lang, m in SPECIALIST_MODELS.items() if REGISTRY.get(m) is not None},
+        # Registry-filtered (see `effective_specialists`) so this readout and
+        # /api/state's can't disagree about which specialists will run.
+        "specialists": effective_specialists(),
     }
 
 

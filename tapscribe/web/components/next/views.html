@@ -429,6 +429,65 @@
 
     <div class="spacer"></div>
 
+    <!-- ADVANCED card — model idle TTL, parakeet chunk/overlap, summarize timeout/context -->
+    <div class="panel panel--accent">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">⚙️</span>Advanced</div>
+        <div class="panel__hint">model, chunking, and summarizer tuning</div>
+      </div>
+      <div class="panel__body">
+        <div class="field">
+          <!-- The sentinel is spelled with an ASCII hyphen on purpose: a number
+               input rejects U+2212 MINUS, so an operator copying the hint would
+               save an EMPTY value (= clear the override) with a green "saved". -->
+          <label>model idle TTL <span class="dim">— seconds before idle model eviction (-1 = never)</span></label>
+          <div class="field__row">
+            <input class="inp-txt mono" type="number" data-slot="setIdleTtlS" min="-1" max="86400" step="1" aria-label="model idle TTL">
+            <button class="act act--sm" type="button" data-slot="setIdleTtlSSave">save</button>
+            <span class="dim mono" data-slot="setIdleTtlSStatus"></span>
+          </div>
+        </div>
+        <div class="field" style="margin-top:11px">
+          <label>parakeet chunk seconds <span class="dim">— window length</span></label>
+          <div class="field__row">
+            <input class="inp-txt mono" type="number" data-slot="setChunkS" min="1" max="600" step="0.5" aria-label="parakeet chunk seconds">
+            <button class="act act--sm" type="button" data-slot="setChunkSSave">save</button>
+            <span class="dim mono" data-slot="setChunkSStatus"></span>
+          </div>
+        </div>
+        <div class="field" style="margin-top:11px">
+          <label>parakeet overlap seconds <span class="dim">— overlap between windows</span></label>
+          <div class="field__row">
+            <input class="inp-txt mono" type="number" data-slot="setOverlapS" min="0" max="60" step="0.5" aria-label="parakeet overlap seconds">
+            <button class="act act--sm" type="button" data-slot="setOverlapSSave">save</button>
+            <span class="dim mono" data-slot="setOverlapSStatus"></span>
+          </div>
+        </div>
+        <div class="field" style="margin-top:11px">
+          <label>summarize timeout <span class="dim">— seconds per summarize call</span></label>
+          <div class="field__row">
+            <input class="inp-txt mono" type="number" data-slot="setSummarizeTimeoutS" min="1" max="3600" step="1" aria-label="summarize timeout">
+            <button class="act act--sm" type="button" data-slot="setSummarizeTimeoutSSave">save</button>
+            <span class="dim mono" data-slot="setSummarizeTimeoutSStatus"></span>
+          </div>
+        </div>
+        <div class="field" style="margin-top:11px">
+          <label>summarize context window <span class="dim">— GGUF n_ctx (integer)</span></label>
+          <div class="field__row">
+            <input class="inp-txt mono" type="number" data-slot="setGgufCtx" min="512" max="131072" step="1" aria-label="summarize context window">
+            <button class="act act--sm" type="button" data-slot="setGgufCtxSave">save</button>
+            <span class="dim mono" data-slot="setGgufCtxStatus"></span>
+          </div>
+        </div>
+        <div class="field" style="margin-top:13px">
+          <label>specialist models <span class="dim">— language→model map (read-only)</span></label>
+          <div class="mono dim" data-slot="setSpecialists">…</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+
     <!-- BATCH engine — recordings model + batch prompt + hotwords + hallucination
          filter (reuses engine.js + config-card.js). A natural-height card: the
          stack scrolls as one page, so it does NOT scroll its own body. -->

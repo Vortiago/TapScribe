@@ -10,6 +10,11 @@
 //   tapscribe/sessions.py      — gather_sessions() per-session shape
 //   tapscribe/web/js/main.js   — ctx prop-bags passed to render()
 
+// The language→specialist-model map, registry-filtered server-side to the rows
+// that will actually run (`transcribers.catalog.effective_specialists`). One
+// type for the two readouts that carry it — /api/languages and /api/state.
+export type SpecialistMap = Record<string, string>;
+
 // ---------------------------------------------------------------------------
 // /api/state response
 // ---------------------------------------------------------------------------
@@ -52,6 +57,17 @@ export interface AppState {
   // the small current value the picker pre-selects.
   languages: { path: string; default: string[] };
   hallucinations: HallucinationsConfig;
+  // The operator knobs (#210), each the value IN FORCE — resolved env > config
+  // file > default, and for the overlap after the joint chunk/overlap clamp — so
+  // the Settings card renders what the recorder actually uses, not what is
+  // stored. Written back through PUT /api/config/{key}.
+  idle_ttl_s: number; // seconds; -1 = never evict
+  parakeet_chunk_s: number;
+  parakeet_overlap_s: number;
+  summarize_timeout_s: number;
+  summarize_gguf_ctx: number;
+  // Specialist language→model map (read-only, launch-time) — surfaced on /api/state.
+  specialists: SpecialistMap;
   // The cross-session People Registry view (ADR-0009): one row per canonical
   // Person, aggregated server-side from every session's roster + the live
   // identities. The People view renders these directly; rename/merge/detach
@@ -572,7 +588,7 @@ export interface SearchHit {
 export interface LanguageCatalog {
   languages: { code: string; name: string }[];
   default: string[];
-  specialists: Record<string, string>;
+  specialists: SpecialistMap;
 }
 
 // --- Component ctx objects (passed from main.js into each render() call) ---

@@ -287,10 +287,10 @@ ENV_MAX_TOKENS = "TAPSCRIBE_SUMMARIZE_MAX_TOKENS"
 _DEFAULT_MAX_TOKENS = 2048
 MAX_TOKENS_BOUNDS = (16, 8192)
 # GGUF context window. Long meetings need a wide window; the default fits a
-# typical session, env-tunable for very long ones (bounded by host RAM).
+# typical session, tunable from the dashboard (or env) for very long ones
+# (bounded by host RAM) — see `default_gguf_ctx`.
 ENV_GGUF_CTX = "TAPSCRIBE_SUMMARIZE_GGUF_CTX"
 _DEFAULT_GGUF_CTX = 8192
-_GGUF_CTX_BOUNDS = (512, 131_072)
 
 
 # One declarative record per hardware-routed backend (mirrors the catalog's
@@ -330,9 +330,15 @@ def clamp_max_tokens(value: int) -> int:
 
 
 def default_gguf_ctx() -> int:
-    """Current GGUF context window, re-read per call (see `default_max_tokens`)."""
-    return config.env_int(
-        ENV_GGUF_CTX, _DEFAULT_GGUF_CTX, min_value=_GGUF_CTX_BOUNDS[0], max_value=_GGUF_CTX_BOUNDS[1]
+    """Current GGUF context window, resolved env > config file > default and
+    re-read per call, so a dashboard change applies to the next summarize
+    without a restart (see `default_max_tokens`). The ONE public accessor for
+    this knob — `/api/state` renders it and `local.py` loads llama.cpp with it."""
+    return config.resolve_knob(
+        ENV_GGUF_CTX,
+        config.SUMMARIZE_GGUF_CTX_FILE,
+        config._parse_summarize_gguf_ctx,
+        _DEFAULT_GGUF_CTX,
     )
 
 

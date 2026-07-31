@@ -21,9 +21,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .. import config
 from ..audio import RECORDER_SAMPLE_RATE
 from ..chunking import Window, chunk_windows
-from ..config import env_float
 from ..wav_predecode import load_recorder_wav_as_pcm
 from .base import TranscriptionResult, TranscriptionSegment, build_transcription_result
 
@@ -31,48 +31,91 @@ from .base import TranscriptionResult, TranscriptionSegment, build_transcription
 # parakeet-mlx authors' own `transcribe()` tuning, fits comfortably under a
 # base M1 mini's ~14 GB max-buffer Metal cap, and keeps a multi-hour
 # recording from building one giant activation tensor on CPU/CUDA.
-# Operator-tunable via env — ONE env pair shared by both adapters,
-# deliberately, so the dashboard wiring (when it lands) has one source of
-# truth. Out-of-range env values are rejected by `env_float` (logged +
-# default used).
+# Operator-tunable from the dashboard (Settings → Advanced) and from the
+# environment — ONE env pair shared by both adapters, deliberately, so the
+# dashboard wiring and the docs have one source of truth. Resolution is
+# env > config file > default (`_resolve_chunk_s`); an out-of-range value on
+# either rung falls through to the next, and a bad env var is logged once by
+# `config.resolve_knob`.
 _DEFAULT_CHUNK_DURATION_S = 120.0
 _DEFAULT_OVERLAP_DURATION_S = 15.0
 
 ENV_CHUNK_S = "TAPSCRIBE_PARAKEET_CHUNK_S"
 ENV_OVERLAP_S = "TAPSCRIBE_PARAKEET_OVERLAP_S"
 
-_CHUNK_S_BOUNDS = (1.0, 600.0)
-_OVERLAP_S_BOUNDS = (0.0, 60.0)
-
 # Mirrors the ratio hard-coded in `chunking.chunk_windows`:
 # `chunk_windows` requires `overlap_s <= chunk_s * MAX_OVERLAP_FRACTION`
 # (otherwise a window advances by ≤0 and the walk can't terminate). The two
-# env knobs are validated INDEPENDENTLY by `env_float`, so a legal-but-
-# incompatible PAIR — `TAPSCRIBE_PARAKEET_CHUNK_S=10` against the default
-# 15 s overlap — passes both bound checks and only blows up inside
-# `chunk_windows`, i.e. per-WAV at request time. See `_clamp_overlap`.
+# knobs are validated INDEPENDENTLY — each parser sees only its own bounds — so
+# a legal-but-incompatible PAIR (`TAPSCRIBE_PARAKEET_CHUNK_S=10`, or a
+# dashboard-set chunk of 10, against the default 15 s overlap) passes both bound
+# checks and only blows up inside `chunk_windows`, i.e. per-WAV at request time.
+# See `clamp_overlap`.
 MAX_OVERLAP_FRACTION = 0.9
 
 
-def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
-    """Return an overlap `chunk_windows` will accept for `chunk_s`, printing
-    the same one-line "ignoring …; using …" notice `env_float` emits when it
-    has to reduce one.
+def _resolve_chunk_s() -> float:
+    """Current parakeet chunk duration (seconds), resolved env > config file > default."""
+    return config.resolve_knob(
+        ENV_CHUNK_S,
+        config.PARAKEET_CHUNK_S_FILE,
+        config._parse_parakeet_chunk,
+        _DEFAULT_CHUNK_DURATION_S,
+    )
 
-    The joint constraint can't live in `env_float`, which validates each knob
-    on its own. Degrading LOUDLY at construction keeps the documented
+
+def _resolve_overlap_s() -> float:
+    """Current parakeet overlap duration (seconds), resolved env > config file > default."""
+    return config.resolve_knob(
+        ENV_OVERLAP_S,
+        config.PARAKEET_OVERLAP_S_FILE,
+        config._parse_parakeet_overlap,
+        _DEFAULT_OVERLAP_DURATION_S,
+    )
+
+
+def current_parakeet_chunk_s() -> float:
+    """Public accessor for the resolved parakeet chunk duration (env > file > default)."""
+    return _resolve_chunk_s()
+
+
+def current_parakeet_overlap_s() -> float:
+    """The parakeet overlap IN FORCE — resolved (env > file > default) and then put
+    through the joint chunk/overlap clamp, i.e. what `ChunkedTranscriber` will
+    actually run. /api/state renders this: reporting the raw configured value
+    would show the operator an overlap no transcribe ever uses (a chunk of 10 s
+    silently reduces a 15 s overlap to 9 s), and the clamp's own notice goes to
+    the server log nobody is watching. Silent here on purpose — this is the
+    ~2 Hz display read; the adapter path keeps the loud `clamp_overlap`."""
+    return min(_resolve_overlap_s(), overlap_limit_for(_resolve_chunk_s()))
+
+
+def overlap_limit_for(chunk_s: float) -> float:
+    """The largest overlap `chunk_windows` will accept for `chunk_s`. One spelling
+    of the bound, shared by the loud `clamp_overlap` (adapter path) and the silent
+    /api/state read above."""
+    return chunk_s * MAX_OVERLAP_FRACTION
+
+
+def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
+    """Return an overlap `chunk_windows` will accept for `chunk_s`, printing a
+    one-line "ignoring …; using …" notice — the shape the knob parsers use for a
+    rejected value — when it has to reduce one.
+
+    The joint constraint can't live in a per-knob parser, which validates each
+    knob on its own. Degrading LOUDLY at construction keeps the documented
     "typo-tolerant rather than fatal" contract: without this, an operator
     setting `TAPSCRIBE_PARAKEET_CHUNK_S=10` and leaving the 15 s overlap
     default constructs a perfectly healthy adapter whose EVERY transcribe
     dies with a `ValueError` that isn't a domain error — a bare 500 per
     request, and an aborted job in `transcribe_session`.
     """
-    limit = chunk_s * MAX_OVERLAP_FRACTION
+    limit = overlap_limit_for(chunk_s)
     if overlap_s <= limit:
         return overlap_s
     print(
         f"[tapscribe] ignoring overlap {overlap_s} > {MAX_OVERLAP_FRACTION:g} × chunk "
-        f"{chunk_s} ({ENV_OVERLAP_S} / {ENV_CHUNK_S}); using {limit}",
+        f"{chunk_s} (Settings → Advanced, or {ENV_OVERLAP_S} / {ENV_CHUNK_S}); using {limit}",
         flush=True,
     )
     return limit
@@ -138,30 +181,37 @@ class ChunkedTranscriber:
         overlap_duration_s: float | None = None,
     ):
         self.model_name = model_name
-        self.chunk_duration_s = (
-            chunk_duration_s
-            if chunk_duration_s is not None
-            else env_float(
-                ENV_CHUNK_S,
-                _DEFAULT_CHUNK_DURATION_S,
-                min_value=_CHUNK_S_BOUNDS[0],
-                max_value=_CHUNK_S_BOUNDS[1],
-            )
-        )
-        overlap = (
-            overlap_duration_s
-            if overlap_duration_s is not None
-            else env_float(
-                ENV_OVERLAP_S,
-                _DEFAULT_OVERLAP_DURATION_S,
-                min_value=_OVERLAP_S_BOUNDS[0],
-                max_value=_OVERLAP_S_BOUNDS[1],
-            )
-        )
-        # Joint constraint — see `clamp_overlap`. Resolved HERE, at
-        # construction, so a bad pair degrades once and loudly instead of
-        # raising inside `chunk_windows` on every WAV.
-        self.overlap_duration_s = clamp_overlap(self.chunk_duration_s, overlap)
+        # An explicit arg is the CALLER's override and outranks both knob rungs;
+        # None means "follow the operator knob", which `_refresh_tuning` re-reads
+        # per transcribe.
+        self._chunk_override = chunk_duration_s
+        self._overlap_override = overlap_duration_s
+        # The construction snapshot IS the first re-read, so the override rule and
+        # the joint clamp are written once. The None seeds can't match the
+        # "unchanged" short-circuit, so this always resolves — and `clamp_overlap`
+        # still degrades a bad pair once and loudly, here at construction, instead
+        # of raising inside `chunk_windows` on every WAV.
+        self.chunk_duration_s = None
+        self._resolved_overlap = None
+        self.overlap_duration_s = None
+        self._refresh_tuning()
+
+    def _refresh_tuning(self) -> None:
+        """Re-read the operator knobs before a transcribe.
+
+        `load_transcriber` CACHES a loaded adapter, and a non-zero idle TTL
+        keeps it warm for the life of the process — so without this a dashboard
+        change to chunk/overlap would not reach the model until eviction, while
+        /api/state already reported the new value. Knobs that did not move are
+        left alone, so the clamp notice still fires once per bad pair rather
+        than once per WAV."""
+        chunk = self._chunk_override if self._chunk_override is not None else _resolve_chunk_s()
+        overlap = self._overlap_override if self._overlap_override is not None else _resolve_overlap_s()
+        if chunk == self.chunk_duration_s and overlap == self._resolved_overlap:
+            return
+        self.chunk_duration_s = chunk
+        self._resolved_overlap = overlap
+        self.overlap_duration_s = clamp_overlap(chunk, overlap)
 
     def _transcribe_window(self, chunk_pcm: Any, window: Window) -> Sequence[TranscriptionSegment]:
         """Run the model on one window's PCM and return its segments with
@@ -176,6 +226,8 @@ class ChunkedTranscriber:
         hotwords: str | None = None,
         source_lang: str | None = None,
     ) -> TranscriptionResult:
+        # A cached adapter can outlive an operator's knob change — re-read them.
+        self._refresh_tuning()
         # Pre-decode skips any ffmpeg load. `load_recorder_wav_as_pcm`
         # raises on unusual WAV formats — the operator's signal to convert
         # the file, not a cue to re-introduce ffmpeg.

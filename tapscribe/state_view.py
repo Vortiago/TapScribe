@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -43,20 +44,76 @@ from .live import LiveSnapshot
 from .name_resolution import attach_people_view
 from .people import PeopleRegistry
 from .recorder import ActiveStream, TapSetting
+from .summarizers.catalog import ENV_GGUF_CTX, default_gguf_ctx
+from .summarizers.command import ENV_TIMEOUT_S, current_summarize_timeout_s
 from .text import (
+    file_stat_sig,
     read_config,
     read_languages,
     read_summarizer_config,
     summarizer_default_public,
 )
-from .transcribers import current_idle_ttl_s
-from .transcribers.catalog import REGISTRY
+from .transcribers import (
+    ENV_CHUNK_S,
+    ENV_OVERLAP_S,
+    current_idle_ttl_s,
+    current_parakeet_chunk_s,
+    current_parakeet_overlap_s,
+)
+from .transcribers.catalog import REGISTRY, effective_specialists
 
 # Round each open tap's raw bytes_received (bumped per 20 ms audio frame) to the
 # nearest bucket before it lands in /api/state, so a quiet-but-open tap's
 # sub-bucket byte drift stops busting the response ETag every poll (#217). One
 # constant so the round-to-nearest stays centred: half a bucket is TAP_BYTES_BUCKET // 2.
 TAP_BYTES_BUCKET = 64 * 1024
+
+# The four numeric knobs (#210) each resolve through a config-file read, and
+# this payload is rebuilt ~2 Hz per connected client — so memoise them on the
+# knob files' stat signatures plus the raw env values that outrank them, rather
+# than opening four files per tick. Exact, not merely cheap: every write the
+# dashboard can make goes through `atomic_write_text` (tempfile + os.replace),
+# which lands a NEW inode, so the signature always moves. A read cache only —
+# the projection stays pure given its inputs. (`idle_ttl_s` is #347's and reads
+# straight through, as it did before this cache existed.)
+_KNOB_SOURCES: tuple[tuple[str, str], ...] = (
+    ("PARAKEET_CHUNK_S_FILE", ENV_CHUNK_S),
+    ("PARAKEET_OVERLAP_S_FILE", ENV_OVERLAP_S),
+    ("SUMMARIZE_TIMEOUT_S_FILE", ENV_TIMEOUT_S),
+    ("SUMMARIZE_GGUF_CTX_FILE", ENV_GGUF_CTX),
+)
+# Same single-(key, value)-slot shape as hallucinations._RULES_CACHE /
+# people._PEOPLE_CACHE / config_store._CONFIG_TEXT_CACHE: a mutated dict rather
+# than a rebound global, so the pair is published in ONE assignment and read in
+# ONE lookup. This payload is built on a to_thread worker per connected client,
+# and a rebound global read twice could hand back values belonging to a key the
+# reader never saw.
+_KNOB_CACHE: dict[str, tuple[tuple, dict[str, float | int]]] = {}
+
+
+def _knob_values() -> dict[str, float | int]:
+    """The four operator knobs as the dashboard renders them, memoised per tick."""
+    # The file attr is resolved at call time (tests repoint the config paths),
+    # and the signature carries the path so a repointed file can't hit a stale
+    # entry from the previous one.
+    key = tuple(
+        (file_stat_sig(getattr(config, attr), include_path=True), os.environ.get(env))
+        for attr, env in _KNOB_SOURCES
+    )
+    hit = _KNOB_CACHE.get("_slot")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    values: dict[str, float | int] = {
+        "parakeet_chunk_s": current_parakeet_chunk_s(),
+        # The overlap IN FORCE — `current_parakeet_overlap_s` applies the joint
+        # chunk/overlap clamp, so the card can't advertise an overlap every
+        # transcribe silently reduces.
+        "parakeet_overlap_s": current_parakeet_overlap_s(),
+        "summarize_timeout_s": current_summarize_timeout_s(),
+        "summarize_gguf_ctx": default_gguf_ctx(),
+    }
+    _KNOB_CACHE["_slot"] = (key, values)
+    return values
 
 
 def compute_inputs_support() -> dict[str, bool]:
@@ -261,6 +318,10 @@ def build_state_blob(inputs: StateInputs) -> tuple[bytes, str]:
             "count": len(halluc_rules),
         },
         "idle_ttl_s": current_idle_ttl_s(),
+        **_knob_values(),
+        # Same registry-filtered view /api/languages serves — one helper, so the
+        # Settings readout and the Transcript one can't drift.
+        "specialists": effective_specialists(),
     }
     body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
     etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'

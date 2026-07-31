@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -69,6 +71,14 @@ LANGUAGES_FILE: Path = CONFIG_DIR / "languages.txt"
 # Dashboard writes here via config-store key `model-idle-ttl`;
 # `_idle_ttl_s()` reads it at use-time when the env var is unset.
 MODEL_IDLE_TTL_FILE: Path = CONFIG_DIR / "model-idle-ttl.txt"
+
+# The idle-TTL knob's four siblings (#210), same shape: the dashboard writes the
+# file via config-store, the use-time resolver reads it under the matching env
+# var (`resolve_knob`).
+PARAKEET_CHUNK_S_FILE: Path = CONFIG_DIR / "parakeet-chunk-s.txt"
+PARAKEET_OVERLAP_S_FILE: Path = CONFIG_DIR / "parakeet-overlap-s.txt"
+SUMMARIZE_TIMEOUT_S_FILE: Path = CONFIG_DIR / "summarize-timeout-s.txt"
+SUMMARIZE_GGUF_CTX_FILE: Path = CONFIG_DIR / "summarize-gguf-ctx.txt"
 
 # Top-level dirs are created lazily on first use rather than at import
 # time, so unit tests and offline tooling don't litter the worktree
@@ -217,21 +227,10 @@ def _parse_bounded_ttl(raw: str) -> float | None:
     (write-time) so the two can never diverge on the same input. Lives here
     beside the sibling numeric-knob parsers (`env_float`/`env_int`) and the
     knob's file path (`MODEL_IDLE_TTL_FILE`) so both callers import it plainly
-    instead of reaching into the heavy transcribers package. The explicit
-    `isfinite` makes the NaN/inf reject intent unmistakable — `lo <= NaN <= hi`
-    is silently False, so a range check alone would drop NaN for the
-    wrong-looking reason."""
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        v = float(raw)
-    except ValueError:
-        return None
-    if not math.isfinite(v):
-        return None
-    lo, hi = _IDLE_TTL_BOUNDS
-    return v if lo <= v <= hi else None
+    instead of reaching into the heavy transcribers package. The idle-TTL
+    specialisation of `_parse_bounded_knob` — every knob parses through that one
+    body, which carries the reasoning for the explicit NaN/inf reject."""
+    return _parse_bounded_knob(raw, *_IDLE_TTL_BOUNDS)
 
 
 def env_int(
@@ -263,3 +262,128 @@ def env_int(
         )
         return default
     return v
+
+
+# ---------------------------------------------------------------------------
+# Shared bounded-knob parser — one implementation, one thin caller per knob
+# ---------------------------------------------------------------------------
+
+
+def _parse_bounded_knob(raw: str, lo: float, hi: float, *, cast: Callable[[str], Any] = float) -> Any:
+    """Parse `raw` with `cast`, returning None when it is empty, unparseable,
+    non-finite (NaN/inf), or outside `[lo, hi]` — the shape every operator knob
+    wants: a bad value is not fatal, it just isn't an override. The single
+    source of truth shared by the config-store validators (write-time) and the
+    use-time resolvers (`resolve_knob`), so write acceptance and
+    resolution can never diverge on the same input. Returns `cast`'s type.
+
+    The explicit `isfinite` makes the NaN/inf reject intent unmistakable —
+    `lo <= NaN <= hi` is silently False, so a range check alone would drop NaN
+    for the wrong-looking reason, and NaN reaching a consumer is where
+    typo-tolerance ends (`int(nan * 16000)` dies at transcribe time,
+    `subprocess.run(timeout=nan)` never fires)."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        v = cast(raw)
+    except ValueError:
+        return None
+    if cast is float and not math.isfinite(v):
+        return None
+    return v if lo <= v <= hi else None
+
+
+# Windows longer than 600 s build the giant activation tensor the chunking
+# exists to avoid; an overlap over a minute is a re-transcribe, not a stitch
+# seam. The joint `overlap <= 0.9 × chunk` rule these two can still violate as a
+# PAIR is enforced separately, at adapter construction (`_chunked.clamp_overlap`).
+_PARAKEET_CHUNK_S_BOUNDS = (1.0, 600.0)
+_PARAKEET_OVERLAP_S_BOUNDS = (0.0, 60.0)
+# A summarize is one short subprocess call; bound the timeout between 1 s and an
+# hour so a typo can't wedge a job forever or fail a slow local model instantly.
+_SUMMARIZE_TIMEOUT_S_BOUNDS = (1.0, 3600.0)
+# GGUF n_ctx: under 512 tokens no transcript fits, and the ceiling is bounded by
+# host RAM long before it is by the format.
+_SUMMARIZE_GGUF_CTX_BOUNDS = (512, 131_072)
+
+
+def _parse_parakeet_chunk(raw: str) -> float | None:
+    return _parse_bounded_knob(raw, *_PARAKEET_CHUNK_S_BOUNDS)
+
+
+def _parse_parakeet_overlap(raw: str) -> float | None:
+    return _parse_bounded_knob(raw, *_PARAKEET_OVERLAP_S_BOUNDS)
+
+
+def _parse_summarize_timeout(raw: str) -> float | None:
+    return _parse_bounded_knob(raw, *_SUMMARIZE_TIMEOUT_S_BOUNDS)
+
+
+def _parse_summarize_gguf_ctx(raw: str) -> int | None:
+    return _parse_bounded_knob(raw, *_SUMMARIZE_GGUF_CTX_BOUNDS, cast=int)
+
+
+# ---------------------------------------------------------------------------
+# Operator-knob resolution (use-time). Lives HERE, in the leaf, next to the
+# bounds and parsers it belongs to: every knob consumer (transcribers/_chunked,
+# summarizers/catalog, summarizers/command) needs it, and `config_store` imports
+# summarizers.catalog back for its validators — so hosting the resolver there
+# made those consumers close a real import cycle (CodeQL py/cyclic-import).
+# `config_store` re-exports both names, so its public surface is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def read_text_file(path: Path) -> str:
+    """Read a small text config file. Returns "" on any failure so callers
+    can treat "missing" and "unreadable" identically.
+
+    UnicodeDecodeError is treated the same way: a config file written in
+    a non-UTF-8 encoding (e.g. Windows-1252 from Notepad) reads as empty
+    rather than raising into every transcribe job. The operator's file
+    is effectively "no rules" until they re-save it as UTF-8.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+_WARNED_ENV: dict[str, str] = {}
+
+
+def resolve_knob(env_name: str, file_path: Path, parse: Callable[[str], Any], default: Any) -> Any:
+    """Resolve one operator-tunable knob: a set-AND-VALID env var wins, else the
+    dashboard-written config file, else `default`.
+
+    "set AND valid" is the load-bearing half. A set-but-INVALID env var — empty
+    (a systemd `EnvironmentFile` leaving `TAPSCRIBE_…=`), non-numeric, or out of
+    bounds — is not a real override and falls through to the file exactly like
+    an unset one; keying the env branch on mere presence would silently discard
+    what the operator chose in the dashboard. It is still an operator MISTAKE,
+    so it prints the same one-line `[tapscribe] ignoring …` notice `env_float`
+    emits — the resolvers replaced that helper, and losing its notice would make
+    a typo'd env var invisible.
+
+    The file is read FRESH (uncached) at use-time: a dashboard edit must apply
+    without a restart, and the stat-signature cache behind `read_config` would
+    miss a same-size in-place rewrite ("300" -> "120") landing inside one
+    coarse-mtime tick, stranding the old value at the consumer.
+    """
+    raw_env = os.environ.get(env_name)
+    if raw_env:
+        v = parse(raw_env)
+        if v is not None:
+            _WARNED_ENV.pop(env_name, None)
+            return v
+        if _WARNED_ENV.get(env_name) != raw_env:
+            _WARNED_ENV[env_name] = raw_env
+            print(
+                f"[tapscribe] ignoring {env_name}={raw_env!r} (unparseable or out of bounds); "
+                "using the config file / default",
+                flush=True,
+            )
+    v = parse(read_text_file(file_path))
+    return v if v is not None else default

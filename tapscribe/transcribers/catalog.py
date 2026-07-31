@@ -137,8 +137,9 @@ DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
 # the default because a 20-clip FLEURS benchmark (vs a `large-v3-turbo`
 # generalist) showed it win-or-tie 19/20 on Norwegian (+0.07 word-recall, ~40%
 # lower WER), whereas `nb-whisper-medium` only TIED the generalist — i.e. medium
-# didn't earn the extra decode, large does. It is operator-tunable in spirit (a
-# later issue surfaces it), so keep it the single source of truth.
+# didn't earn the extra decode, large does. Operator-tunable at LAUNCH via
+# `TAPSCRIBE_SPECIALIST_<LANG>` and surfaced read-only in the dashboard
+# (Settings → Advanced, #210), so keep it the single source of truth.
 def specialist_table_with_env_overrides(base: dict[str, str], environ: Mapping[str, str]) -> dict[str, str]:
     """A copy of `base` with `TAPSCRIBE_SPECIALIST_<LANG>=<model id>` overrides
     applied — the "operator-tunable" seam the comment above promises (e.g. a fast
@@ -161,6 +162,19 @@ def specialist_table_with_env_overrides(base: dict[str, str], environ: Mapping[s
 SPECIALIST_MODELS: dict[str, str] = specialist_table_with_env_overrides(
     {"no": "nb-whisper-large"}, os.environ
 )
+
+
+def effective_specialists() -> dict[str, str]:
+    """The specialist rows that will actually RUN — `SPECIALIST_MODELS`
+    registry-filtered so the readout drops exactly what `cover_models` drops (an
+    env-overridden specialist absent from the catalog never runs), keeping the
+    client-side "models that will run" union provably equal to the cover.
+
+    ONE implementation behind both readouts — /api/languages (fetched once, the
+    Transcript page) and /api/state (polled, the Settings card) — so the two
+    can't drift into disagreeing about which specialists exist."""
+    return {lang: m for lang, m in SPECIALIST_MODELS.items() if REGISTRY.get(m) is not None}
+
 
 # Display names for every concrete language code that appears across the
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and

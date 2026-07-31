@@ -20,7 +20,7 @@
 // config-card (also renderRegion-backed) + the engine selector (rebuilt on
 // change).
 
-import { tpl, pick, renderRegion } from "../../templates.js";
+import { tpl, pick, renderRegion, deferIfInteractionInside } from "../../templates.js";
 import { getJson, putJson, errText, getBridgeCatalog } from "../../api.js";
 import { wireConfigSave, wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
@@ -195,6 +195,70 @@ export function build(ctx) {
     put: () => putJson("/api/config/languages", { content: selectedLanguages(langSel).join(",") }),
     onSuccess: () => afterMutate(),
   });
+
+  // ---- Advanced card (#210) --------------------------------------------------
+  // The operator knobs that used to be env-only. Each row is the same shape —
+  // number input + save + status, saving through PUT /api/config/{key} and
+  // seeding from the resolved value on /api/state — so one row record drives the
+  // wiring and the seeding below instead of four hand-written regions. The
+  // pick() names stay literal (check-slots resolves the .html ↔ .js seam from
+  // exactly those literals).
+  /**
+   * @typedef {"idle_ttl_s" | "parakeet_chunk_s" | "parakeet_overlap_s"
+   *   | "summarize_timeout_s" | "summarize_gguf_ctx"} KnobField
+   */
+  /**
+   * @param {string} key the /api/config/{key} this row saves through
+   * @param {KnobField} field the /api/state field carrying its value in force
+   * @param {HTMLInputElement} input
+   * @param {HTMLButtonElement} btn
+   * @param {HTMLElement} status
+   */
+  const knobRow = (key, field, input, btn, status) => {
+    // Two holds, both needed. The ROW (input + its save button) is the seam's
+    // interaction-hold host, so a repaint can't land between the click and the
+    // PUT reading `input.value`.
+    // `baseline` — the last value the poll or a successful save put in the box —
+    // covers the rest: it tells "untouched since we wrote it" from "typed but
+    // not saved yet", so filling two knobs and saving one can't have the poll
+    // wipe the other one's pending edit (config-card.js keeps the same baseline
+    // for its unsaved badge).
+    const knob = { field, input, row: input.closest(".field") || input, baseline: "" };
+    wireConfigSave({
+      key,
+      btn,
+      textarea: input,
+      status,
+      onSuccess: (v) => {
+        knob.baseline = v;
+        afterMutate();
+      },
+    });
+    return knob;
+  };
+  const knobs = [
+    knobRow("model-idle-ttl", "idle_ttl_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setIdleTtlS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setIdleTtlSSave")),
+      pick(frag, "setIdleTtlSStatus")),
+    knobRow("parakeet-chunk-s", "parakeet_chunk_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setChunkS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setChunkSSave")),
+      pick(frag, "setChunkSStatus")),
+    knobRow("parakeet-overlap-s", "parakeet_overlap_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setOverlapS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setOverlapSSave")),
+      pick(frag, "setOverlapSStatus")),
+    knobRow("summarize-timeout-s", "summarize_timeout_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setSummarizeTimeoutS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setSummarizeTimeoutSSave")),
+      pick(frag, "setSummarizeTimeoutSStatus")),
+    knobRow("summarize-gguf-ctx", "summarize_gguf_ctx",
+      /** @type {HTMLInputElement} */ (pick(frag, "setGgufCtx")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setGgufCtxSave")),
+      pick(frag, "setGgufCtxStatus")),
+  ];
+  const specialistsEl = pick(frag, "setSpecialists");
 
   // ---- Summarizer-default card (#84) ----------------------------------------
   // Built ONCE — every control is interactive, so there is no renderRegion and
@@ -397,6 +461,33 @@ export function build(ctx) {
     }
     const n = j.default_override_counts?.summarizer || 0;
     sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";
+
+    // Advanced knobs: render the value IN FORCE on every poll, behind the seam's
+    // interaction hold (`deferIfInteractionInside` — skip the row the operator is
+    // in AND mark the tick-retry, so the held write lands on the next pass even
+    // once the poll starts 304ing). Not a one-shot seed — /api/state carries the
+    // RESOLVED value, so a save the server accepted but did not honour verbatim
+    // (the joint chunk/overlap clamp reduces an overlap the moment a small chunk
+    // lands) must correct the field, or the card shows a number the recorder
+    // isn't using and the operator's next save persists it.
+    for (const knob of knobs) {
+      const { field, input, row } = knob;
+      if (j[field] === undefined || deferIfInteractionInside(row)) continue;
+      if (input.value !== knob.baseline) continue; // typed, not saved — the operator's
+      const next = String(j[field]);
+      if (input.value !== next) input.value = next;
+      knob.baseline = next;
+    }
+    // Read-only and effectively frozen (the map is read from env once at import),
+    // so guard the write like the knob loop above does: a byte-identical string
+    // must not tear down and recreate the text node on every one of these ticks.
+    // Still recomputed per tick rather than seeded once — a tab left open across a
+    // restart with a different specialist map has to catch up.
+    const specialists = Object.entries(j.specialists || {});
+    const specialistsText = specialists.length
+      ? specialists.map(([lang, model]) => `${lang}: ${model}`).join(", ")
+      : "(none)";
+    if (specialistsEl.textContent !== specialistsText) specialistsEl.textContent = specialistsText;
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };

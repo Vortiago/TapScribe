@@ -21,6 +21,7 @@ import {
   statusTarget,
   cellStatus,
   runSaveWithStatus,
+  wireConfigSave,
   SAVED_BADGE_MS,
   SAVING,
   SAVED,
@@ -130,5 +131,54 @@ describe("runSaveWithStatus", () => {
     const cell = fakeCell();
     await runSaveWithStatus(cellStatus(cell), async () => {});
     assert.equal(cell.textContent, "saved");
+  });
+});
+
+describe("wireConfigSave", () => {
+  /** A stand-in for a save button: captures the one click listener wireSave adds. */
+  const fakeBtn = () => {
+    let handler = null;
+    return {
+      disabled: false,
+      addEventListener: (_type, fn) => { handler = fn; },
+      click: () => handler?.(),
+    };
+  };
+  /** A stand-in for <input type="number">: `badInput` is the typo signal. */
+  const fakeNumberInput = (value, badInput) => ({ value, validity: { badInput } });
+
+  afterEach(() => { delete globalThis.fetch; });
+
+  it("refuses a number-input typo instead of PUTting an empty clear", async () => {
+    // A browser number input coerces text it cannot parse to "", and "" is the
+    // DELIBERATE clear that hands a knob back to its default — so without this
+    // guard a typo silently resets the knob under a green "saved".
+    const cell = fakeCell();
+    const btn = fakeBtn();
+    let puts = 0;
+    globalThis.fetch = async () => { puts++; return new Response("{}"); };
+
+    wireConfigSave({ key: "parakeet-chunk-s", btn, textarea: fakeNumberInput("", true), status: cell });
+    await btn.click();
+
+    assert.equal(puts, 0, "nothing reaches the server");
+    assert.match(cell.textContent, /^failed: /, "the operator is told, not shown a green saved");
+    assert.equal(btn.disabled, false, "the button is re-enabled so they can fix it");
+  });
+
+  it("still allows the deliberate clear (empty value, not badInput)", async () => {
+    const cell = fakeCell();
+    const btn = fakeBtn();
+    let body = null;
+    globalThis.fetch = async (_url, opts) => {
+      body = JSON.parse(opts.body);
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    };
+
+    wireConfigSave({ key: "parakeet-chunk-s", btn, textarea: fakeNumberInput("", false), status: cell });
+    await btn.click();
+
+    assert.deepEqual(body, { content: "" }, "an empty value still clears the override");
+    assert.equal(cell.textContent, SAVED);
   });
 });

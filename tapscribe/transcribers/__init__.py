@@ -53,8 +53,13 @@ from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 from .. import config
-from .. import config_store as _config_store
 from ..config import _parse_bounded_ttl
+from ._chunked import (
+    ENV_CHUNK_S,
+    ENV_OVERLAP_S,
+    current_parakeet_chunk_s,
+    current_parakeet_overlap_s,
+)
 from .base import (
     BackendKind,
     BackendPreference,
@@ -68,7 +73,12 @@ from .base import (
 from .catalog import REGISTRY, TranscriberRegistry
 
 __all__ = [
+    # The parakeet chunk knobs live in the private `_chunked` base (shared by
+    # both adapters); re-exported here so the dashboard's readouts go through
+    # the package API rather than reaching past it.
+    "ENV_CHUNK_S",
     "ENV_IDLE_TTL_S",
+    "ENV_OVERLAP_S",
     "MODEL_THREAD_PREFIX",
     "BackendKind",
     "BackendPreference",
@@ -82,6 +92,8 @@ __all__ = [
     "Word",
     "clear_cache",
     "current_idle_ttl_s",
+    "current_parakeet_chunk_s",
+    "current_parakeet_overlap_s",
     "evict_idle_now",
     "lease_transcriber",
     "load_transcriber",
@@ -120,8 +132,8 @@ async def run_on_model_thread(func: Callable[..., _T], /, *args: Any, **kwargs: 
     return await loop.run_in_executor(_MODEL_EXECUTOR, functools.partial(func, *args, **kwargs))
 
 
-# Operator knob name, hoisted to a module constant so the (eventual)
-# dashboard wiring and any docs have one source of truth — same convention
+# Operator knob name, hoisted to a module constant so the dashboard wiring
+# (Settings → Advanced) and any docs have one source of truth — same convention
 # as the chunk-size knobs on the MLX adapters.
 ENV_IDLE_TTL_S = "TAPSCRIBE_MODEL_IDLE_TTL_S"
 _DEFAULT_IDLE_TTL_S = 0.0
@@ -168,7 +180,7 @@ def _idle_ttl_s() -> float:
         v = _parse_bounded_ttl(raw_env)
         if v is not None:
             return v
-    v = _parse_bounded_ttl(_config_store.read_text_file(config.MODEL_IDLE_TTL_FILE))
+    v = _parse_bounded_ttl(config.read_text_file(config.MODEL_IDLE_TTL_FILE))
     return v if v is not None else _DEFAULT_IDLE_TTL_S
 
 

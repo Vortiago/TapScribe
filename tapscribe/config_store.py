@@ -19,30 +19,19 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import config
+
+# Defined in the leaf `config` module (the knob resolver moved there to break the
+# config_store <-> summarizers.catalog import cycle); imported here because the
+# caching helpers below use it AND `text.py` re-exports it from this namespace.
+from .config import read_text_file
 
 # ---------------------------------------------------------------------------
 # Pure helpers — in config_store so it stays a leaf module (no back-reference
 # to text.py), and text.py can import from here without circular imports.
 # ---------------------------------------------------------------------------
-
-
-def read_text_file(path: Path) -> str:
-    """Read a small text config file. Returns "" on any failure so callers
-    can treat "missing" and "unreadable" identically.
-
-    UnicodeDecodeError is treated the same way: a config file written in
-    a non-UTF-8 encoding (e.g. Windows-1252 from Notepad) reads as empty
-    rather than raising into every transcribe job. The operator's file
-    is effectively "no rules" until they re-save it as UTF-8.
-    """
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return ""
-    except (OSError, UnicodeDecodeError):
-        return ""
 
 
 def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
@@ -65,6 +54,16 @@ def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
     if include_path:
         return (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
     return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+# ---------------------------------------------------------------------------
+# Use-time knob resolution — env var > dashboard config file > default
+# ---------------------------------------------------------------------------
+
+# Last set-but-invalid env value complained about, per knob name. The notice
+# below fires once per distinct bad value instead of on every resolve: these
+# resolvers run per transcribe/summarize AND behind the ~2 Hz /api/state poll,
+# where an unconditional print would bury the log it is meant to be visible in.
 
 
 # ---------------------------------------------------------------------------
@@ -166,17 +165,48 @@ def _check_batch_model(model_id: str) -> None:
             raise ValueError(f"unusable batch model id: {model_id!r} (no batch model by that name)")
 
 
-def _check_idle_ttl(content: str) -> None:
-    """WRITE-time check for the "model-idle-ttl" key: value must parse as a
-    finite number within config._IDLE_TTL_BOUNDS. Empty clears the override.
-    Reuses the read-time parser (config._parse_bounded_ttl) so write acceptance
-    and use-time resolution can't diverge on the same input; both parser and
-    bounds live in the leaf config module, so this stays a plain import."""
-    if not content:
-        return
-    if config._parse_bounded_ttl(content) is None:
-        lo, hi = config._IDLE_TTL_BOUNDS
-        raise ValueError(f"idle TTL must be a finite number between {lo} and {hi}, got {content!r}")
+def _bounded_check(
+    parse: Callable[[str], Any], bounds: tuple[float, float], noun: str, kind: str
+) -> Callable[[str], None]:
+    """Build the WRITE-time check for one bounded numeric knob: empty clears the
+    override, anything the knob's own READ-time parser rejects raises, so write
+    acceptance and use-time resolution stay one rule. Every bounded numeric knob
+    is built here — #347's `model-idle-ttl` included — so there is one body to
+    read and a new knob is one line.
+
+    `parse` and `bounds` bind HERE, at build time — unlike `_ConfigSpec.attr`,
+    which is a NAME resolved per call because tests repoint the config paths.
+    These two are module constants in the leaf config module that nothing
+    repoints, so early binding costs no testability."""
+
+    def check(content: str) -> None:
+        if not content:
+            return
+        if parse(content) is None:
+            lo, hi = bounds
+            raise ValueError(f"{noun} must be {kind} between {lo} and {hi}, got {content!r}")
+
+    return check
+
+
+_check_idle_ttl = _bounded_check(
+    config._parse_bounded_ttl, config._IDLE_TTL_BOUNDS, "idle TTL", "a finite number"
+)
+_check_parakeet_chunk = _bounded_check(
+    config._parse_parakeet_chunk, config._PARAKEET_CHUNK_S_BOUNDS, "parakeet chunk", "a finite number"
+)
+_check_parakeet_overlap = _bounded_check(
+    config._parse_parakeet_overlap, config._PARAKEET_OVERLAP_S_BOUNDS, "parakeet overlap", "a finite number"
+)
+_check_summarize_timeout = _bounded_check(
+    config._parse_summarize_timeout,
+    config._SUMMARIZE_TIMEOUT_S_BOUNDS,
+    "summarize timeout",
+    "a finite number",
+)
+_check_summarize_gguf_ctx = _bounded_check(
+    config._parse_summarize_gguf_ctx, config._SUMMARIZE_GGUF_CTX_BOUNDS, "summarize gguf ctx", "an integer"
+)
 
 
 # The editable config files behind read_config / write_config, keyed by the
@@ -212,6 +242,16 @@ CONFIG_KEYS: dict[str, _ConfigSpec] = {
     # eviction. Dashboard writes via config-store; _idle_ttl_s() reads at
     # use-time when env var is unset.
     "model-idle-ttl": _ConfigSpec("MODEL_IDLE_TTL_FILE", strip=True, check=_check_idle_ttl),
+    # Parakeet chunk duration (parakeet-chunk-s.txt): window length in seconds.
+    "parakeet-chunk-s": _ConfigSpec("PARAKEET_CHUNK_S_FILE", strip=True, check=_check_parakeet_chunk),
+    # Parakeet overlap duration (parakeet-overlap-s.txt): overlap between windows.
+    "parakeet-overlap-s": _ConfigSpec("PARAKEET_OVERLAP_S_FILE", strip=True, check=_check_parakeet_overlap),
+    # Summarize timeout (summarize-timeout-s.txt): per-summarize subprocess timeout.
+    "summarize-timeout-s": _ConfigSpec(
+        "SUMMARIZE_TIMEOUT_S_FILE", strip=True, check=_check_summarize_timeout
+    ),
+    # Summarize GGUF context window (summarize-gguf-ctx.txt): integer n_ctx.
+    "summarize-gguf-ctx": _ConfigSpec("SUMMARIZE_GGUF_CTX_FILE", strip=True, check=_check_summarize_gguf_ctx),
 }
 
 # A candidate-language set is a small comma/space-separated bag of ISO codes.
