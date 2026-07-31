@@ -20,7 +20,7 @@
 // config-card (also renderRegion-backed) + the engine selector (rebuilt on
 // change).
 
-import { tpl, pick, renderRegion } from "../../templates.js";
+import { tpl, pick, renderRegion, deferIfInteractionInside } from "../../templates.js";
 import { getJson, putJson, errText, getBridgeCatalog } from "../../api.js";
 import { wireConfigSave, wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
@@ -215,8 +215,9 @@ export function build(ctx) {
    * @param {HTMLElement} status
    */
   const knobRow = (key, field, input, btn, status) => {
-    // Two holds, both needed. The ROW (input + its save button) covers focus, so
-    // a repaint can't land between the click and the PUT reading `input.value`.
+    // Two holds, both needed. The ROW (input + its save button) is the seam's
+    // interaction-hold host, so a repaint can't land between the click and the
+    // PUT reading `input.value`.
     // `baseline` — the last value the poll or a successful save put in the box —
     // covers the rest: it tells "untouched since we wrote it" from "typed but
     // not saved yet", so filling two knobs and saving one can't have the poll
@@ -461,24 +462,32 @@ export function build(ctx) {
     const n = j.default_override_counts?.summarizer || 0;
     sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";
 
-    // Advanced knobs: render the value IN FORCE on every poll, behind the usual
-    // interaction hold (skip the row the operator is in). Not a one-shot seed —
-    // /api/state carries the RESOLVED value, so a save the server accepted but
-    // did not honour verbatim (the joint chunk/overlap clamp reduces an overlap
-    // the moment a small chunk lands) must correct the field, or the card shows
-    // a number the recorder isn't using and the operator's next save persists it.
+    // Advanced knobs: render the value IN FORCE on every poll, behind the seam's
+    // interaction hold (`deferIfInteractionInside` — skip the row the operator is
+    // in AND mark the tick-retry, so the held write lands on the next pass even
+    // once the poll starts 304ing). Not a one-shot seed — /api/state carries the
+    // RESOLVED value, so a save the server accepted but did not honour verbatim
+    // (the joint chunk/overlap clamp reduces an overlap the moment a small chunk
+    // lands) must correct the field, or the card shows a number the recorder
+    // isn't using and the operator's next save persists it.
     for (const knob of knobs) {
       const { field, input, row } = knob;
-      if (j[field] === undefined || row.contains(document.activeElement)) continue;
+      if (j[field] === undefined || deferIfInteractionInside(row)) continue;
       if (input.value !== knob.baseline) continue; // typed, not saved — the operator's
       const next = String(j[field]);
       if (input.value !== next) input.value = next;
       knob.baseline = next;
     }
+    // Read-only and effectively frozen (the map is read from env once at import),
+    // so guard the write like the knob loop above does: a byte-identical string
+    // must not tear down and recreate the text node on every one of these ticks.
+    // Still recomputed per tick rather than seeded once — a tab left open across a
+    // restart with a different specialist map has to catch up.
     const specialists = Object.entries(j.specialists || {});
-    specialistsEl.textContent = specialists.length
+    const specialistsText = specialists.length
       ? specialists.map(([lang, model]) => `${lang}: ${model}`).join(", ")
       : "(none)";
+    if (specialistsEl.textContent !== specialistsText) specialistsEl.textContent = specialistsText;
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };

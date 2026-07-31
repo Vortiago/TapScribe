@@ -213,27 +213,14 @@ def _check_batch_model(model_id: str) -> None:
             raise ValueError(f"unusable batch model id: {model_id!r} (no batch model by that name)")
 
 
-def _check_idle_ttl(content: str) -> None:
-    """WRITE-time check for the "model-idle-ttl" key: value must parse as a
-    finite number within config._IDLE_TTL_BOUNDS. Empty clears the override.
-    Reuses the read-time parser (config._parse_bounded_ttl) so write acceptance
-    and use-time resolution can't diverge on the same input; both parser and
-    bounds live in the leaf config module, so this stays a plain import."""
-    if not content:
-        return
-    if config._parse_bounded_ttl(content) is None:
-        lo, hi = config._IDLE_TTL_BOUNDS
-        raise ValueError(f"idle TTL must be a finite number between {lo} and {hi}, got {content!r}")
-
-
 def _bounded_check(
     parse: Callable[[str], Any], bounds: tuple[float, float], noun: str, kind: str
 ) -> Callable[[str], None]:
-    """Build the WRITE-time check for one bounded numeric knob (#210's four):
-    empty clears the override, anything the knob's own READ-time parser rejects
-    raises, so write acceptance and use-time resolution stay one rule. One
-    factory instead of a validator per knob; `_check_idle_ttl` above predates it
-    and keeps its own body — #347's knob is out of this slice.
+    """Build the WRITE-time check for one bounded numeric knob: empty clears the
+    override, anything the knob's own READ-time parser rejects raises, so write
+    acceptance and use-time resolution stay one rule. Every bounded numeric knob
+    is built here — #347's `model-idle-ttl` included — so there is one body to
+    read and a new knob is one line.
 
     `parse` and `bounds` bind HERE, at build time — unlike `_ConfigSpec.attr`,
     which is a NAME resolved per call because tests repoint the config paths.
@@ -250,6 +237,9 @@ def _bounded_check(
     return check
 
 
+_check_idle_ttl = _bounded_check(
+    config._parse_bounded_ttl, config._IDLE_TTL_BOUNDS, "idle TTL", "a finite number"
+)
 _check_parakeet_chunk = _bounded_check(
     config._parse_parakeet_chunk, config._PARAKEET_CHUNK_S_BOUNDS, "parakeet chunk", "a finite number"
 )

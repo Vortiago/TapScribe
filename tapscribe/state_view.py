@@ -82,12 +82,17 @@ _KNOB_SOURCES: tuple[tuple[str, str], ...] = (
     ("SUMMARIZE_TIMEOUT_S_FILE", ENV_TIMEOUT_S),
     ("SUMMARIZE_GGUF_CTX_FILE", ENV_GGUF_CTX),
 )
-_knob_memo: tuple[tuple, dict[str, float | int]] | None = None
+# Same single-(key, value)-slot shape as hallucinations._RULES_CACHE /
+# people._PEOPLE_CACHE / config_store._CONFIG_TEXT_CACHE: a mutated dict rather
+# than a rebound global, so the pair is published in ONE assignment and read in
+# ONE lookup. This payload is built on a to_thread worker per connected client,
+# and a rebound global read twice could hand back values belonging to a key the
+# reader never saw.
+_KNOB_CACHE: dict[str, tuple[tuple, dict[str, float | int]]] = {}
 
 
 def _knob_values() -> dict[str, float | int]:
     """The four operator knobs as the dashboard renders them, memoised per tick."""
-    global _knob_memo
     # The file attr is resolved at call time (tests repoint the config paths),
     # and the signature carries the path so a repointed file can't hit a stale
     # entry from the previous one.
@@ -95,8 +100,9 @@ def _knob_values() -> dict[str, float | int]:
         (file_stat_sig(getattr(config, attr), include_path=True), os.environ.get(env))
         for attr, env in _KNOB_SOURCES
     )
-    if _knob_memo is not None and _knob_memo[0] == key:
-        return _knob_memo[1]
+    hit = _KNOB_CACHE.get("_slot")
+    if hit is not None and hit[0] == key:
+        return hit[1]
     values: dict[str, float | int] = {
         "parakeet_chunk_s": current_parakeet_chunk_s(),
         # The overlap IN FORCE — `current_parakeet_overlap_s` applies the joint
@@ -106,7 +112,7 @@ def _knob_values() -> dict[str, float | int]:
         "summarize_timeout_s": current_summarize_timeout_s(),
         "summarize_gguf_ctx": default_gguf_ctx(),
     }
-    _knob_memo = (key, values)
+    _KNOB_CACHE["_slot"] = (key, values)
     return values
 
 

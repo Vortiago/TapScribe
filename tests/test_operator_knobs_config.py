@@ -43,11 +43,11 @@ it be VISIBLE ("visibility beats editability here"), so it is surfaced read-only
 from __future__ import annotations
 
 import math
-import wave
 from pathlib import Path
 
 import pytest
 from conftest import repoint_config_files  # type: ignore[import-not-found]  # tests/ on sys.path
+from wav_builders import seed_wav  # type: ignore[import-not-found]  # tests/ on sys.path
 
 from tapscribe import config_store
 from tapscribe.config_store import read_config, write_config
@@ -505,22 +505,16 @@ class _StubChunked(ChunkedTranscriber):
         return ()
 
 
-def _silent_wav(path: Path, *, seconds: float = 0.2) -> Path:
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x00" * int(16000 * seconds))
-    return path
-
-
 def test_a_cached_adapter_rereads_the_knobs_on_its_next_transcribe(cfg: Path, tmp_path: Path) -> None:
     t = _StubChunked(model_name="parakeet-tdt-0.6b-v2")
     assert t.chunk_duration_s == 120.0
 
     _write_knob_file(cfg, "parakeet-chunk-s.txt", 30)
     _write_knob_file(cfg, "parakeet-overlap-s.txt", 5)
-    result = t.transcribe(_silent_wav(tmp_path / "a.wav"))
+    # Short and silent: the stub never looks at the PCM, only the window walk runs.
+    # `wav_builders` owns the recorder format, so a RECORDER_SAMPLE_RATE change
+    # can't leave this fixture behind.
+    result = t.transcribe(seed_wav(tmp_path / "a.wav", amplitude=0, seconds=0.2))
 
     assert (t.chunk_duration_s, t.overlap_duration_s) == (30.0, 5.0), (
         "a dashboard save must reach the adapter the model cache is holding warm, "
@@ -534,7 +528,7 @@ def test_an_explicit_constructor_arg_survives_the_reread(cfg: Path, tmp_path: Pa
     # override — that top rung is pinned above and outranks BOTH value sources.
     t = _StubChunked(model_name="parakeet-tdt-0.6b-v2", chunk_duration_s=45.0, overlap_duration_s=5.0)
     _write_knob_file(cfg, "parakeet-chunk-s.txt", 30)
-    t.transcribe(_silent_wav(tmp_path / "b.wav"))
+    t.transcribe(seed_wav(tmp_path / "b.wav", amplitude=0, seconds=0.2))
     assert (t.chunk_duration_s, t.overlap_duration_s) == (45.0, 5.0)
 
 

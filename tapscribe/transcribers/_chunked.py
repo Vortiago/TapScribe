@@ -88,19 +88,20 @@ def current_parakeet_overlap_s() -> float:
     silently reduces a 15 s overlap to 9 s), and the clamp's own notice goes to
     the server log nobody is watching. Silent here on purpose — this is the
     ~2 Hz display read; the adapter path keeps the loud `clamp_overlap`."""
-    return clamped_overlap(_resolve_chunk_s(), _resolve_overlap_s())
+    return min(_resolve_overlap_s(), overlap_limit_for(_resolve_chunk_s()))
 
 
-def clamped_overlap(chunk_s: float, overlap_s: float) -> float:
-    """The overlap `chunk_windows` will accept for `chunk_s` — pure, no notice.
-    The rule itself, shared by the loud `clamp_overlap` (adapter path) and the
-    silent /api/state read above."""
-    return min(overlap_s, chunk_s * MAX_OVERLAP_FRACTION)
+def overlap_limit_for(chunk_s: float) -> float:
+    """The largest overlap `chunk_windows` will accept for `chunk_s`. One spelling
+    of the bound, shared by the loud `clamp_overlap` (adapter path) and the silent
+    /api/state read above."""
+    return chunk_s * MAX_OVERLAP_FRACTION
 
 
 def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
-    """`clamped_overlap`, printing a one-line "ignoring …; using …" notice — the
-    shape the knob parsers use for a rejected value — when it has to reduce one.
+    """Return an overlap `chunk_windows` will accept for `chunk_s`, printing a
+    one-line "ignoring …; using …" notice — the shape the knob parsers use for a
+    rejected value — when it has to reduce one.
 
     The joint constraint can't live in a per-knob parser, which validates each
     knob on its own. Degrading LOUDLY at construction keeps the documented
@@ -110,7 +111,7 @@ def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
     dies with a `ValueError` that isn't a domain error — a bare 500 per
     request, and an aborted job in `transcribe_session`.
     """
-    limit = clamped_overlap(chunk_s, overlap_s)
+    limit = overlap_limit_for(chunk_s)
     if overlap_s <= limit:
         return overlap_s
     print(
@@ -186,14 +187,15 @@ class ChunkedTranscriber:
         # per transcribe.
         self._chunk_override = chunk_duration_s
         self._overlap_override = overlap_duration_s
-        self.chunk_duration_s = chunk_duration_s if chunk_duration_s is not None else _resolve_chunk_s()
-        self._resolved_overlap = (
-            overlap_duration_s if overlap_duration_s is not None else _resolve_overlap_s()
-        )
-        # Joint constraint — see `clamp_overlap`. Resolved HERE, at
-        # construction, so a bad pair degrades once and loudly instead of
-        # raising inside `chunk_windows` on every WAV.
-        self.overlap_duration_s = clamp_overlap(self.chunk_duration_s, self._resolved_overlap)
+        # The construction snapshot IS the first re-read, so the override rule and
+        # the joint clamp are written once. The None seeds can't match the
+        # "unchanged" short-circuit, so this always resolves — and `clamp_overlap`
+        # still degrades a bad pair once and loudly, here at construction, instead
+        # of raising inside `chunk_windows` on every WAV.
+        self.chunk_duration_s = None
+        self._resolved_overlap = None
+        self.overlap_duration_s = None
+        self._refresh_tuning()
 
     def _refresh_tuning(self) -> None:
         """Re-read the operator knobs before a transcribe.
