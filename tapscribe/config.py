@@ -74,7 +74,7 @@ MODEL_IDLE_TTL_FILE: Path = CONFIG_DIR / "model-idle-ttl.txt"
 
 # The idle-TTL knob's four siblings (#210), same shape: the dashboard writes the
 # file via config-store, the use-time resolver reads it under the matching env
-# var (`config_store.resolve_knob`).
+# var (`resolve_knob`).
 PARAKEET_CHUNK_S_FILE: Path = CONFIG_DIR / "parakeet-chunk-s.txt"
 PARAKEET_OVERLAP_S_FILE: Path = CONFIG_DIR / "parakeet-overlap-s.txt"
 SUMMARIZE_TIMEOUT_S_FILE: Path = CONFIG_DIR / "summarize-timeout-s.txt"
@@ -274,7 +274,7 @@ def _parse_bounded_knob(raw: str, lo: float, hi: float, *, cast: Callable[[str],
     non-finite (NaN/inf), or outside `[lo, hi]` — the shape every operator knob
     wants: a bad value is not fatal, it just isn't an override. The single
     source of truth shared by the config-store validators (write-time) and the
-    use-time resolvers (`config_store.resolve_knob`), so write acceptance and
+    use-time resolvers (`resolve_knob`), so write acceptance and
     resolution can never diverge on the same input. Returns `cast`'s type.
 
     The explicit `isfinite` makes the NaN/inf reject intent unmistakable —
@@ -322,3 +322,68 @@ def _parse_summarize_timeout(raw: str) -> float | None:
 
 def _parse_summarize_gguf_ctx(raw: str) -> int | None:
     return _parse_bounded_knob(raw, *_SUMMARIZE_GGUF_CTX_BOUNDS, cast=int)
+
+
+# ---------------------------------------------------------------------------
+# Operator-knob resolution (use-time). Lives HERE, in the leaf, next to the
+# bounds and parsers it belongs to: every knob consumer (transcribers/_chunked,
+# summarizers/catalog, summarizers/command) needs it, and `config_store` imports
+# summarizers.catalog back for its validators — so hosting the resolver there
+# made those consumers close a real import cycle (CodeQL py/cyclic-import).
+# `config_store` re-exports both names, so its public surface is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def read_text_file(path: Path) -> str:
+    """Read a small text config file. Returns "" on any failure so callers
+    can treat "missing" and "unreadable" identically.
+
+    UnicodeDecodeError is treated the same way: a config file written in
+    a non-UTF-8 encoding (e.g. Windows-1252 from Notepad) reads as empty
+    rather than raising into every transcribe job. The operator's file
+    is effectively "no rules" until they re-save it as UTF-8.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+_WARNED_ENV: dict[str, str] = {}
+
+
+def resolve_knob(env_name: str, file_path: Path, parse: Callable[[str], Any], default: Any) -> Any:
+    """Resolve one operator-tunable knob: a set-AND-VALID env var wins, else the
+    dashboard-written config file, else `default`.
+
+    "set AND valid" is the load-bearing half. A set-but-INVALID env var — empty
+    (a systemd `EnvironmentFile` leaving `TAPSCRIBE_…=`), non-numeric, or out of
+    bounds — is not a real override and falls through to the file exactly like
+    an unset one; keying the env branch on mere presence would silently discard
+    what the operator chose in the dashboard. It is still an operator MISTAKE,
+    so it prints the same one-line `[tapscribe] ignoring …` notice `env_float`
+    emits — the resolvers replaced that helper, and losing its notice would make
+    a typo'd env var invisible.
+
+    The file is read FRESH (uncached) at use-time: a dashboard edit must apply
+    without a restart, and the stat-signature cache behind `read_config` would
+    miss a same-size in-place rewrite ("300" -> "120") landing inside one
+    coarse-mtime tick, stranding the old value at the consumer.
+    """
+    raw_env = os.environ.get(env_name)
+    if raw_env:
+        v = parse(raw_env)
+        if v is not None:
+            _WARNED_ENV.pop(env_name, None)
+            return v
+        if _WARNED_ENV.get(env_name) != raw_env:
+            _WARNED_ENV[env_name] = raw_env
+            print(
+                f"[tapscribe] ignoring {env_name}={raw_env!r} (unparseable or out of bounds); "
+                "using the config file / default",
+                flush=True,
+            )
+    v = parse(read_text_file(file_path))
+    return v if v is not None else default

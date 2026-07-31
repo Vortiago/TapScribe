@@ -31,7 +31,6 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from .. import config
-from .. import config_store as _config_store
 from .base import SummarizerFailed, SummarizerUnavailable, SummaryResult, fold_hint
 
 # Operator knob for the per-summarize subprocess timeout, hoisted to a module
@@ -45,7 +44,7 @@ def _default_timeout_s() -> float:
     """Current per-summarize subprocess timeout (seconds), resolved
     env > config file > default and re-read per summarize, so an operator can
     retune it from the dashboard without a restart."""
-    return _config_store.resolve_knob(
+    return config.resolve_knob(
         ENV_TIMEOUT_S,
         config.SUMMARIZE_TIMEOUT_S_FILE,
         config._parse_summarize_timeout,

@@ -53,7 +53,6 @@ from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 from .. import config
-from .. import config_store as _config_store
 from ..config import _parse_bounded_ttl
 from ._chunked import (
     ENV_CHUNK_S,
@@ -181,7 +180,7 @@ def _idle_ttl_s() -> float:
         v = _parse_bounded_ttl(raw_env)
         if v is not None:
             return v
-    v = _parse_bounded_ttl(_config_store.read_text_file(config.MODEL_IDLE_TTL_FILE))
+    v = _parse_bounded_ttl(config.read_text_file(config.MODEL_IDLE_TTL_FILE))
     return v if v is not None else _DEFAULT_IDLE_TTL_S
 
 

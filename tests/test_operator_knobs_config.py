@@ -49,7 +49,7 @@ import pytest
 from conftest import repoint_config_files  # type: ignore[import-not-found]  # tests/ on sys.path
 from wav_builders import seed_wav  # type: ignore[import-not-found]  # tests/ on sys.path
 
-from tapscribe import config_store
+from tapscribe import config
 from tapscribe.config_store import read_config, write_config
 from tapscribe.summarizers.catalog import default_gguf_ctx
 from tapscribe.summarizers.command import _default_timeout_s
@@ -450,7 +450,7 @@ def test_invalid_env_is_reported_to_the_operator(
     # The notice is emitted once per distinct bad value (the resolvers run per
     # summarize/transcribe AND behind the ~2 Hz /api/state poll), so clear the
     # registry first — otherwise this pin would depend on test ORDER.
-    monkeypatch.setattr(config_store, "_WARNED_ENV", {})
+    monkeypatch.setattr(config, "_WARNED_ENV", {})
     _write_knob_file(cfg, filename, sample)
     monkeypatch.setenv(env, bad_env)
 
@@ -479,7 +479,7 @@ def test_a_valid_env_is_not_reported(
 ) -> None:
     # The mirror: the notice must mark a MISTAKE, not narrate every resolve — a
     # per-poll line for a perfectly good env var would bury the one that matters.
-    monkeypatch.setattr(config_store, "_WARNED_ENV", {})
+    monkeypatch.setattr(config, "_WARNED_ENV", {})
     monkeypatch.setenv(env, str(sample))
     assert resolve() == sample
     assert "ignoring" not in capsys.readouterr().out

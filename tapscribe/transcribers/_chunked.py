@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
-from .. import config_store as _config_store
 from ..audio import RECORDER_SAMPLE_RATE
 from ..chunking import Window, chunk_windows
 from ..wav_predecode import load_recorder_wav_as_pcm
@@ -37,7 +36,7 @@ from .base import TranscriptionResult, TranscriptionSegment, build_transcription
 # dashboard wiring and the docs have one source of truth. Resolution is
 # env > config file > default (`_resolve_chunk_s`); an out-of-range value on
 # either rung falls through to the next, and a bad env var is logged once by
-# `config_store.resolve_knob`.
+# `config.resolve_knob`.
 _DEFAULT_CHUNK_DURATION_S = 120.0
 _DEFAULT_OVERLAP_DURATION_S = 15.0
 
@@ -57,7 +56,7 @@ MAX_OVERLAP_FRACTION = 0.9
 
 def _resolve_chunk_s() -> float:
     """Current parakeet chunk duration (seconds), resolved env > config file > default."""
-    return _config_store.resolve_knob(
+    return config.resolve_knob(
         ENV_CHUNK_S,
         config.PARAKEET_CHUNK_S_FILE,
         config._parse_parakeet_chunk,
@@ -67,7 +66,7 @@ def _resolve_chunk_s() -> float:
 
 def _resolve_overlap_s() -> float:
     """Current parakeet overlap duration (seconds), resolved env > config file > default."""
-    return _config_store.resolve_knob(
+    return config.resolve_knob(
         ENV_OVERLAP_S,
         config.PARAKEET_OVERLAP_S_FILE,
         config._parse_parakeet_overlap,

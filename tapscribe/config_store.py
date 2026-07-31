@@ -23,27 +23,15 @@ from typing import Any
 
 from . import config
 
+# Defined in the leaf `config` module (the knob resolver moved there to break the
+# config_store <-> summarizers.catalog import cycle); imported here because the
+# caching helpers below use it AND `text.py` re-exports it from this namespace.
+from .config import read_text_file
+
 # ---------------------------------------------------------------------------
 # Pure helpers — in config_store so it stays a leaf module (no back-reference
 # to text.py), and text.py can import from here without circular imports.
 # ---------------------------------------------------------------------------
-
-
-def read_text_file(path: Path) -> str:
-    """Read a small text config file. Returns "" on any failure so callers
-    can treat "missing" and "unreadable" identically.
-
-    UnicodeDecodeError is treated the same way: a config file written in
-    a non-UTF-8 encoding (e.g. Windows-1252 from Notepad) reads as empty
-    rather than raising into every transcribe job. The operator's file
-    is effectively "no rules" until they re-save it as UTF-8.
-    """
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return ""
-    except (OSError, UnicodeDecodeError):
-        return ""
 
 
 def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
@@ -76,42 +64,6 @@ def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
 # below fires once per distinct bad value instead of on every resolve: these
 # resolvers run per transcribe/summarize AND behind the ~2 Hz /api/state poll,
 # where an unconditional print would bury the log it is meant to be visible in.
-_WARNED_ENV: dict[str, str] = {}
-
-
-def resolve_knob(env_name: str, file_path: Path, parse: Callable[[str], Any], default: Any) -> Any:
-    """Resolve one operator-tunable knob: a set-AND-VALID env var wins, else the
-    dashboard-written config file, else `default`.
-
-    "set AND valid" is the load-bearing half. A set-but-INVALID env var — empty
-    (a systemd `EnvironmentFile` leaving `TAPSCRIBE_…=`), non-numeric, or out of
-    bounds — is not a real override and falls through to the file exactly like
-    an unset one; keying the env branch on mere presence would silently discard
-    what the operator chose in the dashboard. It is still an operator MISTAKE,
-    so it prints the same one-line `[tapscribe] ignoring …` notice `env_float`
-    emits — the resolvers replaced that helper, and losing its notice would make
-    a typo'd env var invisible.
-
-    The file is read FRESH (uncached) at use-time: a dashboard edit must apply
-    without a restart, and the stat-signature cache behind `read_config` would
-    miss a same-size in-place rewrite ("300" -> "120") landing inside one
-    coarse-mtime tick, stranding the old value at the consumer.
-    """
-    raw_env = os.environ.get(env_name)
-    if raw_env:
-        v = parse(raw_env)
-        if v is not None:
-            _WARNED_ENV.pop(env_name, None)
-            return v
-        if _WARNED_ENV.get(env_name) != raw_env:
-            _WARNED_ENV[env_name] = raw_env
-            print(
-                f"[tapscribe] ignoring {env_name}={raw_env!r} (unparseable or out of bounds); "
-                "using the config file / default",
-                flush=True,
-            )
-    v = parse(read_text_file(file_path))
-    return v if v is not None else default
 
 
 # ---------------------------------------------------------------------------

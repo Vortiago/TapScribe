@@ -334,14 +334,7 @@ def default_gguf_ctx() -> int:
     re-read per call, so a dashboard change applies to the next summarize
     without a restart (see `default_max_tokens`). The ONE public accessor for
     this knob — `/api/state` renders it and `local.py` loads llama.cpp with it."""
-    # Imported HERE, not at module scope: `config_store` imports this module back
-    # (its summarizer validators need MAX_TOKENS_BOUNDS et al), so a module-level
-    # import closes a real cycle — CodeQL flagged exactly that. Deferring is the
-    # convention config_store already uses for the same pair in the other
-    # direction; the leaf `config` module stays a plain import either way.
-    from .. import config_store as _config_store
-
-    return _config_store.resolve_knob(
+    return config.resolve_knob(
         ENV_GGUF_CTX,
         config.SUMMARIZE_GGUF_CTX_FILE,
         config._parse_summarize_gguf_ctx,
