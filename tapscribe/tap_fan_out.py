@@ -25,7 +25,7 @@ from uuid import uuid4
 from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
 from .recorder import ActiveStream, Recorder, UtteranceRecord
-from .session_maintenance import tap_open_guard
+from .session_maintenance import mark_session_in_flight, release_session_mark
 from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 from .wav_append import open_recorder_wav_append
@@ -133,10 +133,13 @@ class TapFanOut:
         # Frames accumulated since the last update_bytes flush — see
         # STREAM_FLUSH_EVERY_FRAMES for why the flush is throttled.
         self._frames_since_flush: int = 0
-        # Holds the in-flight prune guard context manager. Entered in _open before
-        # mkdir, exited in _close (sync-first, before anything that can raise).
-        # Idempotent: exiting an already-exited guard is a no-op.
-        self._prune_guard: tap_open_guard | None = None
+        # Session dirname marked in-flight against prune — taken in _open before
+        # the mkdir, released in _close (sync-first) and nulled, so a second
+        # _close can't double-decrement a concurrent tap's mark. None on the
+        # resume / record-off / probe paths, which take no mark. Importing the
+        # operator-ops module from this hot path is a known layering wart; a
+        # neutral leaf module for the mark is tracked in #405.
+        self._prune_mark: str | None = None
 
     @classmethod
     async def open(
@@ -315,14 +318,11 @@ class TapFanOut:
                 short_id = safe_name(self._identity)[:10]
                 fname = build_recorder_wav_name(started_at, self._filename_name, short_id)
                 session_dir = self._session_dir
-                # Mark the session in-flight before mkdir — a concurrent
-                # prune_empty_sessions deletes empty dirs, and the window
-                # between mkdir and the first WAV open is exactly that:
-                # an empty folder that will be written to moments later.
-                # Using session_dir.name for both take and release so the
-                # key is the directory the mkdir actually creates.
-                self._prune_guard = tap_open_guard(session_dir.name)
-                self._prune_guard.__enter__()
+                # Mark the session in-flight BEFORE the mkdir: from there until
+                # the first WAV open the folder exists and is empty, which is
+                # exactly what prune_empty_sessions deletes.
+                self._prune_mark = session_dir.name
+                mark_session_in_flight(self._prune_mark)
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname
                 record = UtteranceRecord(
@@ -462,15 +462,13 @@ class TapFanOut:
         )
 
     async def _close(self) -> None:
-        # Sync cleanup first: these must run even if the surrounding task
-        # is being cancelled (TestClient does that on WS exit). Async
-        # awaits below may raise CancelledError and skip remaining work.
-        # Release the in-flight prune guard before anything that can
-        # raise — it's pure in-memory bookkeeping and idempotent (a
-        # second _close won't double-decrement a concurrent tap's mark).
-        if self._prune_guard is not None:
-            self._prune_guard.__exit__(None, None, None)
-            self._prune_guard = None
+        # Sync cleanup first: these must run even if the surrounding task is
+        # being cancelled (TestClient does that on WS exit). Async awaits below
+        # may raise CancelledError and skip remaining work — so the in-flight
+        # prune mark, pure in-memory bookkeeping, is dropped first of all.
+        if self._prune_mark is not None:
+            release_session_mark(self._prune_mark)
+            self._prune_mark = None
         kept = self._bytes_received > 0
         # Finalize the WAV handle only if it was actually opened.
         if self._wf is not None and self._record is not None:

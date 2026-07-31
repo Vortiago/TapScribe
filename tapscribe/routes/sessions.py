@@ -79,7 +79,10 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
 @router.post("/api/sessions/prune-empty")
 async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     """Delete every session folder that has zero WAVs, no merged
-    transcript, and no operator-set label. Skips the CURRENT session."""
+    transcript, and no operator-set label. Skips the CURRENT session and any
+    session with a live tap materialising its folder."""
+    # Synchronous on purpose, NOT `asyncio.to_thread` like this module's other
+    # destructive walks — `prune_empty_sessions` owns that requirement.
     result = prune_empty_sessions(recorder.session_start)
     print(f"[tapscribe] pruned {result['count']} empty sessions", flush=True)
     return {"ok": True, **result}

@@ -56,7 +56,7 @@ from pathlib import Path
 import pytest
 from conftest import build_tap_recorder  # type: ignore[import-not-found]  # tests/ on sys.path
 
-from tapscribe import roster, tap_fan_out
+from tapscribe import roster, session_maintenance, tap_fan_out
 from tapscribe.recorder import Recorder
 from tapscribe.routes.tap import _rotate_and_prune
 from tapscribe.session_maintenance import prune_empty_sessions
@@ -64,11 +64,30 @@ from tapscribe.tap_fan_out import PROBE_IDENTITY, TapFanOut
 
 PCM_FRAME = b"\x10\x00" * 320  # 20 ms @ 16 kHz mono int16
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 # A current-session name that is never seeded, so the tap's own session is always a
 # prune CANDIDATE. `rotate_session` is idempotent while the current session is
 # untouched, so rotating would leave the empty session still current — and still
 # skipped — which would make every leak pin below vacuously green.
 _OTHER_CURRENT = "current-session-not-seeded"
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_in_flight_marks():
+    """SUPERSET leak pin: the in-flight registry must be EMPTY after every test.
+
+    The per-case pins below each check one enumerated `_open` exit; a mark leaked
+    anywhere else — or in a test that never prunes that session — is invisible to
+    them. The registry is a process-global dict that nothing resets, and recorder
+    session ids are second-resolution (`%Y-%m-%dT%H-%M-%SZ`), so two tests landing
+    in the same second share a key and one stray entry silently perturbs a later
+    prune assertion. Clear on the way out so a single leak fails ONE test instead
+    of cascading through the module."""
+    yield
+    leaked = dict(session_maintenance._tap_open_sessions)
+    session_maintenance._tap_open_sessions.clear()
+    assert leaked == {}, f"an in-flight tap mark leaked out of the test: {leaked}"
 
 
 @pytest.fixture
@@ -101,6 +120,21 @@ class _FakeRelay:
 
     async def feed(self, buf):  # pragma: no cover — not reached in these tests
         raise AssertionError("feed() is not exercised by the prune-race contract")
+
+
+class _NoFileWav:
+    """A `wave` writer stand-in that materialises NO file on disk.
+
+    Only the concurrent-taps test uses it: with a real WAV on disk the session is
+    non-empty and prune skips it for a reason unrelated to the mark, which would
+    make the refcount assertion vacuous. `_close` unlinks the (absent) path under
+    `suppress(OSError)`, so leaving no file behind is safe."""
+
+    def writeframes(self, data: bytes) -> None:  # pragma: no cover — no frames written
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 def _sessions_on_disk(recorder: Recorder) -> list[str]:
@@ -344,4 +378,96 @@ async def test_the_probe_identity_leaves_no_mark(recorder: Recorder):
     session = recorder.session_start
     assert session in _pruned(prune_empty_sessions(_OTHER_CURRENT)), (
         "a __probe__ tap left an in-flight mark behind — the probe must leave no durable state"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CONCURRENCY — the mark is shared, so one tap's close must not speak for another.
+# ---------------------------------------------------------------------------
+
+
+async def test_two_taps_in_one_session_prune_only_after_the_last_one_closes(
+    recorder: Recorder, monkeypatch: pytest.MonkeyPatch
+):
+    """Closing ONE of two concurrent taps into the same session must not un-mark
+    it; the mark drops only when the last one closes.
+
+    Distinct `utterance_id`s on purpose: a shared id sends the second tap down
+    `try_resume`, which appends to the existing WAV and takes no mark at all —
+    the second tap would never contribute a count to drop.
+
+    `open_recorder_wav` is stubbed to materialise NO file so the directory stays a
+    genuine prune candidate throughout. With real WAVs on disk the session reads
+    as non-empty and prune skips it for a reason that has nothing to do with the
+    mark — which is exactly how this test would go quietly vacuous."""
+    monkeypatch.setattr(tap_fan_out, "open_recorder_wav", lambda fpath: _NoFileWav())
+    session = recorder.session_start
+    session_dir = recorder.session_dir
+
+    async with await _open_tap(recorder, utterance_id="utt-b", identity="bob", name="Bob"):
+        async with await _open_tap(recorder, utterance_id="utt-a"):
+            assert session_dir.exists(), "neither tap materialised the session folder"
+        # First tap closed; the second is still open inside its own window.
+        assert not any(session_dir.glob("*.wav")), (
+            "the WAV stub leaked a file — the directory is no longer a prune "
+            "candidate and the assertion below would pass without any mark"
+        )
+        assert session not in _pruned(prune_empty_sessions(_OTHER_CURRENT)), (
+            "closing one of two concurrent taps dropped the whole session's mark — "
+            "the still-open tap's directory was pruned out from under it"
+        )
+        assert session_dir.exists()
+
+    assert session in _pruned(prune_empty_sessions(_OTHER_CURRENT)), (
+        "the session stayed un-prunable after the LAST tap closed — the mark never "
+        "reached zero, so the directory is un-prunable for the process lifetime"
+    )
+    assert session not in _sessions_on_disk(recorder)
+
+
+# ---------------------------------------------------------------------------
+# THE OTHER HALF OF THE INVARIANT — prune's own check-then-act, which no runtime
+# test in this file can see. The mark makes `_open` safe to grow an await; it does
+# NOT make prune safe to move off the event loop. Pinned as prose + call shape
+# because ruff and pytest are both blind to a deleted comment.
+# ---------------------------------------------------------------------------
+
+
+def test_the_prune_side_stays_synchronous_on_the_event_loop():
+    """`prune_empty_sessions`' in-flight check → `session_is_empty` → `rmtree` is
+    check-then-act. It is atomic against `_open`'s mark → mkdir ONLY while it runs
+    on the loop thread with nothing yielding in between. Wrapping either call site
+    in `asyncio.to_thread` — the house idiom for every other destructive walk in
+    `routes/sessions.py` — reopens the exact delete-during-write race with the mark
+    still in place, and every behavioural test above stays green.
+
+    Sources are read by PATH, never by a tree-wide grep: a repo-wide search for the
+    warning phrase would match this docstring and the pin could never fail."""
+    tap_src = (_REPO_ROOT / "tapscribe" / "routes" / "tap.py").read_text()
+    sessions_src = (_REPO_ROOT / "tapscribe" / "routes" / "sessions.py").read_text()
+    maintenance_src = (_REPO_ROOT / "tapscribe" / "session_maintenance.py").read_text()
+
+    call_lines = [
+        line.strip()
+        for src in (tap_src, sessions_src)
+        for line in src.splitlines()
+        if "prune_empty_sessions(" in line
+    ]
+    assert len(call_lines) == 2, (
+        "a prune_empty_sessions call site was added or removed — confirm the new one runs "
+        f"synchronously on the event loop, then update this count: {call_lines}"
+    )
+    for line in call_lines:
+        assert "to_thread" not in line and "await " not in line, (
+            f"prune_empty_sessions was taken off the event loop: {line!r} — its "
+            "in-flight-tap check and its rmtree are only atomic while nothing yields "
+            "between them, so this reopens the #257 race with the mark still in place"
+        )
+
+    assert "keep it synchronous" in tap_src.lower(), (
+        "routes/tap.py dropped the clause warning that prune must stay synchronous — "
+        "the mark closes the `_open` half of the invariant, not this one"
+    )
+    assert "synchronously on the event loop" in maintenance_src, (
+        "prune_empty_sessions' docstring dropped the synchronous-caller requirement"
     )
