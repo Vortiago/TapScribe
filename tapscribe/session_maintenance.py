@@ -9,6 +9,13 @@ through `session_paths` (the path-safety seam), and read/write session meta via
 `sessions`. Pure — no FastAPI dependency. The route handlers do the
 current-session / in-flight-job pre-flight; these functions are purely the
 filesystem op.
+
+One documented exception to "purely the filesystem op": the in-flight tap mark
+below. `prune_empty_sessions` is the enforcement point for the prune-vs-tap
+invariant (#257), so the registry it consults lives beside it rather than on the
+Recorder — the mark is a plain session-dirname refcount, not recorder state, so
+this module stays recorder-free. `TapFanOut._open` (the recording hot path) is
+what sets it; that mark is the one frequent, non-destructive thing here.
 """
 
 from __future__ import annotations
@@ -37,6 +44,55 @@ from .session_paths import (
 from .sessions import read_session_meta, write_session_meta
 from .text import atomic_write_text, parse_wav_start
 from .wav_cache import sidecar_paths
+
+# Sessions with a tap in flight, keyed by session dirname. Reference-counted so
+# concurrent taps into one session are independent. Read it through
+# `session_has_open_tap`; write it through the mark/release pair below.
+_tap_open_sessions: dict[str, int] = {}
+
+
+def mark_session_in_flight(session_name: str) -> None:
+    """Mark a session as having a tap in flight, so `prune_empty_sessions`
+    spares its directory through the mkdir→WAV-open window — the span where the
+    folder exists and is still empty.
+
+    Take the mark BEFORE the mkdir; one taken after it leaves that window open.
+    Pair every mark with `release_session_mark` on EVERY exit path, partial-init
+    failures included: a leaked mark makes the session permanently un-prunable,
+    which is worse than the race it closes.
+
+    Only the fresh-record open needs it: `try_resume` appends to an existing WAV
+    (never empty) and a probe tap takes no mark at all. A record-off tap takes
+    none either, though it can still materialise the folder via
+    `roster.record_occurrence` — that path is safe only because prune stays
+    synchronous on the event loop (see `prune_empty_sessions`).
+
+    The registry is module-global rather than injected the way
+    `reclaim_audio_older_than` takes `exclude_sessions` / `busy_check`; a neutral
+    home for it is tracked in #405.
+    """
+    _tap_open_sessions[session_name] = _tap_open_sessions.get(session_name, 0) + 1
+
+
+def release_session_mark(session_name: str) -> None:
+    """Drop one in-flight mark; releasing an UNMARKED session is a no-op.
+
+    That no-op is not double-release safety. With two concurrent taps the count
+    is 2, so a second release from one of them drives it to 0 and pops the key —
+    stranding the other tap's mark and making its directory prunable mid-window.
+    Exactly one release per mark is the caller's obligation; `TapFanOut._close`
+    discharges it by nulling `_prune_mark` after releasing."""
+    count = _tap_open_sessions.get(session_name, 0) - 1
+    if count > 0:
+        _tap_open_sessions[session_name] = count
+    else:
+        _tap_open_sessions.pop(session_name, None)
+
+
+def session_has_open_tap(session_name: str) -> bool:
+    """True while at least one tap holds an in-flight mark on `session_name`."""
+    return session_name in _tap_open_sessions
+
 
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
@@ -106,14 +162,26 @@ def _iter_candidate_session_dirs(current_session: str) -> Iterator[Path]:
 def prune_empty_sessions(current_session: str) -> dict[str, Any]:
     """Delete every session folder under RECORDINGS_DIR that `session_is_empty`
     (no WAVs, no merged transcript, no operator label). Never deletes
-    `current_session`. Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
+    `current_session` or a session with a tap in flight
+    (`session_has_open_tap`). Returns
+    ``{"pruned": [...], "count": N, "failed": [...]}``.
 
     Shared by the manual `/api/sessions/prune-empty` endpoint and the
     rotate-then-prune flow behind every new-session trigger.
+
+    Call it synchronously on the event loop — never via `asyncio.to_thread`,
+    the house idiom for every other destructive walk in `routes/sessions.py`.
+    The in-flight check, `session_is_empty` and the `rmtree` below are
+    check-then-act; they are atomic against `TapFanOut._open`'s mark→mkdir only
+    because nothing yields between them. Off the loop thread a tap can take its
+    mark and mkdir after the check and still lose its audio to the rmtree — the
+    half of the invariant the mark itself does NOT make structural.
     """
     pruned: list[str] = []
     failed: list[dict[str, str]] = []
     for sd in _iter_candidate_session_dirs(current_session):
+        if session_has_open_tap(sd.name):
+            continue
         if not session_is_empty(sd):
             continue
         try:

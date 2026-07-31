@@ -1255,7 +1255,12 @@ operations:
 - **`session_maintenance`** — destructive, infrequent operator operations:
   `absorb_session`, `delete_session_audio` / `delete_session_wav`,
   `prune_empty_sessions`, `session_is_empty`. Resolves via `session_paths`,
-  reads/writes meta via `sessions`.
+  reads/writes meta via `sessions`. Also owns the in-flight tap mark
+  (`mark_session_in_flight` / `release_session_mark` / `session_has_open_tap`)
+  that `TapFanOut._open` takes before its session mkdir — it lives beside
+  `prune_empty_sessions`, the point that enforces it, rather than on the
+  Recorder, and is the one hot-path thing in an otherwise operator-only
+  module (#257).
 
 (The recorder-filename parsers `parse_wav_start` / `parse_wav_speaker_slug` /
 `parse_wav_speaker_ident` and `build_recorder_wav_name` all live in `text` — the
