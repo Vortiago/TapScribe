@@ -16,12 +16,49 @@ import { serverSessionLabel } from "./session-labels.js";
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
 /** @typedef {"capture"|"transcript"|"summary"|"settings"|"taps"|"recordings"|"people"|"sessions"} ViewId */
 
+/**
+ * One source of truth for every Stages view's metadata. Five hand-synchronized
+ * sites derive from it — adding a view becomes a one-line addition here.
+ *
+ * @type {Map<ViewId, ViewEntry>}
+ * @typedef {{
+ *   group: "global" | "journey",
+ *   name: string,
+ *   lead: string,
+ *   template: string,
+ *   sessionKey?: boolean,
+ * }} ViewEntry
+ */
+export const VIEWS = new Map([
+  ["taps",      { group: "global",  name: "Taps",      lead: "🛰️", template: "/web/components/next/taps.html" }],
+  ["sessions",  { group: "global",  name: "Sessions",  lead: "🗂️", template: "/web/components/next/sessions.html" }],
+  ["people",    { group: "global",  name: "People",    lead: "👥", template: "/web/components/next/people.html" }],
+  ["settings",  { group: "global",  name: "Settings",  lead: "⚙️", template: "/web/components/next/views.html" }],
+  ["capture",   { group: "journey", name: "Capture",   lead: "1",  template: "/web/components/next/views.html" }],
+  ["recordings",{ group: "journey", name: "Recordings",lead: "2",  template: "/web/components/next/recordings.html" }],
+  ["transcript",{ group: "journey", name: "Transcript",lead: "3",  template: "/web/components/next/views.html", sessionKey: true }],
+  ["summary",   { group: "journey", name: "Summary",   lead: "4",  template: "/web/components/next/summary.html" }],
+]);
+
 /** @type {ViewId[]} */
-export const GLOBAL_VIEWS = ["taps", "sessions", "people", "settings"];
+export const GLOBAL_VIEWS = [...VIEWS.entries()].filter(([, e]) => e.group === "global").map(([id]) => id);
 /** @type {ViewId[]} */
-export const JOURNEY_VIEWS = ["capture", "recordings", "transcript", "summary"];
+export const JOURNEY_VIEWS = [...VIEWS.entries()].filter(([, e]) => e.group === "journey").map(([id]) => id);
 /** @type {ViewId[]} */
-export const ALL_VIEWS = [...GLOBAL_VIEWS, ...JOURNEY_VIEWS];
+export const ALL_VIEWS = [...VIEWS.keys()];
+
+/**
+ * Build the cache key for a view instance. Per-session for views that carry
+ * session-specific state (transcript merged pane); page-singleton for others.
+ * @param {ViewId} view
+ * @param {import('../types.js').Session | null} session
+ * @returns {string}
+ */
+export function viewKey(view, session) {
+  const entry = VIEWS.get(view);
+  if (entry?.sessionKey) return `${view}:${session?.session || ""}`;
+  return view;
+}
 
 /** Last-rendered signature per header host. The per-tick views (Capture,
  * Taps, Sessions, People) call header() on every poll; without a gate each

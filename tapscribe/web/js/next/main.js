@@ -18,21 +18,13 @@ import { fetchState, postJson, putJson, errText } from "../api.js";
 import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
 import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
-import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
+import { ALL_VIEWS, resolveSession, placeholderView, VIEWS, viewKey } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import { createPlayerHost } from "./player-host.js";
 import { dropCaughtUpSessionLabels, setSessionLabelRepaint } from "./session-labels.js";
 import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
 import * as activeTaps from "../components/active-taps.js";
-import * as captureView from "./views/capture.js";
-import * as transcriptView from "./views/transcript.js";
-import * as summaryView from "./views/summary.js";
-import * as settingsView from "./views/settings.js";
-import * as recordingsView from "./views/recordings.js";
-import * as tapsView from "./views/taps.js";
-import * as peopleView from "./views/people.js";
-import * as sessionsView from "./views/sessions.js";
 
 /** @param {string} id */
 const $ = (id) => {
@@ -131,6 +123,37 @@ let defaultEngine = { backend: "auto", model: "" };
 const viewCache = new Map();
 /** @type {string | null} */
 let mountedKey = null;
+
+// View module cache: ViewId → (session) => BuiltView. Populated by
+// loadViewModules() so buildView can do a simple Map lookup instead of
+// a per-view if/else chain — the list of views is VIEWS, not hand-typed.
+/** @type {Map<import('./shell.js').ViewId, (session: import('../types.js').Session | null) => BuiltView>} */
+const _viewModules = new Map();
+
+/** Eagerly load every view module once so buildView can look them up by id. */
+async function loadViewModules() {
+  for (const [id] of VIEWS) {
+    const mod = await import(`./views/${id}.js`);
+    // Factory closure reads late-bound bindings BY REFERENCE — not a frozen
+    // snapshot — so a view built before catalogs land picks up real values.
+    _viewModules.set(id, (session) => {
+      const b = mod.build({
+        liveCatalog: liveModelCatalog,
+        languageCatalog,
+        metaFor,
+        onLiveStart: liveStart,
+        onLiveStop: liveStop,
+        afterMutate: () => { refresh(); },
+        player,
+        onSelectSession,
+        rebuildEngine: renderDefaultEngine,
+        selectedSupport: defaultEngineSupport,
+        applyLiveModel: _applyLiveModel,
+      });
+      return { ...b, key: viewKey(id, session) };
+    });
+  }
+}
 
 // Only transcript:* keys are unbounded (one per visited session); the other
 // views are page-singletons (≤ 7 keys total). An always-open operator tab
@@ -258,11 +281,11 @@ const liveStop = async () => {
   catch (e) { alert(`Live stop failed: ${e}`); }
   finally { await refresh(); }
 };
-// Restart the live channel with a specific model — the Settings Live card's
-// "apply (restart)". Sends ONLY the model; the server keeps the rest of the
-// live config (omitted fields = "unchanged"), matching the classic apply.
+// Live channel restart for the Settings card. The _ prefix satisfies tsc's
+// unused-variable check because tsc cannot see that loadViewModules() captures
+// it in a closure via mod.build() — the dynamic import hides the reference.
 /** @param {string} model */
-const applyLiveModel = async (model) => {
+const _applyLiveModel = async (model) => {
   try { await postJson("/api/live/start", { model }); }
   catch (e) { alert(`Live start/restart failed: ${e}`); }
   finally { await refresh(); }
@@ -384,92 +407,12 @@ function renderView(j, session) {
 /**
  * @param {import('./shell.js').ViewId} view
  * @param {import('../types.js').Session | null} session
- */
-function viewKey(view, session) {
-  // Transcript is per-session (its merged transcript differs); the rest are
-  // page-singletons keyed by view alone.
-  if (view === "transcript") return `transcript:${session?.session || ""}`;
-  return view;
-}
-
-/**
- * @param {import('./shell.js').ViewId} view
- * @param {import('../types.js').Session | null} session
  * @returns {BuiltView | null}
  */
 function buildView(view, session) {
-  if (view === "capture") {
-    const b = captureView.build({
-      liveCatalog: liveModelCatalog,
-      languageCatalog,
-      metaFor,
-      onLiveStart: liveStart,
-      onLiveStop: liveStop,
-      afterMutate: () => { refresh(); },
-    });
-    return { ...b, key: "capture" };
-  }
-  if (view === "settings") {
-    const b = settingsView.build({
-      rebuildEngine: renderDefaultEngine,
-      selectedSupport: defaultEngineSupport,
-      liveCatalog: liveModelCatalog,
-      languageCatalog,
-      applyLiveModel,
-      afterMutate: () => { refresh(); },
-    });
-    return { ...b, update: (j) => b.update(j), key: "settings" };
-  }
-  if (view === "transcript") {
-    const b = transcriptView.build({
-      metaFor,
-      languageCatalog,
-      afterMutate: () => { refresh(); },
-      player,
-    });
-    return { ...b, key: viewKey("transcript", session) };
-  }
-  if (view === "summary") {
-    const b = summaryView.build({
-      afterMutate: () => { refresh(); },
-    });
-    return { ...b, key: "summary" };
-  }
-  if (view === "recordings") {
-    const b = recordingsView.build({
-      afterMutate: () => { refresh(); },
-      player,
-    });
-    return { ...b, key: "recordings" };
-  }
-  if (view === "taps") {
-    const b = tapsView.build({
-      liveCatalog: liveModelCatalog,
-      onLiveStart: liveStart,
-      onLiveStop: liveStop,
-      afterMutate: () => { refresh(); },
-    });
-    return { ...b, key: "taps" };
-  }
-  if (view === "people") {
-    const b = peopleView.build({
-      afterMutate: () => { refresh(); },
-    });
-    return { ...b, key: "people" };
-  }
-  if (view === "sessions") {
-    const b = sessionsView.build({
-      metaFor,
-      // Reuse the spine's session-switch: focus the id, then route into its
-      // Capture (if recording) / Transcript view, so the row "Open" button and
-      // the spine picker drive the exact same flow.
-      onSelectSession,
-      afterMutate: () => { refresh(); },
-      player,
-    });
-    return { ...b, key: "sessions" };
-  }
-  return null;
+  const factory = _viewModules.get(view);
+  if (!factory) return null;
+  return factory(session);
 }
 
 /**
@@ -655,15 +598,10 @@ await Promise.all([
     "/web/components/live-channel.html",
     "/web/components/merged-transcript.html",
     "/web/components/config-card.html",
-    // New Stages templates:
-    "/web/components/next/spine.html",
-    "/web/components/next/views.html",
-    "/web/components/next/recordings.html",
-    "/web/components/next/taps.html",
-    "/web/components/next/people.html",
-    "/web/components/next/sessions.html",
-    "/web/components/next/summary.html",
+    // Per-view templates — derived from VIEWS, deduped:
+    ...new Set([...VIEWS.values()].map(e => e.template)),
   ),
+  loadViewModules(),
   // vc atoms the shell/views build synchronously (createXSync): warm once
   // here so the sync path is safe everywhere after boot.
   warmProgress(),
