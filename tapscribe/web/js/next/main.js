@@ -130,14 +130,26 @@ let mountedKey = null;
 /** @type {Map<import('./shell.js').ViewId, (session: import('../types.js').Session | null) => BuiltView>} */
 const _viewModules = new Map();
 
+// Everything any view's build() reads, as the INTERSECTION of the eight declared
+// ctx params — derived from the views rather than re-typed here, so a view that
+// adds a required field breaks this instead of drifting. Load-bearing for tsc:
+// loadViewModules' template-literal specifier types the module `any`, so
+// `mod.build(...)` checks nothing; annotating the ctx literal is what keeps the
+// eight call sites verified (a bogus property errors under a literal specifier
+// and passes under a template one).
+/** @typedef {Parameters<typeof import('./views/capture.js').build>[0] & Parameters<typeof import('./views/recordings.js').build>[0] & Parameters<typeof import('./views/transcript.js').build>[0] & Parameters<typeof import('./views/summary.js').build>[0] & Parameters<typeof import('./views/settings.js').build>[0] & Parameters<typeof import('./views/taps.js').build>[0] & Parameters<typeof import('./views/people.js').build>[0] & Parameters<typeof import('./views/sessions.js').build>[0]} ViewCtx */
+
 /** Eagerly load every view module once so buildView can look them up by id. */
 async function loadViewModules() {
-  for (const [id] of VIEWS) {
+  // In parallel: the static imports this replaced were, and a boot-perf soak
+  // test (tests/e2e/test_next_perf_soak.py) watches this path.
+  await Promise.all([...VIEWS.keys()].map(async (id) => {
     const mod = await import(`./views/${id}.js`);
     // Factory closure reads late-bound bindings BY REFERENCE — not a frozen
     // snapshot — so a view built before catalogs land picks up real values.
     _viewModules.set(id, (session) => {
-      const b = mod.build({
+      /** @type {ViewCtx} */
+      const ctx = {
         liveCatalog: liveModelCatalog,
         languageCatalog,
         metaFor,
@@ -148,11 +160,12 @@ async function loadViewModules() {
         onSelectSession,
         rebuildEngine: renderDefaultEngine,
         selectedSupport: defaultEngineSupport,
-        applyLiveModel: _applyLiveModel,
-      });
+        applyLiveModel,
+      };
+      const b = mod.build(ctx);
       return { ...b, key: viewKey(id, session) };
     });
-  }
+  }));
 }
 
 // Only transcript:* keys are unbounded (one per visited session); the other
@@ -281,11 +294,11 @@ const liveStop = async () => {
   catch (e) { alert(`Live stop failed: ${e}`); }
   finally { await refresh(); }
 };
-// Live channel restart for the Settings card. The _ prefix satisfies tsc's
-// unused-variable check because tsc cannot see that loadViewModules() captures
-// it in a closure via mod.build() — the dynamic import hides the reference.
+// Restart the live channel with a specific model — the Settings Live card's
+// "apply (restart)". Sends ONLY the model; the server keeps the rest of the
+// live config (omitted fields = "unchanged"), matching the classic apply.
 /** @param {string} model */
-const _applyLiveModel = async (model) => {
+const applyLiveModel = async (model) => {
   try { await postJson("/api/live/start", { model }); }
   catch (e) { alert(`Live start/restart failed: ${e}`); }
   finally { await refresh(); }
@@ -592,12 +605,15 @@ const player = createPlayerHost({
 
 await Promise.all([
   loadTemplates(
-    // Existing component templates the REUSED components need:
+    // NOT per-view facts, so they stay listed by hand: templates the REUSED
+    // components need, plus the spine's own. Dropping spine.html here boots a
+    // dashboard with no navigation, and no gate below the e2e tier sees it.
     "/web/components/live-feed.html",
     "/web/components/active-taps.html",
     "/web/components/live-channel.html",
     "/web/components/merged-transcript.html",
     "/web/components/config-card.html",
+    "/web/components/next/spine.html",
     // Per-view templates — derived from VIEWS, deduped:
     ...new Set([...VIEWS.values()].map(e => e.template)),
   ),

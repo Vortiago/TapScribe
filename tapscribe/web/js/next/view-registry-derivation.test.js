@@ -1,122 +1,141 @@
-// RED contract for #252: VIEWS derives everything about the Stages view list.
+// #252, derivation side: what VIEWS must answer for, and what main.js must
+// still load once the per-view template list is derived from it.
 //
-// These tests verify the derivation side of the consolidation — templates
-// resolve correctly, viewKey derives from the table, and the template set
-// matches disk. Import-safe under node --test.
+// The consolidation rungs (the table exists, the arrays agree, the parallel
+// copies are gone) live in view-registry.test.js and are NOT repeated here.
+// What this file adds is the half a shape-only contract cannot see: that
+// replacing a hand-maintained list with a derived one did not silently DROP
+// anything the old list carried. The derived set is a hypothesis, not a proof.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { pathToFileURL } from "node:url";
 
 import * as shell from "./shell.js";
 
-const src = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
-const BASE = fileURLToPath(new URL("../../../../web/components/next/", import.meta.url));
+const abs = (rel) => fileURLToPath(new URL(rel, import.meta.url));
+const read = (rel) => readFileSync(abs(rel), "utf8");
+const TPL_DIR = "../../components/";
 
-test("one exported table answers for every view", () => {
-  assert.equal(typeof shell.VIEWS, "object", "shell.js exports VIEWS");
-  assert.ok(shell.VIEWS instanceof Map, "VIEWS is a Map");
-  assert.equal(shell.VIEWS.size, shell.ALL_VIEWS.length, "VIEWS size matches ALL_VIEWS");
-  for (const id of shell.ALL_VIEWS) {
-    assert.ok(shell.VIEWS.has(id), `VIEWS has entry for "${id}"`);
-  }
+/** The template URLs main.js actually hands to loadTemplates: the literals it
+ * still lists by hand, plus the per-view set it derives from VIEWS. main.js is
+ * not importable under node --test (it touches `document` at module scope), so
+ * the hand-listed half is read from its source. */
+function loadedTemplates() {
+  const main = read("./main.js");
+  const call = main.slice(main.indexOf("loadTemplates("));
+  const literals = call.slice(0, call.indexOf("\n  ),")).match(/"\/web\/[^"]+\.html"/g) || [];
+  return new Set([
+    ...literals.map((s) => s.slice(1, -1)),
+    ...[...shell.VIEWS.values()].map((e) => e.template),
+  ]);
+}
+
+test("no template the old hand-maintained list loaded was dropped", () => {
+  // The pre-refactor list, verbatim from b6d2db8 (the RED-contract commit).
+  // Deriving the per-view half from VIEWS is only safe if the union still
+  // covers every file the page needed before — spine.html is the one that
+  // actually went missing, and losing it boots a dashboard with no navigation.
+  const before = [
+    "/web/components/live-feed.html",
+    "/web/components/active-taps.html",
+    "/web/components/live-channel.html",
+    "/web/components/merged-transcript.html",
+    "/web/components/config-card.html",
+    "/web/components/next/spine.html",
+    "/web/components/next/views.html",
+    "/web/components/next/recordings.html",
+    "/web/components/next/taps.html",
+    "/web/components/next/people.html",
+    "/web/components/next/sessions.html",
+    "/web/components/next/summary.html",
+  ];
+  const now = loadedTemplates();
+  const dropped = before.filter((t) => !now.has(t));
+  assert.deepEqual(dropped, [], `main.js no longer loads: ${dropped.join(", ")}`);
 });
 
-test("the table carries what the parallel lists carried, so they can be derived from it", () => {
+test("every template id the Stages modules ask for is declared in a file main.js loads", () => {
+  // The forward-looking form of the rung above: a NEW view whose template file
+  // never reaches loadTemplates throws "template not loaded" on first mount,
+  // which no gate below the e2e tier can see. check-slots.mjs does not cover
+  // this — it resolves ids against every .html ON DISK, not against the set a
+  // page actually loads, so it passed while spine.html was orphaned.
+  const declaredIn = new Map(); // template id -> "/web/components/…" URL
+  const walk = (dirRel, urlPrefix) => {
+    for (const name of readdirSync(abs(dirRel), { withFileTypes: true })) {
+      if (name.isDirectory()) walk(`${dirRel}${name.name}/`, `${urlPrefix}${name.name}/`);
+      else if (name.name.endsWith(".html")) {
+        for (const m of read(`${dirRel}${name.name}`).matchAll(/<template[^>]*\sid="([^"]+)"/g)) {
+          declaredIn.set(m[1], `${urlPrefix}${name.name}`);
+        }
+      }
+    }
+  };
+  walk(TPL_DIR, "/web/components/");
+
+  const used = new Set();
+  const scan = (dirRel) => {
+    for (const name of readdirSync(abs(dirRel), { withFileTypes: true })) {
+      if (name.isDirectory()) scan(`${dirRel}${name.name}/`);
+      else if (name.name.endsWith(".js") && !name.name.endsWith(".test.js")) {
+        for (const m of read(`${dirRel}${name.name}`).matchAll(/\btpl\("([^"]+)"\)/g)) used.add(m[1]);
+      }
+    }
+  };
+  scan("./");
+
+  const loaded = loadedTemplates();
+  const unreachable = [...used]
+    .filter((id) => declaredIn.has(id) && !loaded.has(declaredIn.get(id)))
+    .map((id) => `${id} (in ${declaredIn.get(id)})`);
+  assert.deepEqual(unreachable, [], `template ids used but never loaded: ${unreachable.join(", ")}`);
+});
+
+test("every entry carries the spine's lead and a template URL", () => {
+  // view-registry.test.js pins name + group; these two are what spine.js and
+  // the loadTemplates derivation additionally read off the table.
   for (const [id, entry] of shell.VIEWS) {
-    assert.equal(typeof entry.name, "string", `${id}.name is a string`);
-    assert.ok(entry.name.length > 0, `${id}.name is non-empty`);
-    assert.ok(entry.group === "global" || entry.group === "journey", `${id}.group is "global"|"journey"`);
-    assert.equal(typeof entry.lead, "string", `${id}.lead is a string`);
-    assert.ok(entry.lead.length > 0, `${id}.lead is non-empty`);
-    assert.equal(typeof entry.template, "string", `${id}.template is a string`);
-    assert.ok(entry.template.length > 0, `${id}.template is non-empty`);
-  }
-});
-
-test("the exported view arrays agree with the table, in order", () => {
-  const expectedGlobal = ["taps", "sessions", "people", "settings"];
-  const expectedJourney = ["capture", "recordings", "transcript", "summary"];
-  assert.deepEqual(shell.GLOBAL_VIEWS, expectedGlobal, "GLOBAL_VIEWS is correct");
-  assert.deepEqual(shell.JOURNEY_VIEWS, expectedJourney, "JOURNEY_VIEWS is correct");
-  assert.deepEqual(shell.ALL_VIEWS, [...expectedGlobal, ...expectedJourney], "ALL_VIEWS is correct");
-});
-
-test("every view id resolves to exactly one template URL", () => {
-  for (const [id, entry] of shell.VIEWS) {
+    assert.ok(typeof entry.lead === "string" && entry.lead.length > 0, `${id}.lead is missing`);
     assert.ok(
-      typeof entry.template === "string" && entry.template.length > 0,
-      `${id}.template is a non-empty string`,
+      typeof entry.template === "string" && entry.template.startsWith("/web/"),
+      `${id}.template is not a template URL: ${entry.template}`,
     );
   }
 });
 
-test("deduped view-template set is exactly 6 unique files", () => {
-  const templates = [...shell.VIEWS.values()].map(e => e.template);
-  const deduped = [...new Set(templates)];
-  assert.equal(deduped.length, 6, `expected 6 unique templates, got ${deduped.length}: ${deduped.join(", ")}`);
+test("the derived arrays are in the spine's render order", () => {
+  // Stronger than view-registry.test.js's "the arrays agree with the table":
+  // this pins the actual order the spine renders, so reordering VIEWS is a
+  // visible change rather than a silent one.
+  assert.deepEqual(shell.GLOBAL_VIEWS, ["taps", "sessions", "people", "settings"]);
+  assert.deepEqual(shell.JOURNEY_VIEWS, ["capture", "recordings", "transcript", "summary"]);
 });
 
 test("template files exist on disk", () => {
-  const templates = [...new Set([...shell.VIEWS.values()].map(e => e.template))];
-  // Template URLs like "/web/components/next/taps.html" map to
-  // "../../components/next/taps.html" from the test file's directory.
-  const tplDir = fileURLToPath(new URL("../../components/next/", import.meta.url));
-  for (const tpl of templates) {
-    const file = tpl.replace("/web/components/next/", "");
-    const absPath = tplDir + file;
-    assert.ok(existsSync(absPath), `template file does not exist: ${tpl} → ${absPath}`);
+  for (const tpl of new Set([...shell.VIEWS.values()].map((e) => e.template))) {
+    const path = abs(TPL_DIR + tpl.replace("/web/components/", ""));
+    assert.ok(existsSync(path), `template file does not exist: ${tpl} → ${path}`);
   }
 });
 
 test("every view id resolves to a loadable module path", async () => {
+  // buildView looks the module up by id, so a table entry whose module file is
+  // missing degrades to the placeholder view instead of failing loudly.
   for (const id of shell.ALL_VIEWS) {
-    try {
-      // Dynamic import under node --test — if the module path is wrong,
-      // this throws with a module-not-found error.
-      await import(`./views/${id}.js`);
-    } catch (e) {
-      assert.fail(`${id}: cannot import ./views/${id}.js — ${e.message}`);
-    }
+    await assert.doesNotReject(() => import(`./views/${id}.js`), `cannot import ./views/${id}.js`);
   }
 });
 
 test("viewKey derives per-session key only for sessionKey entries", () => {
-  assert.equal(
-    typeof shell.viewKey,
-    "function",
-    "shell.js exports viewKey as a function",
-  );
   const session = { session: "sess_123" };
-  const transcriptKey = shell.viewKey("transcript", session);
-  assert.ok(
-    transcriptKey.startsWith("transcript:sess_123"),
-    `transcript carries session: "${transcriptKey}"`,
-  );
-  const tapsKey = shell.viewKey("taps", session);
-  assert.equal(
-    tapsKey,
-    "taps",
-    `non-sessionKey view returns bare id: "${tapsKey}"`,
-  );
-  const captureKey = shell.viewKey("capture", session);
-  assert.equal(captureKey, "capture", "capture returns bare id");
+  assert.equal(shell.viewKey("transcript", session), "transcript:sess_123");
+  assert.equal(shell.viewKey("taps", session), "taps");
+  assert.equal(shell.viewKey("capture", session), "capture");
 });
 
 test("sessionKey flag exists on exactly transcript", () => {
-  const sessionKeyViews = [...shell.VIEWS.entries()]
-    .filter(([, e]) => e.sessionKey)
-    .map(([id]) => id);
-  assert.deepEqual(sessionKeyViews, ["transcript"], "only transcript has sessionKey");
-});
-
-test("the view set itself is unchanged", () => {
-  assert.deepEqual(
-    [...shell.ALL_VIEWS].sort(),
-    ["capture", "people", "recordings", "sessions", "settings", "summary", "taps", "transcript"],
-    "the eight Stages views must survive the refactor",
-  );
-  assert.deepEqual([...shell.ALL_VIEWS], [...shell.GLOBAL_VIEWS, ...shell.JOURNEY_VIEWS]);
+  const flagged = [...shell.VIEWS.entries()].filter(([, e]) => e.sessionKey).map(([id]) => id);
+  assert.deepEqual(flagged, ["transcript"]);
 });

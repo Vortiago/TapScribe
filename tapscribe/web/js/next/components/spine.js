@@ -44,15 +44,11 @@ export function peopleCount(j) {
  * @returns {NavDef[]}
  */
 function globalDefs(j, sess) {
-  const sessions = j.sessions || [];
-  const liveTaps = (j.active || []).filter((a) => a.live !== false).length;
-  const sessCount = sessions.length;
-  const nPeople = peopleCount(j);
   return [...VIEWS.entries()]
     .filter(([, e]) => e.group === "global")
     .map(([id, entry]) => ({
       id, name: entry.name, lead: entry.lead,
-      chip: buildChip(id, j, sess, liveTaps, sessCount, nPeople),
+      chip: buildChip(id, j, sess),
     }));
 }
 
@@ -79,29 +75,30 @@ export function realMilestones(sess) {
 }
 
 /**
- * Dynamic chip text/tone for a view id — reads live state (j.active,
- * sess.wav_count) that can't be pinned in a static table. A switch on id
- * is structurally a dispatch, not a second hand-maintained list (the list
- * is VIEWS; the switch computes per-view dynamic state). Throws at runtime
- * on every render (not silently) if a view id from VIEWS lacks a case.
+ * Dynamic chip text/tone per view — the live state (j.active, sess.wav_count)
+ * VIEWS cannot carry. Each case derives what it needs from `j`/`sess`, so the
+ * two callers need not agree on a positional argument order.
  * @param {import('../shell.js').ViewId} id
  * @param {import('../../types.js').AppState} j
  * @param {import('../../types.js').Session | null} sess
- * @param {number} liveTaps
- * @param {number} sessCount
- * @param {number} nPeople
  * @returns {Chip}
  */
-function buildChip(id, j, sess, liveTaps, sessCount, nPeople) {
+function buildChip(id, j, sess) {
   switch (id) {
-    case "taps":
+    case "taps": {
+      const liveTaps = (j.active || []).filter((a) => a.live !== false).length;
       return liveTaps
         ? { tone: "live", text: `${liveTaps} live` }
         : { tone: "mute", text: `${(j.active || []).length} connected` };
-    case "sessions":
+    }
+    case "sessions": {
+      const sessCount = (j.sessions || []).length;
       return { tone: "mute", text: sessCount ? `${sessCount} session${sessCount === 1 ? "" : "s"}` : "none yet" };
-    case "people":
+    }
+    case "people": {
+      const nPeople = peopleCount(j);
       return { tone: "mute", text: nPeople ? `${nPeople} ${nPeople === 1 ? "person" : "people"}` : "registry" };
+    }
     case "settings":
       return { tone: "mute", text: `${j.backend || "auto"}` };
     case "capture": {
@@ -129,8 +126,8 @@ function buildChip(id, j, sess, liveTaps, sessCount, nPeople) {
       return summarized ? { tone: "good", text: "summarized" } : { tone: "mute", text: "not run" };
     }
     default:
-      // Exhaustive check: forgetting a view id here throws at runtime, not
-      // silently as a missing entry.
+      // A VIEWS entry with no case here throws on the next render rather than
+      // rendering a chipless nav item.
       throw new Error(`buildChip: unknown view id "${id}" — add a case or update VIEWS`);
   }
 }
@@ -141,16 +138,11 @@ function buildChip(id, j, sess, liveTaps, sessCount, nPeople) {
  * @returns {NavDef[]}
  */
 function journeyDefs(j, sess) {
-  const isCurrent = !!sess?.is_current;
-  const liveCount = isCurrent ? (j.active || []).filter((a) => a.live !== false).length : 0;
-  const wavCount = sess?.wav_count || 0;
-  const tx = sess?.session_transcript || null;
-  const suppressed = tx?.suppressed_count || 0;
   const { captured, stripped, transcribed, summarized } = realMilestones(sess);
   return [...VIEWS.entries()]
     .filter(([, e]) => e.group === "journey")
     .map(([id, entry]) => {
-      const chip = buildChip(id, j, sess, liveCount, wavCount, suppressed);
+      const chip = buildChip(id, j, sess);
       /** @type {NavDef} */
       const base = { id, name: entry.name, lead: entry.lead, numbered: true, chip };
       // Map done states from realMilestones onto the journey entries
