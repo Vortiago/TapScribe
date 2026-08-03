@@ -45,7 +45,7 @@ dependencies = [
     # dependencies rather than `pip install -e .`, so THIS cap does not bind
     # there. That drift is pre-existing (the same comment appears for the core
     # deps) and is not something this pin can fix.
-    "fastapi>=0.110,<0.140",
+    "fastapi>=0.110,<0.142",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
     "numpy>=1.24",
