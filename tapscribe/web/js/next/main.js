@@ -18,7 +18,7 @@ import { fetchState, postJson, putJson, errText } from "../api.js";
 import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
 import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
-import { ALL_VIEWS, resolveSession, placeholderView, VIEWS, viewKey } from "./shell.js";
+import { ALL_VIEWS, resolveSession, placeholderView, VIEWS, viewKey, isSessionKeyedCacheKey } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import { createPlayerHost } from "./player-host.js";
 import { dropCaughtUpSessionLabels, setSessionLabelRepaint } from "./session-labels.js";
@@ -124,10 +124,9 @@ const viewCache = new Map();
 /** @type {string | null} */
 let mountedKey = null;
 
-// View module cache: ViewId → (session) => BuiltView. Populated by
-// loadViewModules() so buildView can do a simple Map lookup instead of
-// a per-view if/else chain — the list of views is VIEWS, not hand-typed.
-/** @type {Map<import('./shell.js').ViewId, (session: import('../types.js').Session | null) => BuiltView>} */
+// View module cache: ViewId → the view's module. Populated by loadViewModules() so buildView
+// is a Map lookup instead of a per-view if/else chain — the list of views is VIEWS, not hand-typed.
+/** @type {Map<import('./shell.js').ViewId, { build: (ctx: ViewCtx) => Omit<BuiltView, "key"> }>} */
 const _viewModules = new Map();
 
 // Everything any view's build() reads, as the INTERSECTION of the eight declared
@@ -144,39 +143,40 @@ async function loadViewModules() {
   // In parallel: the static imports this replaced were, and a boot-perf soak
   // test (tests/e2e/test_next_perf_soak.py) watches this path.
   await Promise.all([...VIEWS.keys()].map(async (id) => {
-    const mod = await import(`./views/${id}.js`);
-    // Factory closure reads late-bound bindings BY REFERENCE — not a frozen
-    // snapshot — so a view built before catalogs land picks up real values.
-    _viewModules.set(id, (session) => {
-      /** @type {ViewCtx} */
-      const ctx = {
-        liveCatalog: liveModelCatalog,
-        languageCatalog,
-        metaFor,
-        onLiveStart: liveStart,
-        onLiveStop: liveStop,
-        afterMutate: () => { refresh(); },
-        player,
-        onSelectSession,
-        rebuildEngine: renderDefaultEngine,
-        selectedSupport: defaultEngineSupport,
-        applyLiveModel,
-      };
-      const b = mod.build(ctx);
-      return { ...b, key: viewKey(id, session) };
-    });
+    _viewModules.set(id, await import(`./views/${id}.js`));
   }));
 }
 
-// Only transcript:* keys are unbounded (one per visited session); the other
-// views are page-singletons (≤ 7 keys total). An always-open operator tab
-// that focuses many sessions over days would otherwise retain every cached
-// transcript view's DOM + listeners forever. Keep the most recent few — the
-// Map is maintained in LRU order for these keys (re-set on access).
-const MAX_CACHED_TRANSCRIPT_VIEWS = 6;
-function evictStaleTranscriptViews() {
-  const txKeys = [...viewCache.keys()].filter((k) => k.startsWith("transcript:"));
-  let excess = txKeys.length - MAX_CACHED_TRANSCRIPT_VIEWS;
+// Built per view build, not captured at boot: the catalogs are module-scope `let`s filled in
+// after load, so a view built before they arrive sees the defaults until it is rebuilt — the
+// same behaviour as the per-view if-chain this replaced.
+function viewCtx() {
+  /** @type {ViewCtx} */
+  const ctx = {
+    liveCatalog: liveModelCatalog,
+    languageCatalog,
+    metaFor,
+    onLiveStart: liveStart,
+    onLiveStop: liveStop,
+    afterMutate: () => { refresh(); },
+    player,
+    onSelectSession,
+    rebuildEngine: renderDefaultEngine,
+    selectedSupport: defaultEngineSupport,
+    applyLiveModel,
+  };
+  return ctx;
+}
+
+// Session-keyed views are the only unbounded ones (one key per visited session); the
+// rest are page-singletons (≤ 7 keys total). An always-open operator tab that focuses
+// many sessions over days would otherwise retain every cached view's DOM + listeners
+// forever. Keep the most recent few — the Map is maintained in LRU order for these keys
+// (re-set on access). Which keys those are comes from the table, not a literal prefix.
+const MAX_CACHED_SESSION_VIEWS = 6;
+function evictStaleSessionViews() {
+  const txKeys = [...viewCache.keys()].filter(isSessionKeyedCacheKey);
+  let excess = txKeys.length - MAX_CACHED_SESSION_VIEWS;
   for (const key of txKeys) {
     if (excess <= 0) break;
     if (key === mountedKey) continue; // never evict the mounted view; evict the next-oldest instead
@@ -368,7 +368,7 @@ function renderView(j, session) {
   const key = viewKey(currentView, session);
 
   let built = viewCache.get(key) ?? null;
-  if (built && key.startsWith("transcript:")) {
+  if (built && isSessionKeyedCacheKey(key)) {
     // Refresh LRU position so eviction drops the least-recently-VIEWED one.
     viewCache.delete(key);
     viewCache.set(key, built);
@@ -385,7 +385,7 @@ function renderView(j, session) {
       host.appendChild(built.node);
       built.host = host;
       viewCache.set(key, built);
-      evictStaleTranscriptViews();
+      evictStaleSessionViews();
     }
   }
 
@@ -423,9 +423,9 @@ function renderView(j, session) {
  * @returns {BuiltView | null}
  */
 function buildView(view, session) {
-  const factory = _viewModules.get(view);
-  if (!factory) return null;
-  return factory(session);
+  const mod = _viewModules.get(view);
+  if (!mod) return null;
+  return { ...mod.build(viewCtx()), key: viewKey(view, session) };
 }
 
 /**

@@ -131,6 +131,21 @@ test("viewKey derives per-session key only for sessionKey entries", () => {
   assert.equal(shell.viewKey("capture", session), "capture");
 });
 
+test("the unbounded-cache predicate follows sessionKey, not a literal prefix", () => {
+  // main.js prunes and LRU-refreshes only the cache keys that grow per session. It used to match
+  // the literal "transcript:", so adding a second sessionKey view would have left its keys
+  // unbounded and never refreshed — the generalisation half-done.
+  for (const [id, entry] of shell.VIEWS) {
+    const key = shell.viewKey(id, { session: "sess_1" });
+    assert.equal(
+      shell.isSessionKeyedCacheKey(key),
+      !!entry.sessionKey,
+      `${id}: cache key "${key}" classified wrong for sessionKey=${!!entry.sessionKey}`,
+    );
+  }
+  assert.equal(shell.isSessionKeyedCacheKey("transcriptish:sess_1"), false, "prefix match must be exact");
+});
+
 test("sessionKey flag exists on exactly transcript", () => {
   const flagged = [...shell.VIEWS.entries()].filter(([, e]) => e.sessionKey).map(([id]) => id);
   assert.deepEqual(flagged, ["transcript"]);

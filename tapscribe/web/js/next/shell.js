@@ -17,8 +17,10 @@ import { serverSessionLabel } from "./session-labels.js";
 /** @typedef {"capture"|"transcript"|"summary"|"settings"|"taps"|"recordings"|"people"|"sessions"} ViewId */
 
 /**
- * One source of truth for every Stages view's metadata. Five hand-synchronized
- * sites derive from it — adding a view becomes a one-line addition here.
+ * One source of truth for every Stages view's metadata: the spine's groups and
+ * labels, main.js's template list, its module lookup and its cache keys all
+ * derive from this. A new view still needs its own `views/<id>.js` and a
+ * `buildChip` case in spine.js — those are code, not metadata.
  *
  * @type {Map<ViewId, ViewEntry>}
  * @typedef {{
@@ -40,6 +42,14 @@ export const VIEWS = new Map([
   ["transcript",{ group: "journey", name: "Transcript",lead: "3",  template: "/web/components/next/views.html", sessionKey: true }],
   ["summary",   { group: "journey", name: "Summary",   lead: "4",  template: "/web/components/next/summary.html" }],
 ]);
+
+/** True for a `viewCache` key belonging to a session-keyed view. Those keys are the only
+ * unbounded ones (one per visited session), and main.js prunes and refreshes them by this
+ * predicate rather than by a literal prefix, so `sessionKey` stays the single source.
+ * @param {string} key */
+export function isSessionKeyedCacheKey(key) {
+  return [...VIEWS].some(([id, e]) => e.sessionKey && key.startsWith(`${id}:`));
+}
 
 /** The ids in one spine group, in VIEWS order.
  * @param {ViewEntry["group"]} group @returns {ViewId[]} */

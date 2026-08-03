@@ -8,7 +8,7 @@
 
 import { tpl, pick, renderRegion } from "../../templates.js";
 import { fmtSessionLabel, fmtDur } from "../../formatters.js";
-import { GLOBAL_VIEWS, VIEWS, newestFirst } from "../shell.js";
+import { GLOBAL_VIEWS, JOURNEY_VIEWS, VIEWS, newestFirst } from "../shell.js";
 import { editSessionLabel, pendingOr, sessionLabelFor } from "../session-labels.js";
 
 // Renames typed in the Session Information card go through
@@ -45,7 +45,7 @@ export function peopleCount(j) {
  */
 function globalDefs(j, sess) {
   return [...VIEWS.entries()]
-    .filter(([, e]) => e.group === "global")
+    .filter(([id]) => GLOBAL_VIEWS.includes(id))
     .map(([id, entry]) => ({
       id, name: entry.name, lead: entry.lead,
       chip: buildChip(id, j, sess),
@@ -108,32 +108,32 @@ function buildChip(id, j, sess) {
     case "capture": {
       const isCurrent = !!sess?.is_current;
       const liveCount = isCurrent ? (j.active || []).filter((a) => a.live !== false).length : 0;
-      const captured = (sess?.wav_count || 0) > 0;
+      const { captured } = realMilestones(sess);
       if (!sess) return { tone: "mute", text: "no session" };
       if (isCurrent) return liveCount ? { tone: "live", text: `${liveCount} live` } : captured ? { tone: "good", text: "captured" } : { tone: "mute", text: "idle" };
       return captured ? { tone: "good", text: `${sess.wav_count} WAVs` } : { tone: "mute", text: "no audio" };
     }
     case "recordings": {
       const wavCount = sess?.wav_count || 0;
+      const { stripped } = realMilestones(sess);
       if (!wavCount) return { tone: "mute", text: "no WAVs" };
-      if (sess?.stripped) return { tone: "good", text: `${wavCount} stripped` };
+      if (stripped) return { tone: "good", text: `${wavCount} stripped` };
       return { tone: "warn", text: `${wavCount} to strip` };
     }
     case "transcript": {
-      const tx = sess?.session_transcript || null;
-      const suppressed = tx?.suppressed_count || 0;
-      if (tx) return suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "merged" };
+      const { transcribed } = realMilestones(sess);
+      const suppressed = sess?.session_transcript?.suppressed_count || 0;
+      if (transcribed) return suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "merged" };
       return { tone: "mute", text: "not run" };
     }
     case "summary": {
       const { summarized } = realMilestones(sess);
       return summarized ? { tone: "good", text: "summarized" } : { tone: "mute", text: "not run" };
     }
-    default:
-      // A VIEWS entry with no case here throws on the next render rather than
-      // rendering a chipless nav item.
-      throw new Error(`buildChip: unknown view id "${id}" — add a case or update VIEWS`);
   }
+  // No default: a VIEWS entry with no case above makes this function fall through, which tsc
+  // rejects as TS2366 against the Chip return type. A compile error beats the runtime throw that
+  // used to sit here — renderSpine runs before renderView with no catch, so it aborted the tick.
 }
 
 /**
@@ -144,7 +144,7 @@ function buildChip(id, j, sess) {
 function journeyDefs(j, sess) {
   const { captured, stripped, transcribed, summarized } = realMilestones(sess);
   return [...VIEWS.entries()]
-    .filter(([, e]) => e.group === "journey")
+    .filter(([id]) => JOURNEY_VIEWS.includes(id))
     .map(([id, entry]) => {
       const chip = buildChip(id, j, sess);
       /** @type {NavDef} */
