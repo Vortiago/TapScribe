@@ -31,6 +31,7 @@ import { serverSessionLabel } from "./session-labels.js";
  */
 export const VIEWS = new Map([
   ["taps",      { group: "global",  name: "Taps",      lead: "🛰️", template: "/web/components/next/taps.html" }],
+  // Sessions: the scannable all-sessions list — the spine's <select> doesn't scale.
   ["sessions",  { group: "global",  name: "Sessions",  lead: "🗂️", template: "/web/components/next/sessions.html" }],
   ["people",    { group: "global",  name: "People",    lead: "👥", template: "/web/components/next/people.html" }],
   ["settings",  { group: "global",  name: "Settings",  lead: "⚙️", template: "/web/components/next/views.html" }],
@@ -40,10 +41,11 @@ export const VIEWS = new Map([
   ["summary",   { group: "journey", name: "Summary",   lead: "4",  template: "/web/components/next/summary.html" }],
 ]);
 
-/** @type {ViewId[]} */
-export const GLOBAL_VIEWS = [...VIEWS.entries()].filter(([, e]) => e.group === "global").map(([id]) => id);
-/** @type {ViewId[]} */
-export const JOURNEY_VIEWS = [...VIEWS.entries()].filter(([, e]) => e.group === "journey").map(([id]) => id);
+/** The ids in one spine group, in VIEWS order.
+ * @param {ViewEntry["group"]} group @returns {ViewId[]} */
+const inGroup = (group) => [...VIEWS.entries()].filter(([, e]) => e.group === group).map(([id]) => id);
+export const GLOBAL_VIEWS = inGroup("global");
+export const JOURNEY_VIEWS = inGroup("journey");
 /** @type {ViewId[]} */
 export const ALL_VIEWS = [...VIEWS.keys()];
 

@@ -64,8 +64,12 @@ function globalDefs(j, sess) {
  */
 export function realMilestones(sess) {
   return {
-    captured: (sess?.wav_count || 0) > 0,   // audio actually recorded
-    stripped: !!sess?.stripped,             // silence-stripped clips exist
+    // Audio actually recorded — NOT the session being archived. The session
+    // being recorded is "done capturing" the moment it has WAVs.
+    captured: (sess?.wav_count || 0) > 0,
+    // Silence-stripped clips exist — NOT a transcript existing. Its own
+    // deliverable, so the chip goes green only once stripped.
+    stripped: !!sess?.stripped,
     transcribed: !!sess?.session_transcript, // a merged transcript exists
     // `summarized_at` is null only on malformed on-disk JSON (see
     // SummaryMarker's docstring) — a present-but-unstamped marker is not yet

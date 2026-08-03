@@ -62,29 +62,25 @@ test("every template id the Stages modules ask for is declared in a file main.js
   // which no gate below the e2e tier can see. check-slots.mjs does not cover
   // this — it resolves ids against every .html ON DISK, not against the set a
   // page actually loads, so it passed while spine.html was orphaned.
-  const declaredIn = new Map(); // template id -> "/web/components/…" URL
-  const walk = (dirRel, urlPrefix) => {
-    for (const name of readdirSync(abs(dirRel), { withFileTypes: true })) {
-      if (name.isDirectory()) walk(`${dirRel}${name.name}/`, `${urlPrefix}${name.name}/`);
-      else if (name.name.endsWith(".html")) {
-        for (const m of read(`${dirRel}${name.name}`).matchAll(/<template[^>]*\sid="([^"]+)"/g)) {
-          declaredIn.set(m[1], `${urlPrefix}${name.name}`);
-        }
-      }
+  /** Every file under `dirRel` with `ext`, depth-first, as (relative path, name). */
+  const walk = (dirRel, ext, fn) => {
+    for (const e of readdirSync(abs(dirRel), { withFileTypes: true })) {
+      if (e.isDirectory()) walk(`${dirRel}${e.name}/`, ext, fn);
+      else if (e.name.endsWith(ext)) fn(`${dirRel}${e.name}`, e.name);
     }
   };
-  walk(TPL_DIR, "/web/components/");
+
+  const declaredIn = new Map(); // template id -> "/web/components/…" URL
+  walk(TPL_DIR, ".html", (path) => {
+    const url = path.replace(TPL_DIR, "/web/components/");
+    for (const m of read(path).matchAll(/<template[^>]*\sid="([^"]+)"/g)) declaredIn.set(m[1], url);
+  });
 
   const used = new Set();
-  const scan = (dirRel) => {
-    for (const name of readdirSync(abs(dirRel), { withFileTypes: true })) {
-      if (name.isDirectory()) scan(`${dirRel}${name.name}/`);
-      else if (name.name.endsWith(".js") && !name.name.endsWith(".test.js")) {
-        for (const m of read(`${dirRel}${name.name}`).matchAll(/\btpl\("([^"]+)"\)/g)) used.add(m[1]);
-      }
-    }
-  };
-  scan("./");
+  walk("./", ".js", (path, name) => {
+    if (name.endsWith(".test.js")) return;
+    for (const m of read(path).matchAll(/\btpl\("([^"]+)"\)/g)) used.add(m[1]);
+  });
 
   const loaded = loadedTemplates();
   const unreachable = [...used]
