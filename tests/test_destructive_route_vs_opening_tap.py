@@ -53,7 +53,7 @@ from tapscribe import config as _config
 from tapscribe import routes as _routes_pkg  # noqa: F401  (imports the route modules)
 from tapscribe import tap_fan_out, tap_registry
 from tapscribe.app import app, get_recorder
-from tapscribe.recorder import Recorder
+from tapscribe.recorder import Recorder, SessionBusy
 from tapscribe.routes import sessions as sessions_routes
 
 _SEEDED_WAV = "20260101T000000Z__bob__seed.wav"
@@ -184,6 +184,44 @@ async def _race_destructive_route_against_an_opening_tap(
     return race
 
 
+def assert_no_audio_was_silently_lost(race: _Race, recorder: Recorder, what: str) -> None:
+    """The harm layer, and the ONLY thing these two routes are pinned on.
+
+    Two outcomes are both correct, because the issue weighs mechanisms that differ in
+    who yields:
+      * the tap OPENS and its bytes survive the worker's window (a lock spanning the
+        open window, or an abort-on-mark re-check inside the worker); or
+      * the tap is CLEANLY REFUSED before it creates anything (a claim the destructive
+        worker takes first, so a new tap into a session being destroyed is turned away).
+        Nothing it wrote can be lost, because it wrote nothing.
+
+    What is NOT acceptable is the base behaviour: the tap opens, starts writing, and its
+    bytes are destroyed underneath it — a dead WS at best, a detached inode at worst.
+    A raw OSError out of the open is the same defect wearing a different hat.
+
+    Asserting `tap_error is None` instead would mandate that the TAP wins, which is a
+    mechanism choice the issue explicitly leaves open.
+    """
+    if race.tap_error is not None:
+        assert isinstance(race.tap_error, SessionBusy), (
+            f"{what}: the tap failed with {race.tap_error!r} rather than a clean refusal. "
+            "A SessionBusy before anything is created is a fine resolution; a filesystem "
+            "error out of the open is the race itself."
+        )
+        return
+
+    assert race.tap_dir == session_dir_of(recorder), (
+        f"{what}: the tap opened into {race.tap_dir}, not the session under attack, so this "
+        "test would pass or fail for the wrong reason. `session` and `session_dir` are "
+        "independent arguments and the mark comes from session_dir.name."
+    )
+    assert race.wav_survived is not False, (
+        f"{what}: the tap opened and its WAV was then destroyed while the tap was still live. "
+        "Either keep the bytes or refuse the tap outright; destroying under an open handle is "
+        "the defect."
+    )
+
+
 async def test_session_delete_cannot_rmtree_a_session_a_tap_is_opening_into(
     recorder: Recorder, monkeypatch: pytest.MonkeyPatch
 ):
@@ -198,16 +236,9 @@ async def test_session_delete_cannot_rmtree_a_session_a_tap_is_opening_into(
         leaf_owner=shutil,
         leaf_name="rmtree",
     )
-    assert race.tap_dir == session_dir_of(recorder), (
-        f"the tap opened into {race.tap_dir}, not the session under attack — the race was against a "
-        "directory nothing was opening into, so this test would pass or fail for the wrong reason"
-    )
-    assert race.wav_survived is not False, (
-        "the tap's WAV was destroyed while the tap was still open — the rmtree thread "
-        f"interleaved with TapFanOut._open (tap_error={race.tap_error!r})"
-    )
-    assert race.dir_survived is not False, "the session directory was removed under the open tap"
-    assert race.tap_error is None, f"the tap failed to open at all: {race.tap_error!r}"
+    assert_no_audio_was_silently_lost(race, recorder, "session delete")
+    if race.tap_error is None:
+        assert race.dir_survived is not False, "the session directory was removed under the open tap"
 
 
 async def test_session_audio_delete_cannot_unlink_the_wav_a_tap_just_opened(
@@ -224,14 +255,7 @@ async def test_session_audio_delete_cannot_unlink_the_wav_a_tap_just_opened(
         leaf_owner=sessions_routes,
         leaf_name="delete_session_audio",
     )
-    assert race.tap_dir == session_dir_of(recorder), (
-        f"the tap opened into {race.tap_dir}, not the session under attack — the race was against a "
-        "directory nothing was opening into, so this test would pass or fail for the wrong reason"
-    )
-    assert race.wav_survived is not False, (
-        f"the audio-delete walk unlinked the WAV the tap had just opened (tap_error={race.tap_error!r})"
-    )
-    assert race.tap_error is None, f"the tap failed to open at all: {race.tap_error!r}"
+    assert_no_audio_was_silently_lost(race, recorder, "session-audio delete")
 
 
 async def test_a_mark_taken_before_the_request_still_refuses(recorder: Recorder):
