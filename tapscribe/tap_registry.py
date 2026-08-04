@@ -6,14 +6,38 @@ destructive-route preflight (``routes/guards``) and ``session_maintenance``'s
 prune walk; ``session_maintenance`` also re-exports these names, which is how
 #257's leak detector and the destructive-route contract reach the registry.
 Deliberately a leaf: imports nothing in TapScribe, so neither the hot path nor
-the preflight pulls operator-maintenance weight."""
+the preflight pulls operator-maintenance weight.
+
+The registry carries TWO primitives:
+
+* The **in-flight mark** (``mark_session_in_flight`` / ``release_session_mark`` /
+  ``session_has_open_tap``) protects prune-empty from deleting an empty session
+  directory that a tap is about to write into (the mkdir→WAV-open window).
+
+* The **destruction guard** (``register_tap`` / ``unregister_tap`` /
+  ``try_claim_destruct`` / ``release_destruct``) protects the destructive
+  routes (``DELETE /api/sessions/{s}``, ``DELETE /api/sessions/{s}/audio``)
+  from racing with an opening tap — ``try_claim_destruct`` atomically checks
+  for open taps before the worker thread starts its walk, and a tap arriving
+  mid-destruction is refused by the ``-1`` sentinel.
+"""
 
 from __future__ import annotations
+
+import threading
 
 # Sessions with a tap in flight, keyed by session dirname. Reference-counted
 # so concurrent taps into one session are independent. Read through
 # `session_has_open_tap`; write through the mark/release pair below.
 _tap_open_sessions: dict[str, int] = {}
+
+# Destruction guard: per-session reader counter (-1 = destruction in progress,
+# positive = number of open taps, absent = no tap). The per-session lock
+# serialises counter access so the worker's check-and-claim is atomic against
+# a tap's increment. Each key is created on first register_tap and removed
+# when the counter drops to zero.
+_tap_active_count: dict[str, int] = {}
+_tap_active_locks: dict[str, threading.Lock] = {}
 
 
 def mark_session_in_flight(session_name: str) -> None:
@@ -54,3 +78,86 @@ def release_session_mark(session_name: str) -> None:
 def session_has_open_tap(session_name: str) -> bool:
     """True while at least one tap holds an in-flight mark on `session_name`."""
     return session_name in _tap_open_sessions
+
+
+def register_tap(session_name: str) -> bool:
+    """Increment the destruction-guard reader count for `session_name`, or
+    abort if a destructive operation is in progress.
+
+    Called at the end of ``TapFanOut._open``'s await-free segment, after the
+    in-flight mark is taken and the session directory is created. A return of
+    ``False`` means ``_open`` should raise (the tap cannot open into a session
+    that is being destroyed).
+
+    Returns ``True`` on success, ``False`` when ``session_name`` is currently
+    marked for destruction (the ``-1`` sentinel)."""
+    lock = _tap_active_locks.setdefault(session_name, threading.Lock())
+    lock.acquire()
+    try:
+        count = _tap_active_count.get(session_name, 0)
+        if count == -1:
+            # Destruction in progress — abort.
+            return False
+        _tap_active_count[session_name] = count + 1
+    finally:
+        lock.release()
+    return True
+
+
+def unregister_tap(session_name: str) -> None:
+    """Decrement the destruction-guard reader count for `session_name`.
+
+    Called at the start of ``TapFanOut._close``'s sync-first cleanup, paired
+    with ``register_tap``. Pops the key at zero."""
+    lock = _tap_active_locks.get(session_name)
+    if lock is None:
+        return
+    lock.acquire()
+    try:
+        count = _tap_active_count.get(session_name, 0)
+        if count <= 1:
+            _tap_active_count.pop(session_name, None)
+            _tap_active_locks.pop(session_name, None)
+        else:
+            _tap_active_count[session_name] = count - 1
+    finally:
+        lock.release()
+
+
+def try_claim_destruct(session_name: str) -> bool:
+    """Atomically check for open taps and claim destruction rights for
+    `session_name`, or abort if a tap is live.
+
+    Called by the destructive-route worker thread BEFORE its first destructive
+    syscall. Returns ``True`` when the worker may proceed; ``False`` when at
+    least one tap is open. On ``True``, ``release_destruct`` MUST be called
+    after the worker finishes (success or failure)."""
+    lock = _tap_active_locks.setdefault(session_name, threading.Lock())
+    lock.acquire()
+    try:
+        count = _tap_active_count.get(session_name, 0)
+        if count > 0:
+            result = False
+        else:
+            _tap_active_count[session_name] = -1
+            result = True
+    finally:
+        lock.release()
+    return result
+
+
+def release_destruct(session_name: str) -> None:
+    """Release the destruction guard set by ``try_claim_destruct``.
+
+    Called by the destructive-route worker thread AFTER its destructive work
+    completes (success or failure). Clears the ``-1`` sentinel so future
+    workers can claim again."""
+    lock = _tap_active_locks.get(session_name)
+    if lock is None:
+        return
+    lock.acquire()
+    try:
+        _tap_active_count.pop(session_name, None)
+        _tap_active_locks.pop(session_name, None)
+    finally:
+        lock.release()

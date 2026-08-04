@@ -10,11 +10,12 @@ its stream row) and the in-flight tap registry in `tap_registry` (a mark taken
 before the session mkdir and held until the tap closes, so it is the ONLY
 signal from that mkdir until `streams.register`).
 
-The registry check NARROWS the delete-vs-tap race; it does not close it. These
-routes finish in `await asyncio.to_thread(shutil.rmtree, ...)`, so a tap can
-take its mark one instruction after the guard read and still lose its audio,
-exactly as `prune_empty_sessions` documents for its own check. Real mutual
-exclusion is a separate decision, tracked in #408.
+The race between the preflight read and the worker thread's first destructive
+syscall is now CLOSED: if a tap opens after the guard read, the destructive
+worker's `try_claim_destruct` aborts (also 409 via `SessionBusy`). Both paths
+use the same domain error, mapped to the same status. The worker-side claim is
+atomic against a tap's registration through a per-session `threading.Lock` in
+`tapscribe.tap_registry`, so the check-and-claim has no window.
 """
 
 from __future__ import annotations

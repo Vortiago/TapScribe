@@ -56,7 +56,7 @@ from pathlib import Path
 import pytest
 from conftest import build_tap_recorder  # type: ignore[import-not-found]  # tests/ on sys.path
 
-from tapscribe import roster, session_maintenance, tap_fan_out
+from tapscribe import roster, session_maintenance, tap_fan_out, tap_registry
 from tapscribe.recorder import Recorder
 from tapscribe.routes.tap import _rotate_and_prune
 from tapscribe.session_maintenance import prune_empty_sessions
@@ -87,6 +87,10 @@ def _no_leaked_in_flight_marks():
     yield
     leaked = dict(session_maintenance._tap_open_sessions)
     session_maintenance._tap_open_sessions.clear()
+    assert leaked == {}, f"an in-flight tap mark leaked out of the test: {leaked}"
+    leaked = dict(tap_registry._tap_active_count)
+    tap_registry._tap_active_count.clear()
+    tap_registry._tap_active_locks.clear()
     assert leaked == {}, f"an in-flight tap mark leaked out of the test: {leaked}"
 
 

@@ -24,8 +24,8 @@ from uuid import uuid4
 
 from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
-from .recorder import ActiveStream, Recorder, UtteranceRecord
-from .tap_registry import mark_session_in_flight, release_session_mark
+from .recorder import ActiveStream, Recorder, SessionBusy, UtteranceRecord
+from .tap_registry import mark_session_in_flight, register_tap, release_session_mark, unregister_tap
 from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 from .wav_append import open_recorder_wav_append
@@ -140,6 +140,9 @@ class TapFanOut:
         # costs more than a skipped prune now: the destructive-route preflight
         # reads this same registry, so it 409s delete / absorb too (#405).
         self._prune_mark: str | None = None
+        # Session dirname for the destruction guard — set alongside _prune_mark,
+        # held from _open to _close, None on resume/probe/record-off paths.
+        self._destruct_guard: str | None = None
 
     @classmethod
     async def open(
@@ -323,6 +326,9 @@ class TapFanOut:
                 # exactly what prune_empty_sessions deletes.
                 self._prune_mark = session_dir.name
                 mark_session_in_flight(self._prune_mark)
+                if not register_tap(session_dir.name):
+                    raise SessionBusy("a destruction is in progress on this session")
+                self._destruct_guard = session_dir.name
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname
                 record = UtteranceRecord(
@@ -466,6 +472,8 @@ class TapFanOut:
         # being cancelled (TestClient does that on WS exit). Async awaits below
         # may raise CancelledError and skip remaining work — so the in-flight
         # prune mark, pure in-memory bookkeeping, is dropped first of all.
+        if self._destruct_guard is not None:
+            unregister_tap(self._destruct_guard)
         if self._prune_mark is not None:
             release_session_mark(self._prune_mark)
             self._prune_mark = None
