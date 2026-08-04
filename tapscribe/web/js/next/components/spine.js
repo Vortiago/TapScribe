@@ -8,7 +8,7 @@
 
 import { tpl, pick, renderRegion } from "../../templates.js";
 import { fmtSessionLabel, fmtDur } from "../../formatters.js";
-import { GLOBAL_VIEWS, newestFirst } from "../shell.js";
+import { GLOBAL_VIEWS, JOURNEY_VIEWS, VIEWS, newestFirst } from "../shell.js";
 import { editSessionLabel, pendingOr, sessionLabelFor } from "../session-labels.js";
 
 // Renames typed in the Session Information card go through
@@ -44,31 +44,12 @@ export function peopleCount(j) {
  * @returns {NavDef[]}
  */
 function globalDefs(j, sess) {
-  const sessions = j.sessions || [];
-  const liveTaps = (j.active || []).filter((a) => a.live !== false).length;
-  const sessCount = sessions.length;
-  const nPeople = peopleCount(j);
-  return [
-    {
-      id: "taps", name: "Taps", lead: "🛰️",
-      chip: liveTaps
-        ? { tone: "live", text: `${liveTaps} live` }
-        : { tone: "mute", text: `${(j.active || []).length} connected` },
-    },
-    {
-      // The scannable all-sessions list (the spine <select> doesn't scale).
-      id: "sessions", name: "Sessions", lead: "🗂️",
-      chip: { tone: "mute", text: sessCount ? `${sessCount} session${sessCount === 1 ? "" : "s"}` : "none yet" },
-    },
-    {
-      id: "people", name: "People", lead: "👥",
-      chip: { tone: "mute", text: nPeople ? `${nPeople} ${nPeople === 1 ? "person" : "people"}` : "registry" },
-    },
-    {
-      id: "settings", name: "Settings", lead: "⚙️",
-      chip: { tone: "mute", text: `${j.backend || "auto"}` },
-    },
-  ];
+  return [...VIEWS.entries()]
+    .filter(([id]) => GLOBAL_VIEWS.includes(id))
+    .map(([id, entry]) => ({
+      id, name: entry.name, lead: entry.lead,
+      chip: buildChip(id, j, sess),
+    }));
 }
 
 /**
@@ -83,8 +64,12 @@ function globalDefs(j, sess) {
  */
 export function realMilestones(sess) {
   return {
-    captured: (sess?.wav_count || 0) > 0,   // audio actually recorded
-    stripped: !!sess?.stripped,             // silence-stripped clips exist
+    // Audio actually recorded — NOT the session being archived. The session
+    // being recorded is "done capturing" the moment it has WAVs.
+    captured: (sess?.wav_count || 0) > 0,
+    // Silence-stripped clips exist — NOT a transcript existing. Its own
+    // deliverable, so the chip goes green only once stripped.
+    stripped: !!sess?.stripped,
     transcribed: !!sess?.session_transcript, // a merged transcript exists
     // `summarized_at` is null only on malformed on-disk JSON (see
     // SummaryMarker's docstring) — a present-but-unstamped marker is not yet
@@ -94,54 +79,84 @@ export function realMilestones(sess) {
 }
 
 /**
+ * Dynamic chip text/tone per view — the live state (j.active, sess.wav_count)
+ * VIEWS cannot carry. Each case derives what it needs from `j`/`sess`, so the
+ * two callers need not agree on a positional argument order.
+ * @param {import('../shell.js').ViewId} id
+ * @param {import('../../types.js').AppState} j
+ * @param {import('../../types.js').Session | null} sess
+ * @returns {Chip}
+ */
+function buildChip(id, j, sess) {
+  switch (id) {
+    case "taps": {
+      const liveTaps = (j.active || []).filter((a) => a.live !== false).length;
+      return liveTaps
+        ? { tone: "live", text: `${liveTaps} live` }
+        : { tone: "mute", text: `${(j.active || []).length} connected` };
+    }
+    case "sessions": {
+      const sessCount = (j.sessions || []).length;
+      return { tone: "mute", text: sessCount ? `${sessCount} session${sessCount === 1 ? "" : "s"}` : "none yet" };
+    }
+    case "people": {
+      const nPeople = peopleCount(j);
+      return { tone: "mute", text: nPeople ? `${nPeople} ${nPeople === 1 ? "person" : "people"}` : "registry" };
+    }
+    case "settings":
+      return { tone: "mute", text: `${j.backend || "auto"}` };
+    case "capture": {
+      const isCurrent = !!sess?.is_current;
+      const liveCount = isCurrent ? (j.active || []).filter((a) => a.live !== false).length : 0;
+      const { captured } = realMilestones(sess);
+      if (!sess) return { tone: "mute", text: "no session" };
+      if (isCurrent) return liveCount ? { tone: "live", text: `${liveCount} live` } : captured ? { tone: "good", text: "captured" } : { tone: "mute", text: "idle" };
+      return captured ? { tone: "good", text: `${sess.wav_count} WAVs` } : { tone: "mute", text: "no audio" };
+    }
+    case "recordings": {
+      const wavCount = sess?.wav_count || 0;
+      const { stripped } = realMilestones(sess);
+      if (!wavCount) return { tone: "mute", text: "no WAVs" };
+      if (stripped) return { tone: "good", text: `${wavCount} stripped` };
+      return { tone: "warn", text: `${wavCount} to strip` };
+    }
+    case "transcript": {
+      const { transcribed } = realMilestones(sess);
+      const suppressed = sess?.session_transcript?.suppressed_count || 0;
+      if (transcribed) return suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "merged" };
+      return { tone: "mute", text: "not run" };
+    }
+    case "summary": {
+      const { summarized } = realMilestones(sess);
+      return summarized ? { tone: "good", text: "summarized" } : { tone: "mute", text: "not run" };
+    }
+  }
+  // No default: a VIEWS entry with no case above makes this function fall through, which tsc
+  // rejects as TS2366 against the Chip return type. A compile error beats the runtime throw that
+  // used to sit here — renderSpine runs before renderView with no catch, so it aborted the tick.
+}
+
+/**
  * @param {import('../../types.js').AppState} j
  * @param {import('../../types.js').Session | null} sess
  * @returns {NavDef[]}
  */
 function journeyDefs(j, sess) {
-  const isCurrent = !!sess?.is_current;
-  const liveCount = isCurrent ? (j.active || []).filter((a) => a.live !== false).length : 0;
-  const wavCount = sess?.wav_count || 0;
-  const tx = sess?.session_transcript || null;
-  const suppressed = tx?.suppressed_count || 0;
   const { captured, stripped, transcribed, summarized } = realMilestones(sess);
-  return [
-    {
-      // Done once audio has actually been captured — NOT once the session is
-      // archived. The session you're actively recording is "done capturing"
-      // the moment it has WAVs; its chip then shows live/idle for liveness.
-      id: "capture", name: "Capture", lead: "1", numbered: true,
-      done: captured,
-      chip: !sess ? { tone: "mute", text: "no session" }
-        : isCurrent ? (liveCount ? { tone: "live", text: `${liveCount} live` } : captured ? { tone: "good", text: "captured" } : { tone: "mute", text: "idle" })
-          : captured ? { tone: "good", text: `${wavCount} WAVs` } : { tone: "mute", text: "no audio" },
-    },
-    {
-      // Done when silence has been stripped (its own deliverable) — NOT when a
-      // transcript exists. Chip tone matches: green only once stripped.
-      id: "recordings", name: "Recordings", lead: "2", numbered: true,
-      done: stripped,
-      chip: !wavCount ? { tone: "mute", text: "no WAVs" }
-        : stripped ? { tone: "good", text: `${wavCount} stripped` }
-          : { tone: "warn", text: `${wavCount} to strip` },
-    },
-    {
-      id: "transcript", name: "Transcript", lead: "3", numbered: true,
-      done: transcribed,
-      chip: tx
-        ? (suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "merged" })
-        : { tone: "mute", text: "not run" },
-    },
-    {
-      // Summary is fully wired (Local #86 / Command #82 / API #85 sources,
-      // server-side persistence #83, saved config #84) — done once a summary
-      // has actually been generated for this session (the `session_summary`
-      // marker), matching Transcript's "not run" → "merged" shape.
-      id: "summary", name: "Summary", lead: "4", numbered: true,
-      done: summarized,
-      chip: summarized ? { tone: "good", text: "summarized" } : { tone: "mute", text: "not run" },
-    },
-  ];
+  return [...VIEWS.entries()]
+    .filter(([id]) => JOURNEY_VIEWS.includes(id))
+    .map(([id, entry]) => {
+      const chip = buildChip(id, j, sess);
+      /** @type {NavDef} */
+      const base = { id, name: entry.name, lead: entry.lead, numbered: true, chip };
+      // Map done states from realMilestones onto the journey entries
+      // that correspond to milestone stages.
+      if (id === "capture") base.done = captured;
+      if (id === "recordings") base.done = stripped;
+      if (id === "transcript") base.done = transcribed;
+      if (id === "summary") base.done = summarized;
+      return base;
+    });
 }
 
 /**
