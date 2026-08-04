@@ -50,7 +50,6 @@ from conftest import build_tap_recorder  # type: ignore[import-not-found]
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
-from tapscribe import routes as _routes_pkg  # noqa: F401  (imports the route modules)
 from tapscribe import tap_fan_out, tap_registry
 from tapscribe.app import app, get_recorder
 from tapscribe.recorder import Recorder, SessionBusy
@@ -100,7 +99,7 @@ class _Race:
         self.worker_released = threading.Event()  # the tap's WAV is open; let the worker run
         self.wav_survived: bool | None = None  # the contract
         self.dir_survived: bool | None = None
-        self.tap_error: BaseException | None = None
+        self.tap_error: Exception | None = None
         # Where the tap ACTUALLY opened. Checked by every harm test: `session` and
         # `session_dir` are independent, so a tap pointed at the wrong directory makes
         # the whole race vacuous while still looking red for the wrong reason.
@@ -171,7 +170,9 @@ async def _race_destructive_route_against_an_opening_tap(
                 # nothing is opening into — a vacuously green contract.
                 session_dir=recorder.recordings_dir / _TARGET,
             )
-        except BaseException as exc:  # noqa: BLE001 — the recorded bytes are the contract
+        # Every failure the race can produce is an Exception (SessionBusy, OSError), and
+        # `CancelledError` must reach the event loop rather than be filed as a tap error.
+        except Exception as exc:  # noqa: BLE001 — the recorded bytes are the contract
             race.tap_error = exc
         finally:
             race.worker_released.set()

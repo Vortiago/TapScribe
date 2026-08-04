@@ -22,10 +22,6 @@ from tapscribe import tap_fan_out, tap_registry
 from tapscribe.recorder import Recorder, SessionBusy
 from tapscribe.tap_fan_out import TapFanOut
 
-PCM_FRAME = b"\x10\x00" * 320  # 20 ms @ 16 kHz mono int16
-
-_TAP_TARGET = "20260102T000000Z-destruction"
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -104,10 +100,7 @@ async def test_guard_released_on_wav_open_failure(
     )
 
 
-async def test_guard_released_on_relay_open_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_guard_released_on_relay_open_failure(tmp_path: Path):
     """The destruction guard is released when the relay's `open()` raises.
     The guard count should be empty after the failure unwinds."""
 
