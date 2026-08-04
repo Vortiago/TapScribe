@@ -22,7 +22,7 @@ import { editSessionLabel, pendingOr, sessionLabelFor } from "../session-labels.
  *   id: import('../shell.js').ViewId, name: string, lead: string,
  *   chip: Chip, numbered?: boolean, done?: boolean,
  * }} NavDef
- * @typedef {{ captured: boolean, stripped: boolean, transcribed: boolean, summarized: boolean }} Milestones
+ * @typedef {Record<import('../shell.js').MilestoneKey, boolean>} Milestones
  */
 
 /**
@@ -55,8 +55,10 @@ function globalDefs(j, sess) {
 
 /**
  * The four REAL session milestones, each reflecting its own deliverable —
- * shared by journeyDefs (per-stage ✓) and the progress fill so the bar and
- * the checkmarks can't disagree. Summary (#83/#84/#85/#86) is fully wired —
+ * shared by journeyDefs (per-stage ✓) and the progress fill, so both read one
+ * keyset. That pins the bar's COUNT, not the mapping: `milestone` is optional on
+ * a table entry, so a key no journey view claims makes the caption read 4/5
+ * beside four ✓. Summary (#83/#84/#85/#86) is fully wired —
  * a generated-and-persisted summary ships as the session's `session_summary`
  * marker on /api/state — so it's a real milestone like the other three.
  * Exported so the derivation is unit-testable without a DOM (see
@@ -78,6 +80,22 @@ export function realMilestones(sess) {
     // a real summary.
     summarized: !!sess?.session_summary?.summarized_at,
   };
+}
+
+/**
+ * The journey progress fill: how many REAL milestones are done, over how many
+ * there are. BOTH counts are derived from the Milestones object, so a new
+ * milestone key moves the bar and the caption with no edit here, the same way
+ * #411 made the per-stage ✓ follow the table. Hand-counting them is what let
+ * the bar read "4/4 · 100%" beside five checkmarks. Exported so the derivation
+ * is unit-testable without a DOM (see spine.test.js).
+ * @param {import('../../types.js').Session | null} sess
+ * @returns {{ reached: number, total: number, pct: number }}
+ */
+export function journeyProgress(sess) {
+  const flags = Object.values(realMilestones(sess));
+  const reached = flags.filter(Boolean).length;
+  return { reached, total: flags.length, pct: Math.round((reached / flags.length) * 100) };
 }
 
 /**
@@ -139,6 +157,8 @@ function buildChip(id, j, sess) {
 }
 
 /**
+ * The journey group's nav defs, in table order. Exported so the per-stage ✓
+ * mapping is unit-testable without a DOM (see journey-done.test.js).
  * @param {import('../../types.js').AppState} j
  * @param {import('../../types.js').Session | null} sess
  * @returns {NavDef[]}
@@ -151,6 +171,10 @@ export function journeyDefs(j, sess) {
       const chip = buildChip(id, j, sess);
       /** @type {NavDef} */
       const base = { id, name: entry.name, lead: entry.lead, numbered: true, chip };
+      // The ✓ follows the milestone the table entry declares, so a new journey
+      // stage needs no edit here (#411). An entry with no `milestone` silently
+      // never lights, so view-registry-derivation.test.js pins that every
+      // journey entry declares a key `realMilestones` answers for.
       if (entry.milestone) {
         base.done = milestones[entry.milestone];
       }
@@ -287,18 +311,11 @@ export function render(host, j, ctx) {
     const jdefs = journeyDefs(j, session);
     for (const d of jdefs) jnav.appendChild(navItem(d, currentView, onSelectView));
 
-    // Progress fill — driven by how many of the session's REAL milestones
-    // (captured → stripped → transcribed → summarized) are actually done, NOT
-    // by which tab is selected: an empty session reads 0% and a fully
-    // summarized one reads 100% of real work.
-    const ms = realMilestones(session);
-    const realStages = 4; // captured, stripped, transcribed, summarized
-    const reached =
-      (ms.captured ? 1 : 0) + (ms.stripped ? 1 : 0) + (ms.transcribed ? 1 : 0) + (ms.summarized ? 1 : 0);
-    const fillPct = Math.round((reached / realStages) * 100);
+    // Progress fill — how much real work is done, NOT which tab is selected.
+    const { reached, total, pct: fillPct } = journeyProgress(session);
     /** @type {HTMLElement} */ (pick(frag, "journeyFill")).style.width = `${fillPct}%`;
     pick(frag, "journeyCap").textContent = session
-      ? `${reached}/${realStages} stages · ${fillPct}%`
+      ? `${reached}/${total} stages · ${fillPct}%`
       : (GLOBAL_VIEWS.includes(currentView) ? "Global view" : "no session");
 
     // Session Information card (foot) — editable name + stats, or a muted

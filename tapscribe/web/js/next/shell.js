@@ -16,11 +16,18 @@ import { serverSessionLabel } from "./session-labels.js";
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
 /** @typedef {"capture"|"transcript"|"summary"|"settings"|"taps"|"recordings"|"people"|"sessions"} ViewId */
 
+/** Which `realMilestones` flag a journey stage's ✓ follows (#411). The key set
+ * lives here, not in spine.js, so the table owns its own field types and the
+ * spine → shell dependency stays one-way; spine.js derives its `Milestones`
+ * object type from this union.
+ * @typedef {"captured" | "stripped" | "transcribed" | "summarized"} MilestoneKey */
+
 /**
  * One source of truth for every Stages view's metadata: the spine's groups and
- * labels, main.js's template list, its module lookup and its cache keys all
- * derive from this. A new view still needs its own `views/<id>.js` and a
- * `buildChip` case in spine.js — those are code, not metadata.
+ * labels, main.js's template list, its module lookup, its cache keys and the
+ * journey's per-stage ✓ (the optional `milestone` key, #411) all derive from
+ * this. A new view still needs its own `views/<id>.js` and a `buildChip` case in
+ * spine.js — those are code, not metadata.
  *
  * @type {Map<ViewId, ViewEntry>}
  * @typedef {{
@@ -29,7 +36,7 @@ import { serverSessionLabel } from "./session-labels.js";
  *   lead: string,
  *   template: string,
  *   sessionKey?: boolean,
- *   milestone?: "captured" | "stripped" | "transcribed" | "summarized",
+ *   milestone?: MilestoneKey,
  * }} ViewEntry
  */
 export const VIEWS = new Map([
