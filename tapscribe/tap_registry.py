@@ -32,12 +32,19 @@ import threading
 _tap_open_sessions: dict[str, int] = {}
 
 # Destruction guard: per-session reader counter (-1 = destruction in progress,
-# positive = number of open taps, absent = no tap). The per-session lock
-# serialises counter access so the worker's check-and-claim is atomic against
-# a tap's increment. Each key is created on first register_tap and removed
-# when the counter drops to zero.
+# positive = number of open taps, absent = no tap). Keys appear on the first
+# register_tap and are removed when the counter drops to zero.
 _tap_active_count: dict[str, int] = {}
-_tap_active_locks: dict[str, threading.Lock] = {}
+# ONE lock for the whole counter, deliberately not one per session. A per-session
+# lock has to be removed when its session goes away, and removing it is unsound:
+# a thread that already holds a reference from setdefault/get can be left holding
+# an ORPHANED lock while the next caller creates a fresh one, at which point two
+# threads mutate the counter under different locks. That loses an update, and the
+# update it loses can be the -1 sentinel — a live tap and an in-flight destruction
+# at the same time, which is the very race this guard exists to close.
+# Every critical section here is an integer read plus a write, so a single lock
+# costs nothing measurable and has no lifetime problem.
+_guard = threading.Lock()
 
 
 def mark_session_in_flight(session_name: str) -> None:
@@ -91,16 +98,11 @@ def register_tap(session_name: str) -> bool:
 
     Returns ``True`` on success, ``False`` when ``session_name`` is currently
     marked for destruction (the ``-1`` sentinel)."""
-    lock = _tap_active_locks.setdefault(session_name, threading.Lock())
-    lock.acquire()
-    try:
+    with _guard:
         count = _tap_active_count.get(session_name, 0)
         if count == -1:
-            # Destruction in progress — abort.
-            return False
+            return False  # destruction in progress
         _tap_active_count[session_name] = count + 1
-    finally:
-        lock.release()
     return True
 
 
@@ -109,19 +111,12 @@ def unregister_tap(session_name: str) -> None:
 
     Called at the start of ``TapFanOut._close``'s sync-first cleanup, paired
     with ``register_tap``. Pops the key at zero."""
-    lock = _tap_active_locks.get(session_name)
-    if lock is None:
-        return
-    lock.acquire()
-    try:
+    with _guard:
         count = _tap_active_count.get(session_name, 0)
         if count <= 1:
             _tap_active_count.pop(session_name, None)
-            _tap_active_locks.pop(session_name, None)
         else:
             _tap_active_count[session_name] = count - 1
-    finally:
-        lock.release()
 
 
 def try_claim_destruct(session_name: str) -> bool:
@@ -132,18 +127,11 @@ def try_claim_destruct(session_name: str) -> bool:
     syscall. Returns ``True`` when the worker may proceed; ``False`` when at
     least one tap is open. On ``True``, ``release_destruct`` MUST be called
     after the worker finishes (success or failure)."""
-    lock = _tap_active_locks.setdefault(session_name, threading.Lock())
-    lock.acquire()
-    try:
-        count = _tap_active_count.get(session_name, 0)
-        if count > 0:
-            result = False
-        else:
-            _tap_active_count[session_name] = -1
-            result = True
-    finally:
-        lock.release()
-    return result
+    with _guard:
+        if _tap_active_count.get(session_name, 0) > 0:
+            return False
+        _tap_active_count[session_name] = -1
+        return True
 
 
 def release_destruct(session_name: str) -> None:
@@ -152,12 +140,5 @@ def release_destruct(session_name: str) -> None:
     Called by the destructive-route worker thread AFTER its destructive work
     completes (success or failure). Clears the ``-1`` sentinel so future
     workers can claim again."""
-    lock = _tap_active_locks.get(session_name)
-    if lock is None:
-        return
-    lock.acquire()
-    try:
+    with _guard:
         _tap_active_count.pop(session_name, None)
-        _tap_active_locks.pop(session_name, None)
-    finally:
-        lock.release()

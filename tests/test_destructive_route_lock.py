@@ -72,10 +72,8 @@ def _active_count(recorder: Recorder) -> int | None:
 def _clean_registry():
     """Clear the destruction-guard dicts after every test."""
     tap_registry._tap_active_count.clear()
-    tap_registry._tap_active_locks.clear()
     yield
     tap_registry._tap_active_count.clear()
-    tap_registry._tap_active_locks.clear()
 
 
 async def test_guard_released_on_wav_open_failure(
@@ -235,3 +233,64 @@ class _NoFileWav:
 
     def close(self) -> None:
         return None
+
+
+def test_the_counter_is_guarded_by_one_stable_lock():
+    """Regression pin: the guard must NOT be a per-session lock that gets removed.
+
+    A per-session lock has to be popped when its session goes away, and popping it
+    is unsound — a caller that already took a reference from setdefault/get can be
+    left holding an orphaned lock while the next caller creates a fresh one, so two
+    threads mutate the counter under different locks. The update that gets lost can
+    be the -1 destruction sentinel, which puts a live tap and an in-flight
+    destruction together: exactly the race the guard exists to close.
+    """
+    before = tap_registry._guard
+    assert tap_registry.register_tap("session-a") is True
+    assert tap_registry.register_tap("session-b") is True
+    tap_registry.unregister_tap("session-a")
+    tap_registry.unregister_tap("session-b")
+    assert tap_registry._guard is before, "the counter guard was replaced"
+    assert not tap_registry._tap_active_count, "counter not drained"
+    locks = [
+        name
+        for name, value in vars(tap_registry).items()
+        if isinstance(value, dict) and any(isinstance(v, type(before)) for v in value.values())
+    ]
+    assert locks == [], f"per-session lock storage reintroduced: {locks}"
+
+
+def test_a_claim_never_succeeds_while_a_reader_is_registered():
+    """The one invariant the whole guard rests on, hammered concurrently.
+
+    Holds always under a single lock, so it cannot flake on correct code; it fails
+    on a counter mutated under two different locks.
+    """
+    import threading
+
+    session = "hammer"
+    violations: list[str] = []
+
+    def reader() -> None:
+        for _ in range(300):
+            if tap_registry.register_tap(session):
+                if tap_registry._tap_active_count.get(session, 0) < 0:
+                    violations.append("reader ran with the destruction sentinel set")
+                tap_registry.unregister_tap(session)
+
+    def writer() -> None:
+        for _ in range(300):
+            if tap_registry.try_claim_destruct(session):
+                if tap_registry._tap_active_count.get(session) != -1:
+                    violations.append("claim held but the sentinel was not set")
+                tap_registry.release_destruct(session)
+
+    threads = [threading.Thread(target=reader) for _ in range(3)]
+    threads += [threading.Thread(target=writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert violations == [], violations[:3]
+    assert not tap_registry._tap_active_count, f"guard leaked: {tap_registry._tap_active_count}"

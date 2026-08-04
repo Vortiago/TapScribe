@@ -90,7 +90,6 @@ def _no_leaked_in_flight_marks():
     assert leaked == {}, f"an in-flight tap mark leaked out of the test: {leaked}"
     leaked = dict(tap_registry._tap_active_count)
     tap_registry._tap_active_count.clear()
-    tap_registry._tap_active_locks.clear()
     assert leaked == {}, f"an in-flight tap mark leaked out of the test: {leaked}"
 
 

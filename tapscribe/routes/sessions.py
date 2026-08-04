@@ -39,7 +39,7 @@ from fastapi import (
     Request,
 )
 
-from ..recorder import Recorder, SessionBusy, open_wav_names
+from ..recorder import Recorder, open_wav_names
 from ..session_maintenance import (
     SessionDeleteError,
     absorb_session,
@@ -57,10 +57,9 @@ from ..sessions import (
     search_transcripts,
     write_session_meta,
 )
-from ..tap_registry import release_destruct, try_claim_destruct
 from .body import json_body
 from .deps import get_recorder
-from .guards import ops_log, refuse_current_or_busy
+from .guards import destruction_claim, ops_log, refuse_current_or_busy
 
 router = APIRouter()
 
@@ -118,15 +117,11 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
 
 
 def _delete_audio_worker(session: str) -> dict:
-    """Worker for `DELETE /api/sessions/{session}/audio`: claims the
-    destruction guard, runs `delete_session_audio`, releases the guard.
-    Raises `SessionBusy` (409) when a tap is open on `session`."""
-    if not try_claim_destruct(session):
-        raise SessionBusy("delete aborted: a tap is open on this session")
-    try:
+    """Worker for `DELETE /api/sessions/{session}/audio`, run on a thread under
+    the destruction guard so it cannot race a tap that opened after the
+    preflight."""
+    with destruction_claim(session):
         return delete_session_audio(session)
-    finally:
-        release_destruct(session)
 
 
 @router.post("/api/sessions/bulk-reclaim-audio")
@@ -251,16 +246,12 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
 
 
 def _delete_session_worker(session_dir: Path, session: str) -> str:
-    """Worker for `DELETE /api/sessions/{session}`: claims the destruction
-    guard, runs `rmtree`, releases the guard. Raises `SessionBusy` (409)
-    when a tap is open on `session`."""
-    if not try_claim_destruct(session):
-        raise SessionBusy("delete aborted: a tap is open on this session")
-    try:
+    """Worker for `DELETE /api/sessions/{session}`, run on a thread under the
+    destruction guard so it cannot race a tap that opened after the
+    preflight."""
+    with destruction_claim(session):
         shutil.rmtree(session_dir)
         return session
-    finally:
-        release_destruct(session)
 
 
 @router.get("/api/session-meta/{session}")

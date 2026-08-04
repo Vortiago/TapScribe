@@ -20,10 +20,12 @@ atomic against a tap's registration through a per-session `threading.Lock` in
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from fastapi import HTTPException
 
 from ..recorder import Recorder, SessionBusy
-from ..tap_registry import session_has_open_tap
+from ..tap_registry import release_destruct, session_has_open_tap, try_claim_destruct
 
 
 async def refuse_current_or_busy(
@@ -66,6 +68,31 @@ async def refuse_current_or_busy(
         raise SessionBusy("a live tap is writing to this session")
     if session_has_open_tap(current):
         raise SessionBusy("a tap is opening this session")
+
+
+@contextmanager
+def destruction_claim(session: str):
+    """Hold the destruction guard for one threaded destructive walk.
+
+    The claim/abort/release protocol lives HERE rather than in each route body:
+    both threaded routes need the identical three steps, and a third one that
+    forgets the release would make its session permanently undeletable. It cannot
+    live in `tap_registry` — that module is a deliberate stdlib-only leaf and
+    `SessionBusy` comes from `recorder`, so raising there would break the layering
+    `test_tap_registry_layering` pins.
+
+    Runs INSIDE the worker thread, after `refuse_current_or_busy` has already
+    cleared the request: the preflight is the fast path that rejects a delete
+    while a tap is open, and this is the backstop for a tap that arrives in the
+    unbounded window between that read and the first destructive syscall.
+    Raises `SessionBusy` (409) — the same answer the preflight gives, and honest
+    for the caller: retry once the tap closes."""
+    if not try_claim_destruct(session):
+        raise SessionBusy("delete aborted: a tap is open on this session")
+    try:
+        yield
+    finally:
+        release_destruct(session)
 
 
 def ops_log(message: str) -> None:
