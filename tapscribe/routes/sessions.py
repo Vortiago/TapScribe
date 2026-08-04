@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -58,7 +59,7 @@ from ..sessions import (
 )
 from .body import json_body
 from .deps import get_recorder
-from .guards import ops_log, refuse_current_or_busy
+from .guards import destruction_claim, ops_log, refuse_current_or_busy
 
 router = APIRouter()
 
@@ -107,12 +108,20 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
     async with recorder.jobs.run(session, kind="delete", total=1):
         # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
         # ~1 Hz /api/state poll stays responsive — same as strip-silence.
-        summary = await asyncio.to_thread(delete_session_audio, session)
+        summary = await asyncio.to_thread(_delete_audio_worker, session)
     ops_log(
         f"deleted audio from session {session}: "
         f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed"
     )
     return {"ok": True, **summary}
+
+
+def _delete_audio_worker(session: str) -> dict:
+    """Worker for `DELETE /api/sessions/{session}/audio`, run on a thread under
+    the destruction guard so it cannot race a tap that opened after the
+    preflight."""
+    with destruction_claim(session):
+        return delete_session_audio(session)
 
 
 @router.post("/api/sessions/bulk-reclaim-audio")
@@ -229,11 +238,20 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     # used to do on the success path only.
     async with recorder.jobs.run(session, kind="delete", total=1):
         try:
-            await asyncio.to_thread(shutil.rmtree, session_dir)
+            await asyncio.to_thread(_delete_session_worker, session_dir, session)
         except OSError as e:
             raise SessionDeleteError(f"delete failed: {e}") from None
     ops_log(f"deleted session: {session_dir}")
     return {"ok": True, "deleted": session}
+
+
+def _delete_session_worker(session_dir: Path, session: str) -> str:
+    """Worker for `DELETE /api/sessions/{session}`, run on a thread under the
+    destruction guard so it cannot race a tap that opened after the
+    preflight."""
+    with destruction_claim(session):
+        shutil.rmtree(session_dir)
+        return session
 
 
 @router.get("/api/session-meta/{session}")

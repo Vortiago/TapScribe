@@ -10,19 +10,22 @@ its stream row) and the in-flight tap registry in `tap_registry` (a mark taken
 before the session mkdir and held until the tap closes, so it is the ONLY
 signal from that mkdir until `streams.register`).
 
-The registry check NARROWS the delete-vs-tap race; it does not close it. These
-routes finish in `await asyncio.to_thread(shutil.rmtree, ...)`, so a tap can
-take its mark one instruction after the guard read and still lose its audio,
-exactly as `prune_empty_sessions` documents for its own check. Real mutual
-exclusion is a separate decision, tracked in #408.
+The race between the preflight read and the worker thread's first destructive
+syscall is now CLOSED: if a tap opens after the guard read, the destructive
+worker's `try_claim_destruct` aborts (also 409 via `SessionBusy`). Both paths
+use the same domain error, mapped to the same status. The worker-side claim is
+atomic against a tap's registration through a per-session `threading.Lock` in
+`tapscribe.tap_registry`, so the check-and-claim has no window.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from fastapi import HTTPException
 
 from ..recorder import Recorder, SessionBusy
-from ..tap_registry import session_has_open_tap
+from ..tap_registry import release_destruct, session_has_open_tap, try_claim_destruct
 
 
 async def refuse_current_or_busy(
@@ -65,6 +68,31 @@ async def refuse_current_or_busy(
         raise SessionBusy("a live tap is writing to this session")
     if session_has_open_tap(current):
         raise SessionBusy("a tap is opening this session")
+
+
+@contextmanager
+def destruction_claim(session: str):
+    """Hold the destruction guard for one threaded destructive walk.
+
+    The claim/abort/release protocol lives HERE rather than in each route body:
+    both threaded routes need the identical three steps, and a third one that
+    forgets the release would make its session permanently undeletable. It cannot
+    live in `tap_registry` — that module is a deliberate stdlib-only leaf and
+    `SessionBusy` comes from `recorder`, so raising there would break the layering
+    `test_tap_registry_layering` pins.
+
+    Runs INSIDE the worker thread, after `refuse_current_or_busy` has already
+    cleared the request: the preflight is the fast path that rejects a delete
+    while a tap is open, and this is the backstop for a tap that arrives in the
+    unbounded window between that read and the first destructive syscall.
+    Raises `SessionBusy` (409) — the same answer the preflight gives, and honest
+    for the caller: retry once the tap closes."""
+    if not try_claim_destruct(session):
+        raise SessionBusy("delete aborted: a tap is open on this session")
+    try:
+        yield
+    finally:
+        release_destruct(session)
 
 
 def ops_log(message: str) -> None:

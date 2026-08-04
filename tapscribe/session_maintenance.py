@@ -13,7 +13,10 @@ are purely the filesystem op.
 The in-flight tap registry (mark/release/has_open_tap) lives in `tap_registry`,
 a neutral leaf. `prune_empty_sessions` calls it there; the names re-exported
 below are the compatibility surface for #257's leak detector and the
-destructive-route contract, which reach the registry through this module.
+destructive-route contract, which reach the registry through this module. The
+destruction guard (register/unregister/try_claim/release) is the same registry's
+second primitive, protecting the threaded destructive routes from racing with an
+opening tap.
 """
 
 from __future__ import annotations
@@ -49,8 +52,11 @@ from .sessions import read_session_meta, write_session_meta
 from .tap_registry import (
     _tap_open_sessions,
     mark_session_in_flight,
+    release_destruct,
     release_session_mark,
     session_has_open_tap,
+    try_claim_destruct,
+    unregister_tap,
 )
 from .text import atomic_write_text, parse_wav_start
 from .wav_cache import sidecar_paths
@@ -75,7 +81,10 @@ __all__ = [
     "_tap_open_sessions",
     "mark_session_in_flight",
     "release_session_mark",
+    "release_destruct",
     "session_has_open_tap",
+    "try_claim_destruct",
+    "unregister_tap",
 ]
 
 # ---------------------------------------------------------------------------

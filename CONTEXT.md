@@ -1269,6 +1269,14 @@ operations:
   operator-maintenance weight (#405). Not on the Recorder: the mark is not
   recorder state (#257).
 
+  The destruction guard (`register_tap` / `unregister_tap` /
+  `try_claim_destruct` / `release_destruct`) is a second primitive in the same
+  module: a per-session reader count + `threading.Lock` that the threaded
+  destructive routes use to atomically check for open taps before their
+  filesystem walk (`try_claim_destruct`), and that `TapFanOut._open` increments
+  (`register_tap`) so the worker sees a live tap. A tap arriving while
+  destruction is in progress is refused by the ``-1`` sentinel.
+
 (The recorder-filename parsers `parse_wav_start` / `parse_wav_speaker_slug` /
 `parse_wav_speaker_ident` and `build_recorder_wav_name` all live in `text` — the
 single source of truth for the `<iso>_<speaker>_<ident>_<utt>.wav` format.)
