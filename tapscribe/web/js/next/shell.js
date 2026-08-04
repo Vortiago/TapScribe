@@ -29,6 +29,7 @@ import { serverSessionLabel } from "./session-labels.js";
  *   lead: string,
  *   template: string,
  *   sessionKey?: boolean,
+ *   milestone?: "captured" | "stripped" | "transcribed" | "summarized",
  * }} ViewEntry
  */
 export const VIEWS = new Map([
@@ -37,10 +38,10 @@ export const VIEWS = new Map([
   ["sessions",  { group: "global",  name: "Sessions",  lead: "🗂️", template: "/web/components/next/sessions.html" }],
   ["people",    { group: "global",  name: "People",    lead: "👥", template: "/web/components/next/people.html" }],
   ["settings",  { group: "global",  name: "Settings",  lead: "⚙️", template: "/web/components/next/views.html" }],
-  ["capture",   { group: "journey", name: "Capture",   lead: "1",  template: "/web/components/next/views.html" }],
-  ["recordings",{ group: "journey", name: "Recordings",lead: "2",  template: "/web/components/next/recordings.html" }],
-  ["transcript",{ group: "journey", name: "Transcript",lead: "3",  template: "/web/components/next/views.html", sessionKey: true }],
-  ["summary",   { group: "journey", name: "Summary",   lead: "4",  template: "/web/components/next/summary.html" }],
+  ["capture",   { group: "journey", name: "Capture",   lead: "1",  template: "/web/components/next/views.html", milestone: "captured" }],
+  ["recordings",{ group: "journey", name: "Recordings",lead: "2",  template: "/web/components/next/recordings.html", milestone: "stripped" }],
+  ["transcript",{ group: "journey", name: "Transcript",lead: "3",  template: "/web/components/next/views.html", sessionKey: true, milestone: "transcribed" }],
+  ["summary",   { group: "journey", name: "Summary",   lead: "4",  template: "/web/components/next/summary.html", milestone: "summarized" }],
 ]);
 
 /** True for a `viewCache` key belonging to a session-keyed view. Those keys are the only

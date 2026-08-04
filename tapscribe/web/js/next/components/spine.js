@@ -22,6 +22,7 @@ import { editSessionLabel, pendingOr, sessionLabelFor } from "../session-labels.
  *   id: import('../shell.js').ViewId, name: string, lead: string,
  *   chip: Chip, numbered?: boolean, done?: boolean,
  * }} NavDef
+ * @typedef {{ captured: boolean, stripped: boolean, transcribed: boolean, summarized: boolean }} Milestones
  */
 
 /**
@@ -61,6 +62,7 @@ function globalDefs(j, sess) {
  * Exported so the derivation is unit-testable without a DOM (see
  * spine.test.js).
  * @param {import('../../types.js').Session | null} sess
+ * @returns {Milestones}
  */
 export function realMilestones(sess) {
   return {
@@ -141,20 +143,17 @@ function buildChip(id, j, sess) {
  * @param {import('../../types.js').Session | null} sess
  * @returns {NavDef[]}
  */
-function journeyDefs(j, sess) {
-  const { captured, stripped, transcribed, summarized } = realMilestones(sess);
+export function journeyDefs(j, sess) {
+  const milestones = realMilestones(sess);
   return [...VIEWS.entries()]
     .filter(([id]) => JOURNEY_VIEWS.includes(id))
     .map(([id, entry]) => {
       const chip = buildChip(id, j, sess);
       /** @type {NavDef} */
       const base = { id, name: entry.name, lead: entry.lead, numbered: true, chip };
-      // Map done states from realMilestones onto the journey entries
-      // that correspond to milestone stages.
-      if (id === "capture") base.done = captured;
-      if (id === "recordings") base.done = stripped;
-      if (id === "transcript") base.done = transcribed;
-      if (id === "summary") base.done = summarized;
+      if (entry.milestone) {
+        base.done = milestones[entry.milestone];
+      }
       return base;
     });
 }
