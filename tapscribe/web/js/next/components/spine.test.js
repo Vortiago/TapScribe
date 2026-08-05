@@ -1,14 +1,14 @@
 // Unit tests for the spine's pure derivations (run via `node --test`, no DOM).
 //
-// peopleCount and realMilestones are pure helpers factored out of
-// globalDefs/journeyDefs so the People-count and Summary-milestone logic is
-// exercised without a browser — same pattern as shell.test.js's
-// headerNeedsRender / nextRecordingEnabled.
+// peopleCount, realMilestones and journeyProgress are pure helpers factored out
+// of globalDefs/journeyDefs/render so the People-count, Summary-milestone and
+// progress-bar logic is exercised without a browser — same pattern as
+// shell.test.js's headerNeedsRender / nextRecordingEnabled.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { peopleCount, realMilestones } from "./spine.js";
+import { journeyProgress, peopleCount, realMilestones } from "./spine.js";
 
 // ---- peopleCount ------------------------------------------------------------
 // #226: the People chip must derive from the ADR-0009 registry (`j.people`),
@@ -67,4 +67,41 @@ test("realMilestones: summarized stays false when session_summary exists but sum
 test("realMilestones: null session (no session focused) never throws and reports all-false", () => {
   const ms = realMilestones(null);
   assert.deepEqual(ms, { captured: false, stripped: false, transcribed: false, summarized: false });
+});
+
+// ---- journeyProgress --------------------------------------------------------
+// #411 made the per-stage ✓ follow the table's `milestone` key, leaving the bar
+// and caption hand-counting four flags: a fifth milestone would light a ✓ while
+// the caption still read n/4. Both counts now derive from the Milestones object,
+// and these rungs pin the DERIVATION rather than the literal 4, so the next
+// milestone cannot reintroduce the split.
+
+test("journeyProgress: the denominator IS the milestone key count, not a literal", () => {
+  const total = Object.keys(realMilestones(null)).length;
+  for (const sess of [null, {}, { wav_count: 3, stripped: true }]) {
+    assert.equal(journeyProgress(sess).total, total, "total drifted from realMilestones' keyset");
+  }
+});
+
+test("journeyProgress: the numerator counts exactly the reached milestones", () => {
+  assert.deepEqual(journeyProgress(null), { reached: 0, total: 4, pct: 0 });
+  assert.deepEqual(journeyProgress({ wav_count: 1 }), { reached: 1, total: 4, pct: 25 });
+  assert.deepEqual(journeyProgress({ wav_count: 1, stripped: true }), { reached: 2, total: 4, pct: 50 });
+  assert.deepEqual(
+    journeyProgress({
+      wav_count: 1,
+      stripped: true,
+      session_transcript: {},
+      session_summary: { summarized_at: "2026-07-01T00:00:00+00:00" },
+    }),
+    { reached: 4, total: 4, pct: 100 },
+  );
+});
+
+test("journeyProgress: a half-done milestone set never reads 100%", () => {
+  // The bar's whole job is "% of real work", so a session with a transcript but
+  // no summary must not paint full — the pre-#326 bug class (bar hardcoded to a
+  // stage count below the real one) reads 100% early.
+  const { pct } = journeyProgress({ wav_count: 1, stripped: true, session_transcript: {} });
+  assert.ok(pct > 0 && pct < 100, `three of four milestones must read partial, got ${pct}%`);
 });

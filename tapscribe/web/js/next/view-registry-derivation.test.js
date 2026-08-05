@@ -13,6 +13,7 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import * as shell from "./shell.js";
+import { realMilestones } from "./components/spine.js";
 
 const abs = (rel) => fileURLToPath(new URL(rel, import.meta.url));
 const read = (rel) => readFileSync(abs(rel), "utf8");
@@ -149,4 +150,30 @@ test("the unbounded-cache predicate follows sessionKey, not a literal prefix", (
 test("sessionKey flag exists on exactly transcript", () => {
   const flagged = [...shell.VIEWS.entries()].filter(([, e]) => e.sessionKey).map(([id]) => id);
   assert.deepEqual(flagged, ["transcript"]);
+});
+
+test("every journey view declares a milestone realMilestones answers for", () => {
+  // #411 moved the per-stage ✓ from four `id === "..."` branches onto this
+  // optional table field, which made it the one part of adding a journey view
+  // that is NOT compile-forced: a new id must join the ViewId union, and it must
+  // gain a `buildChip` case or tsc trips TS2366, but omit `milestone` and the
+  // stage's ✓ never lights, silently and permanently. Same missing rung as
+  // "sessionKey flag exists on exactly transcript" above, and the same reason:
+  // the derived set is a hypothesis, not a proof.
+  //
+  // Keyset membership, not mere presence — `milestone: "transcribed"` on the
+  // Summary entry is a typo that yields `undefined`, i.e. a dead checkmark, and
+  // journey-done.test.js pins only the four mappings that exist today.
+  const keys = Object.keys(realMilestones(null));
+  for (const [id, entry] of shell.VIEWS) {
+    if (entry.group !== "journey") {
+      assert.equal(entry.milestone, undefined, `${id} is a global view but declares milestone ${entry.milestone}`);
+      continue;
+    }
+    assert.ok(
+      entry.milestone && keys.includes(entry.milestone),
+      `journey view ${id} declares milestone ${JSON.stringify(entry.milestone)}, which is not one of ` +
+        `realMilestones' keys (${keys.join(", ")}) — its checkmark can never light`,
+    );
+  }
 });
