@@ -505,6 +505,21 @@ card — see [ADR-0012](docs/adr/0012-bridge-artifacts-on-tagged-releases.md).
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
+## Tray Bridge
+
+The native tray-icon Bridge family: one cross-platform **bridge core**
+(the meeting bracket, CaptureOrchestrator, Level gate, and the `/tap` +
+control clients) plus a thin per-OS **shell** that contributes only
+audio capture, device enumeration, storage, and the tray UI. The
+Windows tray Bridge came first; the macOS tray Bridge is a sibling
+shell over the same core (ADR-0020 records the macOS platform
+choices). Unqualified "the tray Bridge" means the family; qualify with
+the OS only when the shell matters.
+
+_Avoid_: "the tray app" (it is a Bridge — it taps audio into a
+Recorder; a Bundle is what *is* a Recorder), and "the Mac bridge" for
+the family (that names one shell).
+
 ## Bundle · Launcher
 
 A **Bundle** is a self-contained, platform-native distribution of the
@@ -640,7 +655,8 @@ per device**, each opening its own `/tap` WS under its own stable
 `identity`/`name`, so recordings stay attributable per source instead of
 mixed into one stream — the coarse "me vs. them" split ahead of real
 diarization (#78). Defaults: the microphone streams under the operator's
-identity, the system **loopback** under `system`. The bridge core's
+identity, the system **loopback** under the shell's system-audio
+identity (default "System audio", operator-editable). The bridge core's
 **CaptureOrchestrator** owns the set of pipelines: it starts one per
 selected device (best-effort — a device that fails to open is surfaced and
 skipped while the rest still run), rejects duplicate identities up front
@@ -673,7 +689,8 @@ the ad-hoc "mic vs. system" / "loopback" framing. Say "multi-person tap," never
 This **nuances** the "One `/tap` WS = one speaker at a time" invariant: what a
 WS guarantees is one **attribution identity** (one caption bucket), not
 literally one human. A multi-person tap is one identity that diarization will
-later split into humans; until then its identity (e.g. the tray's `system`) is
+later split into humans; until then its identity (e.g. the tray's
+system-audio identity) is
 the coarse "me vs. them" bucket CaptureOrchestrator already draws.
 
 ## Person · Identity · Roster · People Registry
