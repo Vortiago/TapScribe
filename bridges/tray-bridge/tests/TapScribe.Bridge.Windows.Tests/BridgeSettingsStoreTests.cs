@@ -72,6 +72,17 @@ public class BridgeSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void SettingsFileName_StaysTheOnDiskContract()
+    {
+        // Every operator's saved settings (and DPAPI token) live under this exact
+        // name in %APPDATA%. It deliberately still says "windows-tray-bridge"
+        // after the bridges/tray-bridge/ directory rename — a tidy-up that
+        // "finishes" the rename here orphans them all, so a change to this
+        // constant needs a migration, not just a green build.
+        Assert.Equal("windows-tray-bridge.json", BridgeSettingsStore.SettingsFileName);
+    }
+
+    [Fact]
     public void SaveThenLoad_RoundTripsProcessOnEnd_WhenTurnedOff()
     {
         var original = new BridgeSettings { ProcessOnEnd = false };

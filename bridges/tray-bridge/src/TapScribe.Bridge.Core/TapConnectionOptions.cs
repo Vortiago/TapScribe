@@ -27,7 +27,14 @@ public sealed record TapConnectionOptions
     /// </summary>
     public bool AllowSelfSignedCert { get; init; }
 
-    /// <summary>Stable per-speaker identifier; the WAV filename slug.</summary>
+    /// <summary>
+    /// Stable per-speaker identifier; the WAV filename slug and the key the
+    /// Recorder attributes recordings under. The default deliberately keeps the
+    /// pre-rename "windows-tray" spelling (the bridges/tray-bridge/ directory
+    /// rename left it alone): changing it re-attributes the tray as a brand-new
+    /// speaker, so it needs a migration, not a rename — same contract class as
+    /// <c>BridgeSettingsStore.SettingsFileName</c>.
+    /// </summary>
     public string Identity { get; init; } = "windows-tray";
 
     /// <summary>Human-readable display name shown on the dashboard.</summary>

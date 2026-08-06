@@ -1,7 +1,7 @@
 name: CodeQL
 
 # CodeQL static analysis across Python (tapscribe/), JavaScript (bridges/,
-# tapscribe/web/js/) and C# (bridges/windows-tray-bridge/). Runs on push to
+# tapscribe/web/js/) and C# (bridges/tray-bridge/). Runs on push to
 # main, on PRs, and weekly so a freshly-disclosed CVE gets surfaced even
 # without a code change. Uses the default query suite — we are not tuning
 # rules until the noise level justifies it.

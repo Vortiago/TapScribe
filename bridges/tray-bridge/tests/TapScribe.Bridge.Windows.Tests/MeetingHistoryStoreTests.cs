@@ -18,6 +18,15 @@ public class MeetingHistoryStoreTests : IDisposable
         new() { SessionId = session, StartedAt = new DateTimeOffset(2026, 6, 24, 10, 0, 0, TimeSpan.Zero) };
 
     [Fact]
+    public void HistoryFileName_StaysTheOnDiskContract()
+    {
+        // Renaming the file silently discards every operator's Past-meetings
+        // list on upgrade; like BridgeSettingsStore.SettingsFileName, a change
+        // here needs a migration, not a rename.
+        Assert.Equal("meeting-history.json", MeetingHistoryStore.HistoryFileName);
+    }
+
+    [Fact]
     public void Load_MissingFile_ReturnsEmpty()
     {
         Assert.Empty(MeetingHistoryStore.Load(_path).Meetings); // fresh temp GUID, not yet written

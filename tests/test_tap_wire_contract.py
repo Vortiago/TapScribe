@@ -629,7 +629,7 @@ _BRIDGE_PATHS: dict[str, tuple[str, ...]] = {
         "/api/tap/new-session",
         "/api/tap/sessions/{session}/pipeline",
     ),
-    "bridges/windows-tray-bridge/src/TapScribe.Bridge.Core/ControlClient.cs": (
+    "bridges/tray-bridge/src/TapScribe.Bridge.Core/ControlClient.cs": (
         "/api/tap/new-session",
         "/api/tap/sessions/{session}/pipeline",
     ),

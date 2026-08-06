@@ -399,7 +399,7 @@ jobs:
       - name: Run the ${{ matrix.lane }} upstream-contract smoke tests
         run: pytest ${{ matrix.tests }} -q
 
-  # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
+  # The tray Bridge (bridges/tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture
   # backend, and a WinForms tray runner. This job builds the whole solution on
   # its native OS (so the net*-windows WASAPI/WinForms projects compile too) and
@@ -414,10 +414,10 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: bridges/windows-tray-bridge/global.json
+          global-json-file: bridges/tray-bridge/global.json
 
       - name: Build + test the whole solution
-        run: dotnet test bridges/windows-tray-bridge/TapScribe.WindowsTrayBridge.slnx -c Release
+        run: dotnet test bridges/tray-bridge/TapScribe.TrayBridge.slnx -c Release
 
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
@@ -434,10 +434,10 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: bridges/windows-tray-bridge/global.json
+          global-json-file: bridges/tray-bridge/global.json
 
       - name: Build + test bridge-core only
-        run: dotnet test bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 
   # The Windows Bundle's Launcher (packaging/windows/, ADR-0015) uses the same
   # Core/Windows split as the tray Bridge above and for the same reason: the
@@ -510,14 +510,14 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: bridges/windows-tray-bridge/global.json
+          global-json-file: bridges/tray-bridge/global.json
 
       - name: Run the tray-bridge meeting E2E (real Recorder, real ASR)
         env:
           TAPSCRIBE_PYTHON: python
         run: >
           dotnet test
-          bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj
+          bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj
           -c Release
           --filter "FullyQualifiedName~RealRecorderMeetingE2ETests"
 

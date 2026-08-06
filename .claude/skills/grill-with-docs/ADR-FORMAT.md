@@ -14,6 +14,16 @@ Create the `docs/adr/` directory lazily — only when the first ADR is needed.
 
 That's it. An ADR can be a single paragraph. The value is in recording *that* a decision was made and *why* — not in filling out sections.
 
+## Style
+
+Terse and present-tense: record the **current state** and the load-bearing
+why, not the transition or the decision-time narrative ("X lives at Y", not
+"X was renamed to Y after we verified…"). Cut evidence-gathering notes and
+anything another document owns. Every word costs tokens and reading time.
+When a decision an ADR describes has since been executed, collapsing its
+transition prose to the resulting state is an improvement, not a loss of
+history — git has the history.
+
 ## Optional sections
 
 Only include these when they add genuine value. Most ADRs won't need them.

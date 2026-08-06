@@ -14,6 +14,15 @@ public class MeetingStateStoreTests : IDisposable
         Path.Join(Path.GetTempPath(), $"tapscribe-meeting-{Guid.NewGuid():N}.json");
 
     [Fact]
+    public void StateFileName_StaysTheOnDiskContract()
+    {
+        // Renaming the file strands any in-flight meeting's restart-resume
+        // state on upgrade; like BridgeSettingsStore.SettingsFileName, a change
+        // here needs a migration, not a rename.
+        Assert.Equal("meeting-state.json", MeetingStateStore.StateFileName);
+    }
+
+    [Fact]
     public void SaveThenLoad_RoundTripsTheSessionId()
     {
         MeetingStateStore.Save(new MeetingState { SessionId = "2026-06-24T10-00-00" }, _path);
