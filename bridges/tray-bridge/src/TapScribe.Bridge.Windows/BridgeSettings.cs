@@ -230,6 +230,8 @@ public sealed class BridgeSettings
 /// <summary>Loads/saves <see cref="BridgeSettings"/> as JSON under %APPDATA%.</summary>
 public static class BridgeSettingsStore
 {
+    // The filename is an on-disk contract predating the bridges/tray-bridge/
+    // rename — changing it orphans every operator's saved settings.
     private static string DefaultPath => Path.Join(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "TapScribe", "windows-tray-bridge.json");

@@ -104,7 +104,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: bridges/windows-tray-bridge/global.json
+          global-json-file: bridges/tray-bridge/global.json
 
       - name: Derive version from tag
         shell: bash
@@ -113,7 +113,7 @@ jobs:
       - name: Publish self-contained single-file exe
         shell: pwsh
         run: >
-          dotnet publish bridges/windows-tray-bridge/src/TapScribe.TrayBridge
+          dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge
           -c Release -r win-x64 --self-contained
           -p:PublishSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true
@@ -124,7 +124,7 @@ jobs:
         shell: pwsh
         run: >
           Compress-Archive
-          -Path "bridges/windows-tray-bridge/src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
+          -Path "bridges/tray-bridge/src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
           -DestinationPath "TapScribe.TrayBridge-win-x64.zip" -Force
 
       - name: Upload tray artifact

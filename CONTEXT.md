@@ -636,7 +636,7 @@ session prunable for its whole lifetime (a pruned id refuses the next
 ## Capture device · render device · loopback
 
 The two kinds of audio endpoint a native Bridge can tap (see
-`bridges/windows-tray-bridge/`). A **capture device** is an input — a
+`bridges/tray-bridge/`). A **capture device** is an input — a
 microphone. A **render device** is an output — speakers/headphones — and
 is the **loopback** candidate: capturing its output mix (WASAPI
 **loopback** on Windows) records the system audio out, i.e. the "other
@@ -792,7 +792,7 @@ same way without the bridge core knowing the platform.
 The Bridge-side RMS **level** gate that decides utterance boundaries on
 platforms that have no native mute event — it is how the Windows tray
 Bridge produces **Mute**. Lives in the cross-platform bridge core
-(`GateOptions` / `LevelGate` under `bridges/windows-tray-bridge/`); its
+(`GateOptions` / `LevelGate` under `bridges/tray-bridge/`); its
 knobs are the **open threshold** (a linear RMS amplitude), the
 **hangover** (silence-to-close), and the **pre-roll** (leading audio
 replayed when the gate opens so the first consonants aren't clipped).

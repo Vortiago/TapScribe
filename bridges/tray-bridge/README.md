@@ -1,11 +1,14 @@
-# windows-tray-bridge
+# tray-bridge
 
-A native Windows **Bridge** for TapScribe: it captures the default microphone
-**and the system audio output (WASAPI loopback)** and streams each to the Recorder
+The **tray Bridge** family's home (CONTEXT.md → Tray Bridge): one
+cross-platform bridge core plus a thin per-OS shell, in one solution. Today
+that is the Windows shell — it captures the default microphone **and the
+system audio output (WASAPI loopback)** and streams each to the Recorder
 over the standard `/tap` wire contract as its own speaker, so both sides of a
-meeting are recorded under distinct identities in one session. Built on the C#
-stack proven by the tracer bullet (PRD #99, issues #103/#105): capture → resample →
-level gate → `/tap` → separately-attributed WAVs in the Recorder's session.
+meeting are recorded under distinct identities in one session. The macOS
+shell is planned (ADR-0020). Built on the C# stack proven by the tracer
+bullet (PRD #99, issues #103/#105): capture → resample → level gate →
+`/tap` → separately-attributed WAVs in the Recorder's session.
 
 It is the repo's first native desktop Bridge; see `../README.md` for the wire
 contract every Bridge speaks and `../../CONTEXT.md` for the domain vocabulary
@@ -51,9 +54,9 @@ cross-platform core (`MeetingController`, `PipelineView`, `CaptureOrchestrator`,
 ## Layout
 
 ```
-windows-tray-bridge/
+tray-bridge/
 ├── global.json                         # pins the .NET 10 SDK band
-├── TapScribe.WindowsTrayBridge.slnx
+├── TapScribe.TrayBridge.slnx
 ├── src/
 │   ├── TapScribe.Bridge.Core/          # net10.0 — CROSS-PLATFORM, no NAudio
 │   │   ├── TapWire.cs                   # 16 kHz / mono / 640-byte frame constants
@@ -117,9 +120,9 @@ the moment the core takes a Windows dependency.
 ## Build, test, run
 
 ```powershell
-# from this directory (bridges/windows-tray-bridge/)
-dotnet build TapScribe.WindowsTrayBridge.slnx -c Release       # whole solution
-dotnet test  TapScribe.WindowsTrayBridge.slnx -c Release       # runs all tests (core + Windows)
+# from this directory (bridges/tray-bridge/)
+dotnet build TapScribe.TrayBridge.slnx -c Release       # whole solution
+dotnet test  TapScribe.TrayBridge.slnx -c Release       # runs all tests (core + Windows)
 dotnet run   --project src/TapScribe.TrayBridge                # launch the tray app
 ```
 
@@ -135,7 +138,7 @@ To hand someone a single `.exe` that runs without a .NET install, publish the tr
 runner self-contained:
 
 ```powershell
-# from this directory (bridges/windows-tray-bridge/)
+# from this directory (bridges/tray-bridge/)
 dotnet publish src/TapScribe.TrayBridge -c Release -r win-x64 `
   --self-contained `
   -p:PublishSingleFile=true `

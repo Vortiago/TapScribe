@@ -16,7 +16,7 @@ Each bridge gets its own directory:
 bridges/
 ├── spacialchat-bridge/      Chrome MV3 extension for spatial.chat
 ├── local-test-bridge/       Python dev tool: mic-to-Recorder for local testing
-├── windows-tray-bridge/     Native Windows tray app (C# / .NET): mic capture
+├── tray-bridge/             Native tray Bridge (C# / .NET): core + Windows shell
 ├── <future>-bridge/         drop another platform's bridge here
 └── README.md                this file
 ```
@@ -94,7 +94,7 @@ errors — there's nothing for it to do about WlK state anyway.
   `people.json` — one junk speaker in the operator's GLOBAL registry per
   Test-connection click. Both bundled bridges do this already
   (`spacialchat-bridge/control-client.js`'s `probeTapToken`,
-  `windows-tray-bridge`'s `ConnectionTester.cs`).
+  `tray-bridge`'s `ConnectionTester.cs`).
 - `name`: human-readable display name (e.g. "Alice"). Used on the
   dashboard. Falls back to empty.
 - `utterance_id` (recommended): a per-utterance id the bridge mints once
@@ -132,7 +132,7 @@ from a transient WS failure (network blip, recorder restart) should:
    first (see below).
 
 The two bundled production bridges (`spacialchat-bridge/content.js` and
-`windows-tray-bridge`'s `TapStream.cs` / `TapStreamOptions.cs`) have
+`tray-bridge`'s `TapStream.cs` / `TapStreamOptions.cs`) have
 converged on the same concrete numbers below — the **Blip-resilience
 recipe** (see CONTEXT.md). Treat it as the recommended starting point for a
 new bridge rather than re-deriving your own loss budget from scratch. Unlike
@@ -184,7 +184,7 @@ should choose consciously rather than copy both halves:
   dial-on-next-PCM-frame path in `openTapWs`, and both are cleared by a
   settings change (`reconnectAllForSettingsChange`), so fixing the token
   or ticking Use TLS in the popup redials without a tab reload.
-- `windows-tray-bridge`'s `TapStream.cs` (the class doc's fail-loudly
+- `tray-bridge`'s `TapStream.cs` (the class doc's fail-loudly
   reconnect rule and the first-connect branch in `RunAsync`)
   treats a failure on the utterance's **first** connect as terminal: it
   surfaces the exception via `onTerminalFailure` and stops immediately,
@@ -202,7 +202,7 @@ which one it picked and why, rather than silently blending the two.
 
 The bundled `spacialchat-bridge` implements the reconnect/buffer/drain
 recipe above; see `bridges/spacialchat-bridge/content.js` for a reference,
-or `bridges/windows-tray-bridge/src/TapScribe.Bridge.Core/TapStream.cs` for
+or `bridges/tray-bridge/src/TapScribe.Bridge.Core/TapStream.cs` for
 the terminal-first-failure variant.
 
 ## Control endpoint — start a new session
@@ -345,10 +345,10 @@ degrades to `"idle"` if polled before the summary file exists. A meeting
 card that only holds the session id (not a local summary cache) and
 re-derives from this poll on each open survives that restart transparently.
 
-The bundled `spacialchat-bridge` and `windows-tray-bridge` both call this
+The bundled `spacialchat-bridge` and `tray-bridge` both call this
 pair from their **End meeting** flow; see `control-client.js`
 (`TapscribeControlClient`) in `spacialchat-bridge/` or `ControlClient.cs` in
-`windows-tray-bridge/` for reference implementations.
+`tray-bridge/` for reference implementations.
 
 ## Keeping the languages honest
 

@@ -463,10 +463,10 @@ def recorder_contract() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _SC = Path("bridges/spacialchat-bridge")
-_TRAY = Path("bridges/windows-tray-bridge/src/TapScribe.Bridge.Core")
+_TRAY = Path("bridges/tray-bridge/src/TapScribe.Bridge.Core")
 _LTB = Path("bridges/local-test-bridge/local_test_bridge.py")
 _BRIDGES_README = Path("bridges/README.md")
-_TRAY_README = Path("bridges/windows-tray-bridge/README.md")
+_TRAY_README = Path("bridges/tray-bridge/README.md")
 _SC_README = _SC / "README.md"
 _CONTEXT = Path("CONTEXT.md")
 
