@@ -655,7 +655,8 @@ per device**, each opening its own `/tap` WS under its own stable
 `identity`/`name`, so recordings stay attributable per source instead of
 mixed into one stream — the coarse "me vs. them" split ahead of real
 diarization (#78). Defaults: the microphone streams under the operator's
-identity, the system **loopback** under `system`. The bridge core's
+identity, the system **loopback** under the shell's system-audio
+identity (default "System audio", operator-editable). The bridge core's
 **CaptureOrchestrator** owns the set of pipelines: it starts one per
 selected device (best-effort — a device that fails to open is surfaced and
 skipped while the rest still run), rejects duplicate identities up front
@@ -688,7 +689,8 @@ the ad-hoc "mic vs. system" / "loopback" framing. Say "multi-person tap," never
 This **nuances** the "One `/tap` WS = one speaker at a time" invariant: what a
 WS guarantees is one **attribution identity** (one caption bucket), not
 literally one human. A multi-person tap is one identity that diarization will
-later split into humans; until then its identity (e.g. the tray's `system`) is
+later split into humans; until then its identity (e.g. the tray's
+system-audio identity) is
 the coarse "me vs. them" bucket CaptureOrchestrator already draws.
 
 ## Person · Identity · Roster · People Registry
