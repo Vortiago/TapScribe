@@ -1,16 +1,12 @@
 # Bridges
 
 A **bridge** taps the remote audio of a meeting platform and forwards it
-to the TapScribe Recorder as PCM frames over WebSocket. Bridges are
-typically Chrome / Firefox extensions, but a bridge can equally well be
-a native helper app (e.g. a Teams or Zoom plugin) — the Recorder doesn't
-care which platform the audio came from. Every bridge talks the same
-wire protocol, so each is a self-contained package living next to its
-siblings here.
+to the TapScribe Recorder as PCM frames over WebSocket — a browser
+extension, a native helper app, anything. Every bridge talks the same
+wire protocol below; each lives as a self-contained package here, with
+its own README for platform specifics.
 
 ## Layout
-
-Each bridge gets its own directory:
 
 ```
 bridges/
@@ -21,252 +17,205 @@ bridges/
 └── README.md                this file
 ```
 
-For a browser-extension bridge, the directory typically contains:
-
-- `manifest.json` (Chrome MV3) or equivalent for other browsers
-- `src/` or top-level JS files for content script, background script, popup
-- `icons/` for the toolbar icon
-- A `README.md` documenting target platform, required permissions, and
-  how to load it unpacked during development
-
-Native-app bridges (e.g. a Teams add-in) follow whatever layout their
-host platform expects; the only contract is the wire protocol below.
-
 ## Wire protocol — one endpoint, one job
 
-Every bridge does exactly one thing: open a WebSocket per utterance to
-the Recorder's `/tap` endpoint and stream raw PCM frames. The Recorder
-fans the audio out internally to live captioning AND per-utterance WAV
+A bridge does exactly one thing: open a WebSocket per utterance to the
+Recorder's `/tap` endpoint and stream raw PCM frames. The Recorder fans
+the audio out internally to live captioning AND per-utterance WAV
 recording — bridges don't talk to WhisperLiveKit themselves and don't
-POST settled lines back. (See ADR-0002 for why.)
+POST settled lines back (ADR-0002).
 
 **Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>`
 (or `wss://...` when the recorder was started with `--tls`).
 
 **Audio format:** PCM signed 16-bit little-endian, 16 kHz mono, raw
 binary frames. Frame size: 20 ms (320 samples = 640 bytes). Send one
-frame per WebSocket message; don't buffer multiple frames per send if
-you want clean live caption granularity.
+frame per WebSocket message — buffering multiple frames per send costs
+live-caption granularity.
 
 **Auth:** unless the recorder was started with `--no-auth`, every bridge
 MUST offer a `Sec-WebSocket-Protocol` of the form
-`tapscribe.v1.tap.<token>` where `<token>` is the value the recorder
+`tapscribe.v1.tap.<token>`, where `<token>` is the value the recorder
 printed at boot (also stored in `.tap-token`). The server echoes the
-same subprotocol back on a successful upgrade and refuses the upgrade
-otherwise. Browsers can only set the subprotocol via the second
-argument of `new WebSocket(url, [proto])` — there is no way to set
-arbitrary headers from a content script, which is why we use the
-subprotocol slot instead of `Authorization`.
+subprotocol back on a successful upgrade and refuses the upgrade
+otherwise. (The subprotocol slot is used because a browser content
+script can't set arbitrary headers on a WebSocket — only the second
+argument of `new WebSocket(url, [proto])`.)
 
 **Lifecycle:**
 
 | Bridge action | Recorder reaction |
 |---|---|
-| Open WS → speaker starts speaking (e.g. unmute) | Recorder opens a fresh WAV under `recordings/<session>/`, marks the connection in `ActiveStreams`, opens its own internal WS to its supervised WhisperLiveKit child for live captions. |
-| Send PCM frame | Recorder appends to the WAV AND forwards to WlK. WlK's settled lines come back to the Recorder (not the bridge) and land in `LiveTranscripts` attributed to your `identity`/`name`. |
-| Mute, with PCM still buffered on the bridge (**Drain**) | Bridge keeps its reconnect ladder running for up to `DRAIN_MAX_MS` (recommended 8 s) instead of closing immediately, flushes the buffered tail to the next `/tap` WS that lands, then closes cleanly. See "Drain — flush-then-close on mute" below. |
-| Close WS → speaker stops speaking (e.g. mute) | Recorder finalises the WAV (or deletes it if zero bytes were received) and closes the internal WlK relay (with a brief drain so tail captions for already-sent audio still get through). |
+| Open WS (speaker unmutes) | Opens a fresh WAV under `recordings/<session>/`, marks the connection in `ActiveStreams`, opens its own internal WS to its supervised WhisperLiveKit child for live captions. |
+| Send PCM frame | Appends to the WAV AND forwards to WlK. Settled lines come back to the Recorder (not the bridge) and land in `LiveTranscripts` attributed to your `identity`/`name`. |
+| Mute with PCM still buffered (**Drain**) | Bridge keeps its reconnect ladder running for up to `DRAIN_MAX_MS` instead of closing immediately, flushes the buffered tail to the next `/tap` WS that lands, then closes. See "Drain" below. |
+| Close WS (speaker mutes) | Finalises the WAV (deletes it if zero bytes arrived) and closes the internal WlK relay, with a brief drain so tail captions for already-sent audio still get through. |
 
-**Per-speaker isolation:** when multiple speakers are active
-simultaneously, the bridge opens one `/tap` WS per speaker. The Recorder
-opens one internal WlK relay per `/tap`. Settled-line attribution is
-automatic — the line came from *this* WS, which we know belongs to
-`identity=alice`.
+**Per-speaker isolation:** one `/tap` WS per active speaker; the
+Recorder opens one internal WlK relay per `/tap`, so settled-line
+attribution is automatic.
 
 **Graceful degradation:** if WhisperLiveKit isn't running (not
-auto-started by default, operator clicked Stop on the dashboard, or
-the child crashed), the WAV recording proceeds unaffected; live captions
-just don't flow until the live channel is restarted. The bridge sees no
-errors — there's nothing for it to do about WlK state anyway.
+auto-started by default, stopped from the dashboard, or crashed), WAV
+recording proceeds unaffected; live captions just don't flow. The bridge
+sees no errors — there's nothing it could do about WlK state anyway.
 
 **Query parameters:**
-- `identity` (required-ish): a stable per-speaker identifier. Used as
-  the WAV filename slug and as the `identity` field on settled-line
-  entries. Falls back to `unknown` if not supplied.
-  **`__probe__` is RESERVED** — it is the identity a bridge uses to
-  verify the tap token works ("Test connection"), and the Recorder
-  special-cases it so the tap leaves no durable and no live-visible
-  state: no WAV, no roster occurrence, no `ActiveStreams` row.
-  `tapscribe/tap_fan_out.py`'s `PROBE_IDENTITY` is the server-side
-  source of truth. Probe with that exact string, never with a
-  human-looking one like `probe`: an ordinary identity writes a roster
-  occurrence at WS open, which auto-binds a durable Person in
-  `people.json` — one junk speaker in the operator's GLOBAL registry per
-  Test-connection click. Both bundled bridges do this already
+
+- `identity` (required-ish): stable per-speaker identifier — the WAV
+  filename slug and the `identity` on settled lines. Falls back to
+  `unknown`.
+  **`__probe__` is RESERVED** — the identity for verifying the tap token
+  ("Test connection"). The Recorder special-cases it to leave no durable
+  and no live-visible state: no WAV, no roster occurrence, no
+  `ActiveStreams` row. `tapscribe/tap_fan_out.py`'s `PROBE_IDENTITY` is
+  the source of truth; probe with that exact string, never a
+  human-looking one — an ordinary identity writes a roster occurrence at
+  WS open, which auto-binds a durable Person in `people.json`: one junk
+  speaker in the operator's GLOBAL registry per Test-connection click.
+  Both bundled bridges do this
   (`spacialchat-bridge/control-client.js`'s `probeTapToken`,
   `tray-bridge`'s `ConnectionTester.cs`).
-- `name`: human-readable display name (e.g. "Alice"). Used on the
-  dashboard. Falls back to empty.
-- `utterance_id` (recommended): a per-utterance id the bridge mints once
-  at the start of an unmuted speech segment and keeps stable across
-  reconnects within that utterance. If a /tap WS dies mid-utterance and
-  the bridge reopens with the same `utterance_id` within
-  `UtteranceIndex.RESUME_WINDOW_SECONDS` (60 s by default), the Recorder
-  appends to the same WAV instead of producing a second file. Clear it
-  on mute / end-of-utterance and mint a fresh one on the next unmute.
-  Omitting this still works (each WS gets its own WAV), but bridges that
-  want blip resilience should supply it.
-- `session` (optional): a session id to direct this tap into — normally a
-  **detached session** the bridge minted via the control endpoint below.
-  Present, the WAV (and the tap's live-feed lines) land in that session;
-  absent, the Recorder's global current session is used. The id is
-  validated against the existing sessions on disk: an unknown or invalid
-  id **refuses the WS upgrade** with an HTTP 404 denial — the same
-  fail-loudly shape as a bad tap token (which refuses with its 4401
+- `name`: human-readable display name for the dashboard. Falls back to
+  empty.
+- `utterance_id` (recommended): minted once at the start of an unmuted
+  speech segment, kept stable across reconnects within that utterance.
+  Reopening with the same `utterance_id` within
+  `UtteranceIndex.RESUME_WINDOW_SECONDS` (60 s by default) appends to
+  the same WAV instead of producing a second file. Clear on mute; mint
+  fresh on the next unmute. Omitting it still works (each WS gets its
+  own WAV) but forfeits blip resilience.
+- `session` (optional): a session id to direct this tap into — normally
+  a **detached session** minted via the control endpoint below. Present,
+  the WAV and the tap's live-feed lines land there; absent, the global
+  current session is used. The id is validated against the sessions on
+  disk: an unknown or invalid id **refuses the WS upgrade** with an HTTP
+  404 denial — the same fail-loudly shape as a bad tap token (its 4401
   close), so a misconfigured bridge errors instead of recording into the
   wrong session. Only pass ids of eagerly-created detached sessions: the
-  global current session materialises lazily on its first WAV, so passing
-  *its* id can 404 — omit the param to target it. Affiliation is
+  global current session materialises lazily on its first WAV, so
+  passing *its* id can 404 — omit the param to target it. Affiliation is
   snapshotted at WS open — a session rotation never re-homes an
   already-open tap.
 
-**Reconnect / blip resilience:** the Recorder will not auto-reconnect to
-the bridge — `/tap` is bridge-initiated. A bridge that wants to recover
-from a transient WS failure (network blip, recorder restart) should:
+**Reconnect / blip resilience:** `/tap` is bridge-initiated; the
+Recorder never reconnects. To recover from a transient WS failure
+(network blip, recorder restart):
 
 1. Detect close-with-code != 1000 (or `onerror`).
 2. Reopen `/tap` with the **same** `utterance_id` after a short backoff.
-3. Buffer PCM frames during the gap so audio captured while disconnected
-   isn't lost when the WS comes back.
-4. On mute, don't close immediately if PCM is still buffered — **drain**
-   first (see below).
+3. Buffer PCM frames during the gap.
+4. On mute, don't close while PCM is still buffered — **drain** first.
 
-The two bundled production bridges (`spacialchat-bridge/content.js` and
-`tray-bridge`'s `TapStream.cs` / `TapStreamOptions.cs`) have
-converged on the same concrete numbers below — the **Blip-resilience
-recipe** (see CONTEXT.md). Treat it as the recommended starting point for a
-new bridge rather than re-deriving your own loss budget from scratch. Unlike
-the wire contract above, the Recorder has no opinion on these: a bridge with
-a good reason may deviate. The bundled two may not drift from each other,
-and `tests/test_tap_wire_contract.py` holds them to it.
+The two bundled bridges (`spacialchat-bridge/content.js`,
+`tray-bridge`'s `TapStream.cs` / `TapStreamOptions.cs`) converged on the
+concrete numbers below — the **Blip-resilience recipe** (CONTEXT.md).
+Recommended starting point, not wire contract: the Recorder has no
+opinion, and a bridge with a good reason may deviate. The bundled two
+may not drift from each other — `tests/test_tap_wire_contract.py` holds
+them to it.
 
 - **Backoff ladder:** jittered exponential — `200, 400, 800, 1600, 3200 ms`,
-  capped at `5000 ms`, with **±25 % jitter** on each delay so a roomful of
-  reconnecting bridges doesn't synchronise its retries
-  (`spacialchat-bridge/content.js`'s `BACKOFF_MS` / `BACKOFF_CAP_MS`
-  constants and `nextBackoffMs()`;
-  `TapStreamOptions.cs`'s `Backoff` / `BackoffCap` / `BackoffJitter`).
+  capped at `5000 ms`, with **±25 % jitter** on each delay so a roomful
+  of reconnecting bridges doesn't synchronise its retries
+  (`content.js`: `BACKOFF_MS` / `BACKOFF_CAP_MS` / `nextBackoffMs()`;
+  `TapStreamOptions.cs`: `Backoff` / `BackoffCap` / `BackoffJitter`).
 - **Gap buffer:** cap PCM buffered while disconnected at **96 000 bytes**
-  (≈ 3 s of 16 kHz mono int16), dropping the **oldest** frames past the cap
-  so a long outage loses only its tail instead of growing memory without
-  bound (`content.js`'s `MAX_BUFFER_BYTES`, enforced in `bufferPush()`;
-  `TapStreamOptions.cs`'s `MaxBufferBytes`).
-- **Drain — flush-then-close on mute.** This is the Bridge-side half of the
-  [Drain invariant](../CONTEXT.md#drain): trailing PCM buffered when mute
-  fires hasn't necessarily reached the Recorder yet, so don't close `/tap`
-  immediately — keep the reconnect ladder running, and once a WS lands,
-  flush the buffer to it *before* closing. A bridge that closes on mute
-  without draining silently truncates the WAV whenever mute lands mid-blip.
-  **Bound the wait** with a `DRAIN_MAX_MS` (recommended **8000 ms**): past
-  that deadline, give up and close anyway — an unreachable Recorder must
-  never wedge the utterance forever
-  (`content.js`'s `DRAIN_MAX_MS`, `restartDrainTimer()` /
-  `endUtterance()`; `TapStreamOptions.cs`'s `DrainBudget`, `TapStream.cs`'s
-  `BeginDrain` / `DrainAndDisposeAsync`).
+  (≈ 3 s of 16 kHz mono int16), dropping the **oldest** frames past the
+  cap so a long outage loses only its tail instead of growing memory
+  without bound (`content.js`: `MAX_BUFFER_BYTES`, enforced in
+  `bufferPush()`; `TapStreamOptions.cs`: `MaxBufferBytes`).
+- **Drain — flush-then-close on mute**, the Bridge-side half of the
+  [Drain invariant](../CONTEXT.md#drain): trailing PCM buffered when
+  mute fires hasn't necessarily reached the Recorder, so keep the
+  reconnect ladder running and flush the buffer to the next WS that
+  lands *before* closing — closing on mute without draining silently
+  truncates the WAV whenever mute lands mid-blip. **Bound the wait**
+  with a `DRAIN_MAX_MS` (recommended **8000 ms**): past that deadline,
+  close anyway — an unreachable Recorder must never wedge the utterance
+  forever (`content.js`: `DRAIN_MAX_MS`, `restartDrainTimer()` /
+  `endUtterance()`; `TapStreamOptions.cs`: `DrainBudget`;
+  `TapStream.cs`: `BeginDrain` / `DrainAndDisposeAsync`).
 
-**First-connect-failure semantics — an open choice, pick one deliberately:**
-the two bundled bridges diverge here and neither is wrong, but a new bridge
-should choose consciously rather than copy both halves:
+**First-connect-failure semantics — an open choice, pick one deliberately.**
+The two bundled bridges diverge here on purpose; a new bridge should
+choose consciously, document its pick, and not blend the two:
 
-- `spacialchat-bridge/content.js`'s `shouldReconnect()`
-  keeps the reconnect ladder running on **any** unclean close — including
-  the very first connect attempt for an utterance — as long as the speaker
-  hasn't muted or the tap hasn't stopped. A Recorder that's briefly
-  unreachable right as an utterance starts (e.g. mid-restart) still catches
-  up once it comes back, at the cost of retrying indefinitely against an
-  unreachable host or an unknown `session` (which refuses the upgrade with
-  a 404 the browser only surfaces as an abnormal close, indistinguishable
-  from a network blip) with no user-visible give-up beyond the popup's
-  `error` status. Two failures are carved out as **sticky** instead,
+- `spacialchat-bridge/content.js` (`shouldReconnect()`) keeps the ladder
+  running on **any** unclean close — including the utterance's very
+  first connect — until mute or tap-stop. A Recorder briefly unreachable
+  as an utterance starts still catches up, at the cost of retrying
+  indefinitely against an unreachable host or an unknown `session`
+  (whose 404 upgrade refusal the browser only surfaces as an abnormal
+  close, indistinguishable from a blip) with no give-up beyond the
+  popup's `error` status. Two failures are carved out as **sticky**
   because retrying them can only thrash: a `4401` tap-token rejection
   (`tap-auth-failed`) and a `ws://`-from-`https://` mixed-content
   configuration (`tls-required`). Both stop the ladder *and* the
   dial-on-next-PCM-frame path in `openTapWs`, and both are cleared by a
-  settings change (`reconnectAllForSettingsChange`), so fixing the token
+  settings change (`reconnectAllForSettingsChange`) — fixing the token
   or ticking Use TLS in the popup redials without a tab reload.
-- `tray-bridge`'s `TapStream.cs` (the class doc's fail-loudly
-  reconnect rule and the first-connect branch in `RunAsync`)
+- `tray-bridge`'s `TapStream.cs` (the first-connect branch in `RunAsync`)
   treats a failure on the utterance's **first** connect as terminal: it
-  surfaces the exception via `onTerminalFailure` and stops immediately,
-  reasoning that an unreachable Recorder / refused token / unknown session
-  is a configuration problem, not a transient blip, matching the wire
-  contract's fail-loudly stance (mirroring the `/tap` bad-token 4401 close
-  and the bad-`session` 404 upgrade refusal above). Only a **mid-utterance**
-  failure — the stream had connected at least once — gets the reconnect
-  ladder.
+  surfaces the exception via `onTerminalFailure` and stops — an
+  unreachable Recorder / refused token / unknown session is a
+  configuration problem, not a blip, matching the wire contract's
+  fail-loudly stance. Only a **mid-utterance** failure — the stream had
+  connected at least once — gets the reconnect ladder.
 
 Both are defensible: content.js optimises for "never truncate a meeting
-just because the Recorder was mid-restart," TapStream.cs optimises for
-"don't spin forever against a config typo." A new bridge should document
-which one it picked and why, rather than silently blending the two.
-
-The bundled `spacialchat-bridge` implements the reconnect/buffer/drain
-recipe above; see `bridges/spacialchat-bridge/content.js` for a reference,
-or `bridges/tray-bridge/src/TapScribe.Bridge.Core/TapStream.cs` for
-the terminal-first-failure variant.
+because the Recorder was mid-restart"; TapStream.cs for "don't spin
+forever against a config typo".
 
 ## Control endpoint — start a new session
 
-Besides streaming audio over `/tap`, a bridge can ask the Recorder to
-**rotate to a fresh recording session** without the operator touching the
-dashboard — handy when one meeting ends and another begins in the same
-place (daily → refinement), or when the platform moves you to a different
-room.
+A bridge can rotate the Recorder to a fresh recording session without
+the operator touching the dashboard (one meeting ends, another begins).
 
 **Endpoint:** `POST http://<recorder-host>:8001/api/tap/new-session`
-(`https://...` under `--tls`). Fire-and-forget; no request body for the
-legacy rotate. With a JSON body of `{"detached": true}` it creates a
-**detached session** instead — see below.
+(`https://...` under `--tls`). Fire-and-forget; no body for the legacy
+rotate. A JSON body of `{"detached": true}` creates a **detached
+session** instead — see below.
 
-**Auth:** the **same tap token** as `/tap`, but carried as an
-`Authorization: Bearer <token>` header. Unlike the WebSocket handshake, an
-HTTP `fetch()` *can* set arbitrary headers, so there's no need for the
-subprotocol trick here. Under `--no-auth` the header is optional; a
-missing or incorrect token returns `401` and does not rotate.
+**Auth:** the same tap token as `/tap`, carried as
+`Authorization: Bearer <token>` (an HTTP `fetch()` can set headers, so
+no subprotocol trick). Optional under `--no-auth`; a missing or wrong
+token returns `401` and does not rotate.
 
-**Effect:** the Recorder rotates `session_start`/`session_dir` to a fresh
-UTC-stamped folder (already-open `/tap` WebSockets keep writing to their
-original folder; only new opens land in the new one). It **rotates only — it
-deletes nothing.** Removing empty session folders stays a dashboard
-(Basic-auth) action: the dashboard's "+ new session" button rotates *and*
-prunes empties, and there's a separate "prune empty" action. The tap token is
-a lower-privilege credential, so it can start a session but not delete folders.
+**Effect:** rotates `session_start`/`session_dir` to a fresh UTC-stamped
+folder. Already-open `/tap` WebSockets keep writing to their original
+folder; only new opens land in the new one. It **rotates only — it
+deletes nothing**: the tap token is a lower-privilege credential, so
+pruning empty session folders stays a dashboard (Basic-auth) action.
 
-**Idempotency:** if the current session has received no audio yet, the call is
-a no-op rotation (it won't churn the session timestamp). The JSON response is
-`{"ok": true, "rotated": true|false, "previous": "...", "current":
-"<session-id>", "path": "..."}`.
-
-The `spacialchat-bridge` calls this from its popup's **New session** button
-and — when the operator ticks **"start new session on room change"** —
-automatically whenever SpatialChat swaps rooms.
+**Idempotency:** if the current session has received no audio, the call
+is a no-op (no timestamp churn). Response: `{"ok": true, "rotated":
+true|false, "previous": "...", "current": "<session-id>", "path": "..."}`.
 
 ### Detached sessions — per-bridge isolation
 
 A rotation moves the **global** current session, which every plain tap
-shares. When two people tap two different meetings against one Recorder,
-each bridge should instead work in its own **detached session**:
+shares. Two bridges tapping two meetings against one Recorder should
+each work in their own **detached session**:
 
-1. `POST /api/tap/new-session` with a JSON body of `{"detached": true}`
-   (same bearer auth). The Recorder mints a fresh session directory and
+1. `POST /api/tap/new-session` with body `{"detached": true}` (same
+   bearer auth). The Recorder mints a fresh session directory and
    returns it **without** touching the global current session:
    `{"ok": true, "detached": true, "session": "<id>", "path": "...",
    "current": "<the untouched global id>"}`.
-2. Open every `/tap` WS with `?session=<id>` so the bridge's audio lands
-   there, isolated from concurrent taps that use the global session.
+2. Open every `/tap` WS with `?session=<id>`.
 
 Detached sessions are ordinary sessions — same on-disk layout, dashboard
-listing, transcription and maintenance operations. Two practical notes:
-a freshly created detached session is empty until its first WAV, so the
-dashboard's prune-empties actions can delete it (create it just-in-time);
-and the id only lives in the bridge — the Recorder won't redirect plain
-taps to it.
+listing, transcription and maintenance operations. Two notes: a freshly
+created detached session is empty until its first WAV, so the
+dashboard's prune-empties actions can delete it (create it
+just-in-time); and the id lives only in the bridge — the Recorder won't
+redirect plain taps to it.
 
-Demo with two terminals against one Recorder (the WAVs land in two
-different session folders). `TAPSCRIBE_TAP_TOKEN` is the tap token the
-recorder printed at boot (also stored in `.tap-token`); the
-local-test-bridge reads the same env var for its `--tap-token` default,
-and under `--no-auth` you can drop the Authorization header entirely:
+Demo — two terminals, one Recorder, WAVs land in two session folders
+(`TAPSCRIBE_TAP_TOKEN` is the boot-printed tap token, which the
+local-test-bridge also reads for its `--tap-token` default; under
+`--no-auth` drop the Authorization header):
 
 ```
 # terminal 1 — a detached meeting
@@ -281,105 +230,91 @@ python bridges/local-test-bridge/local_test_bridge.py
 
 ## Control endpoint — end-of-meeting pipeline
 
-A bridge that brackets a meeting (**Start meeting → End meeting** — see the
-[Bracketed meeting](../CONTEXT.md#bracketed-meeting) entry in CONTEXT.md) can
-ask the Recorder to run its whole post-processing chain — strip silence →
-batch-transcribe the stripped output → summarize — as **one** job on a
-finished session, then poll for progress and the finished summary. This is
-the [end-of-meeting pipeline](../CONTEXT.md#end-of-meeting-pipeline); a
-bridge only ever triggers it against its own [detached
-session](#detached-sessions--per-bridge-isolation), once **End meeting** has
-closed every open tap (honouring Drain, above) so there's nothing left to
-race the strip stage's WAV glob.
+A bridge that brackets a meeting ([Bracketed
+meeting](../CONTEXT.md#bracketed-meeting)) can run the Recorder's whole
+post-processing chain — strip silence → batch-transcribe the stripped
+output → summarize — as **one** job on a finished session, then poll for
+progress and the summary: the [end-of-meeting
+pipeline](../CONTEXT.md#end-of-meeting-pipeline). Trigger it only
+against your own [detached
+session](#detached-sessions--per-bridge-isolation), after **End
+meeting** has closed every open tap (honouring Drain) so nothing races
+the strip stage's WAV glob.
 
 **Trigger — `POST http://<recorder-host>:8001/api/tap/sessions/<session>/pipeline`**
 (`https://...` under `--tls`).
 
-- **Auth:** the same tap bearer token as `/api/tap/new-session`
-  (`Authorization: Bearer <token>`) — the same TAP-BEARER scheme that gates
-  every route under `/api/tap`.
-- **Request body is ignored — entirely, never parsed.** There is no way to
-  choose the transcribe model, backend, or summarizer from this call: they
-  resolve from operator-side configuration only (`batch-model.txt`, the
-  Recorder's launch backend preference, the summarizer's configured
-  default), so a leaked tap token can never make the Recorder load or
+- **Auth:** the same tap bearer token as `/api/tap/new-session` — the
+  TAP-BEARER scheme that gates every route under `/api/tap`.
+- **Request body is ignored — entirely, never parsed.** The transcribe
+  model, backend and summarizer resolve from operator-side configuration
+  only, so a leaked tap token can never make the Recorder load or
   download an attacker-chosen model.
 - **Response:** `202` with `{"ok": true, "session": "<id>", "state":
-  "running"}` once the job slot is claimed — fire-and-forget; the chain runs
-  in the background. `session` must be a session id that's already on disk
-  (an unknown/invalid id 404s, same path-safety seam as the `session` query
-  parameter on `/tap`).
+  "running"}` once the job slot is claimed; the chain runs in the
+  background. `session` must already exist on disk (an unknown/invalid
+  id 404s — the same path-safety seam as `/tap`'s `session` param).
 - **Busy semantics:** the pipeline claims the session's single job slot
-  up front, in the request path, so the trigger's `202` is a deterministic
-  commitment. A concurrent trigger on the same session, or a manual
-  transcribe/strip already in flight, gets `409` instead — the same
-  one-heavy-job-per-session rule as every other batch route.
-- **Failure semantics:** a stage failure (nothing usable to strip, nothing
-  usable to transcribe after stripping, no transcript text to summarize, a
-  summarizer misconfiguration, …) aborts the whole chain; it does **not**
-  retry the remaining stages. The poll response's `failed` state below
-  surfaces which stage failed and why.
+  in the request path, so the `202` is a deterministic commitment. A
+  concurrent trigger, or a manual transcribe/strip in flight, gets `409`
+  — the same one-heavy-job-per-session rule as every other batch route.
+- **Failure semantics:** a stage failure (nothing to strip, nothing to
+  transcribe, no transcript text, a summarizer misconfiguration, …)
+  aborts the whole chain — remaining stages are not retried. The poll's
+  `failed` state surfaces which stage and why.
 
 **Poll — `GET http://<recorder-host>:8001/api/tap/sessions/<session>/pipeline`**
 (same tap-bearer auth). Response `state` is one of:
 
 - `"running"` — includes the live job snapshot's `stage` (`"strip"` |
-  `"transcribe"` | `"summarize"`), `status`, `current`/`total` (per-stage
-  progress), and `current_file`.
-- `"done"` — includes the persisted `summary` (the same shape written to
-  that session's `session-summary.json`).
-- `"failed"` — includes `stage` (which stage aborted the chain) and
-  `error`/`error_kind` (the domain error's message and class name).
-- `"idle"` — this session has no in-memory pipeline record and no persisted
-  summary: either never triggered, or the Recorder restarted since the last
-  trigger and that run never reached a persisted summary (see restart
-  survival below — a restart after a *successful* run still answers
-  `"done"`).
+  `"transcribe"` | `"summarize"`), `status`, `current`/`total`
+  (per-stage progress), and `current_file`.
+- `"done"` — includes the persisted `summary` (the shape written to the
+  session's `session-summary.json`).
+- `"failed"` — includes `stage` plus `error`/`error_kind` (the domain
+  error's message and class name).
+- `"idle"` — no in-memory pipeline record and no persisted summary:
+  never triggered, or the Recorder restarted and that run never reached
+  a persisted summary.
 
-**Restart survival:** the `"done"` answer is read from the persisted
-`session-summary.json` on disk, not from in-memory state — so a bridge that
-polls across a Recorder restart (its own crash, an update, a reboot) still
-gets `"done"` with the summary once the file exists, even though the
-in-memory run record (`"running"`/`"failed"`) is lost on restart and
-degrades to `"idle"` if polled before the summary file exists. A meeting
-card that only holds the session id (not a local summary cache) and
-re-derives from this poll on each open survives that restart transparently.
+**Restart survival:** `"done"` is read from `session-summary.json` on
+disk, not memory — a bridge polling across a Recorder restart still gets
+`"done"` with the summary once the file exists, while an in-flight
+`"running"`/`"failed"` record is lost on restart and degrades to
+`"idle"`. A meeting card that holds only the session id and re-derives
+from this poll on each open survives the restart transparently.
 
-The bundled `spacialchat-bridge` and `tray-bridge` both call this
-pair from their **End meeting** flow; see `control-client.js`
-(`TapscribeControlClient`) in `spacialchat-bridge/` or `ControlClient.cs` in
-`tray-bridge/` for reference implementations.
+Both bundled bridges call this pair from **End meeting**:
+`control-client.js` (`TapscribeControlClient`) in `spacialchat-bridge/`,
+`ControlClient.cs` in `tray-bridge/`.
 
 ## Keeping the languages honest
 
-The wire constants above are declared in JS, C#, Python and this prose, and
-they used to drift with nothing to catch it. They no longer can:
+The wire constants above are declared in JS, C#, Python and this prose,
+and are held in lock-step mechanically:
 
-- **`tapscribe/` is the source.** The Recorder serves `/tap`, so its own
-  constants *are* the contract. A wire change is a hand edit there — for the
-  subprotocol, `tapscribe/auth.py` — with its own tests.
-- **`python3 tools/stamp_tap_wire.py`** then rewrites the matching literal in
-  every bridge and every doc, this file included. Run it after any such edit;
-  it's idempotent, so running it when nothing changed prints
-  `already consistent`.
-- **`tests/test_tap_wire_contract.py`** fails when a declaration drifts —
-  including a hand edit that skipped the tool, and including a declaration
-  site nobody remembered to list.
+- **`tapscribe/` is the source** — the Recorder serves `/tap`, so its
+  constants *are* the contract. A wire change is a hand edit there (the
+  subprotocol lives in `tapscribe/auth.py`).
+- **`python3 tools/stamp_tap_wire.py`** rewrites the matching literal in
+  every bridge and every doc, this file included. Idempotent — prints
+  `already consistent` when nothing changed.
+- **`tests/test_tap_wire_contract.py`** fails on drift — including a
+  hand edit that skipped the tool, and a declaration site nobody listed.
 
-**Adding a bridge in a new language is one new `Site` row** in the stamper's
-table. Python on the Recorder's own side of the wire needs no row at all: it
-imports the constants. ADR-0019 has the reasoning, including why this is a
-stamper rather than codegen.
+A bridge in a new language is one new `Site` row in the stamper's table;
+Python on the Recorder's side needs no row — it imports the constants.
+ADR-0019 has the reasoning, including why this is a stamper rather than
+codegen.
 
 ## Adding a new bridge
 
-1. Create `bridges/<platform>-bridge/`.
-2. Add a `README.md` documenting target platform + how to load / install.
-3. Implement: tap audio from the platform → resample/convert to 16 kHz
+1. Create `bridges/<platform>-bridge/` with a `README.md` (target
+   platform + how to load / install).
+2. Implement: tap platform audio → resample/convert to 16 kHz
    mono int16 → open `/tap` WebSocket per utterance → stream frames →
-   **drain** any trailing buffered PCM on mute (bounded by a `DRAIN_MAX_MS`
-   budget, above) → close WS on utterance end.
+   **drain** trailing buffered PCM on mute (bounded by `DRAIN_MAX_MS`) →
+   close WS on utterance end.
 
 `bridges/local-test-bridge/` is the simplest reference implementation —
-it taps the local mic and streams to `/tap` on ENTER toggle. Cribbing
-its WS lifecycle is the fastest way to get a new bridge bootstrapped.
+it taps the local mic and streams to `/tap` on ENTER toggle.
