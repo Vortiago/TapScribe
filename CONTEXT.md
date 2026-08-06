@@ -468,7 +468,10 @@ seam; that variation rides the existing `LiveChannel` Protocol +
 The platform-side audio tap that forwards remote-participant PCM to the
 Recorder. Typically a browser extension (Chrome MV3 today) but can be
 any native helper for a different platform — Teams add-in, Zoom plugin,
-etc. Bridges live in `bridges/<platform>-bridge/`.
+etc. Each Bridge gets its own directory under `bridges/`, usually named
+for the platform it taps (`spacialchat-bridge/`); the tray family shares
+one platform-neutral `tray-bridge/` home for its per-OS shells
+(ADR-0020).
 
 Wire contract: one WebSocket per utterance to `ws://<recorder-host>/tap?identity=…&name=…`,
 streaming raw 16 kHz mono int16 PCM frames (20 ms / 640 bytes per frame).

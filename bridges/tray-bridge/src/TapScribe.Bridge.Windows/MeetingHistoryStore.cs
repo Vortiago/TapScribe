@@ -13,9 +13,15 @@ namespace TapScribe.Bridge.Windows;
 /// </summary>
 public static class MeetingHistoryStore
 {
-    private static string DefaultPath => Path.Join(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "TapScribe", "meeting-history.json");
+    /// <summary>
+    /// The on-disk history filename — an operator-facing contract like
+    /// <see cref="BridgeSettingsStore.SettingsFileName"/>. Renaming it silently
+    /// discards every operator's Past-meetings list on upgrade; a change here
+    /// needs a migration, not a rename.
+    /// </summary>
+    public const string HistoryFileName = "meeting-history.json";
+
+    private static string DefaultPath => BridgeAppData.PathFor(HistoryFileName);
 
     /// <summary>Load the history from the default %APPDATA% path (empty if none/corrupt).</summary>
     public static MeetingHistory Load() => Load(DefaultPath);

@@ -26,7 +26,7 @@ bounded **Drain**, a **multi-pipeline orchestrator** that runs N devices
 concurrently — each under its own stable `identity`/`name` — co-located in one
 **detached session**, a control client, a tray runner with at-a-glance **status**
 (idle / streaming / processing / error — event-driven, no idle polling) and Start meeting /
-End meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port / TLS /
+End meeting / Quit, and a **4-tab Settings dialog** — Connection (host / port / TLS /
 tap token + Test connection), **Devices** (capture the mic and/or system audio, each
 with one Name, its own sensitivity slider **and a live input-level meter** for tuning,
 plus an Advanced expander to pin
@@ -67,6 +67,7 @@ tray-bridge/
 │   │   ├── InputLevelMeter.cs           # display-only per-device level sampler for the Settings meter (#152)
 │   │   ├── LevelMeterScale.cs           # the meter's display axis: RMS -> [0,1], the slider's own log scale
 │   │   ├── TapConnectionOptions.cs      # URL + subprotocol builders; host normalisation
+│   │   ├── InsecureTls.cs               # the ONE accept-any-cert validator for the opt-in self-signed testing mode (#147)
 │   │   ├── ITapConnection.cs            # the connection seam TapStream drives (TapClient is the impl)
 │   │   ├── TapClient.cs                 # one /tap WebSocket (implements ITapConnection)
 │   │   ├── TapStream.cs                 # resilient Utterance: reconnect + gap buffer + Drain (+ TapStreamOptions.cs)
@@ -83,6 +84,12 @@ tray-bridge/
 │   │   ├── PipelineView.cs              # poll body -> meeting-card view-model (pure; #107)
 │   │   ├── MeetingController.cs         # End-meeting flow: drain -> trigger -> poll -> summary (#107)
 │   │   ├── MeetingState.cs              # restart-resume handle (session id) + JSON (pure)
+│   │   ├── MeetingHistory.cs            # local Past-meetings history model + JSON (bounded; #168)
+│   │   ├── MeetingRecord.cs             # one Past-meetings entry: session id + start time (#168)
+│   │   ├── MeetingFormView.cs           # per-meeting window view-model: PipelineView -> title/caption/body (pure)
+│   │   ├── MeetingViewDriver.cs         # drives an IMeetingView from polls, cross-platform (#168)
+│   │   ├── SummaryMarkdown.cs           # summary markdown -> block/span model (parsing stays out of WinForms)
+│   │   ├── GateSettings.cs              # one device's persisted gate tuning (sensitivity + hangover/pre-roll)
 │   │   └── GateTuning.cs                # sensitivity slider <-> linear RMS threshold
 │   ├── TapScribe.Bridge.Windows/       # net10.0-windows — WASAPI + settings (NAudio + DPAPI)
 │   │   ├── WasapiCaptureBase.cs         # shared WASAPI normalisation + lifecycle (one authority)
@@ -90,12 +97,15 @@ tray-bridge/
 │   │   ├── WasapiLoopbackAudioCapture.cs # IAudioCapture over a render endpoint (system-audio loopback)
 │   │   ├── WasapiDeviceEnumerator.cs    # IAudioDeviceEnumerator over NAudio MMDeviceEnumerator
 │   │   ├── BridgeSettings.cs            # %APPDATA% persistence; DPAPI-protected token
-│   │   └── MeetingStateStore.cs         # %APPDATA% restart-resume state file (#107)
+│   │   ├── SettingsDraft.cs             # the Settings dialog's editable state + decisions (no WinForms)
+│   │   ├── MeetingStateStore.cs         # %APPDATA% restart-resume state file (#107)
+│   │   └── MeetingHistoryStore.cs       # %APPDATA% Past-meetings history file (#168)
 │   └── TapScribe.TrayBridge/           # net10.0-windows WinForms tray runner (GUI only)
 │       ├── Program.cs, TrayContext.cs   # NotifyIcon: status header + Start / End / Settings / Quit
 │       ├── TrayIcons.cs                 # the 3 status icons, drawn at runtime (idle/streaming/error)
 │       ├── LevelMeterBar.cs             # the live input-level meter control (paints level + threshold marker)
-│       ├── SummaryForm.cs              # the finished-summary window + copy-to-clipboard (#107)
+│       ├── MeetingForm.cs               # the per-meeting window: summary + Copy (End meeting + Past-meetings re-open)
+│       ├── SummaryRichText.cs           # renders SummaryMarkdown onto the window's RichTextBox (presentation only)
 │       └── SettingsForm.cs              # 4-tab dialog: Connection / Devices / Level gate / Meeting
 └── tests/
     ├── TapScribe.Bridge.Core.Tests/     # net10.0 xUnit — cross-platform (most of the suite, incl. CaptureOrchestrator)
@@ -156,6 +166,9 @@ are explicitly out of scope for this PRD (#99); it's a copy-and-run exe.
 Right-click the tray icon → **Settings…** to edit everything in a tabbed dialog — no
 environment variables required. Settings are saved to
 `%APPDATA%\TapScribe\windows-tray-bridge.json` and remembered across restarts.
+(The filename deliberately keeps the pre-rename `windows-tray-bridge` spelling —
+it is the on-disk contract pinned by `BridgeSettingsStore.SettingsFileName`, and
+renaming it would orphan every operator's saved settings and protected token.)
 The **tap token is never written in cleartext**: it is protected at rest with
 Windows DPAPI (CurrentUser scope), so only the same Windows user can read it.
 

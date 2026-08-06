@@ -6,6 +6,18 @@ namespace TapScribe.Bridge.Core.Tests;
 public class TapConnectionOptionsTests
 {
     [Fact]
+    public void DefaultIdentity_StaysTheOnDiskContract()
+    {
+        // The identity is the WAV filename slug and the key the Recorder
+        // attributes recordings under. It deliberately still says
+        // "windows-tray" after the bridges/tray-bridge/ directory rename —
+        // changing it re-attributes the tray as a brand-new speaker (fresh
+        // people-registry entry, old recordings orphaned), so a change here
+        // needs a migration, not a rename.
+        Assert.Equal("windows-tray", new TapConnectionOptions().Identity);
+    }
+
+    [Fact]
     public void BuildTapUri_NoTls_HasWsSchemeAndTapPathAndEncodedParams()
     {
         var options = new TapConnectionOptions { Host = "localhost", Port = 8001, Identity = "alice", Name = "Alice B" };

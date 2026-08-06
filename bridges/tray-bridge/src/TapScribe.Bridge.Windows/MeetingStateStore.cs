@@ -11,9 +11,15 @@ namespace TapScribe.Bridge.Windows;
 /// </summary>
 public static class MeetingStateStore
 {
-    private static string DefaultPath => Path.Join(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "TapScribe", "meeting-state.json");
+    /// <summary>
+    /// The on-disk restart-resume filename — an operator-facing contract like
+    /// <see cref="BridgeSettingsStore.SettingsFileName"/>. Renaming it strands
+    /// any in-flight meeting's resume state on upgrade; a change here needs a
+    /// migration, not a rename.
+    /// </summary>
+    public const string StateFileName = "meeting-state.json";
+
+    private static string DefaultPath => BridgeAppData.PathFor(StateFileName);
 
     /// <summary>Load the active meeting from the default %APPDATA% path, or null if none.</summary>
     public static MeetingState? Load() => Load(DefaultPath);

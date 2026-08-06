@@ -223,8 +223,24 @@ public sealed class BridgeSettings
     private static string FallbackIdentity()
     {
         string user = Environment.UserName;
+        // "windows-tray" deliberately keeps its pre-rename spelling: the identity
+        // is the WAV filename slug and the key the Recorder attributes recordings
+        // under, so changing it re-attributes the tray as a brand-new speaker
+        // (see TapConnectionOptions.Identity).
         return string.IsNullOrEmpty(user) ? "windows-tray" : user;
     }
+}
+
+/// <summary>
+/// The one spelling of the tray's per-user data folder (%APPDATA%\TapScribe),
+/// shared by the three on-disk stores (settings / meeting state / meeting
+/// history) so the folder name cannot drift per store.
+/// </summary>
+internal static class BridgeAppData
+{
+    public static string PathFor(string fileName) => Path.Join(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "TapScribe", fileName);
 }
 
 /// <summary>Loads/saves <see cref="BridgeSettings"/> as JSON under %APPDATA%.</summary>
@@ -238,9 +254,7 @@ public static class BridgeSettingsStore
     /// </summary>
     public const string SettingsFileName = "windows-tray-bridge.json";
 
-    private static string DefaultPath => Path.Join(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "TapScribe", SettingsFileName);
+    private static string DefaultPath => BridgeAppData.PathFor(SettingsFileName);
 
     /// <summary>Load from the default %APPDATA% path.</summary>
     public static BridgeSettings Load() => Load(DefaultPath);
