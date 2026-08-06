@@ -505,6 +505,21 @@ card — see [ADR-0012](docs/adr/0012-bridge-artifacts-on-tagged-releases.md).
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
+## Tray Bridge
+
+The native tray-icon Bridge family: one cross-platform **bridge core**
+(the meeting bracket, CaptureOrchestrator, Level gate, and the `/tap` +
+control clients) plus a thin per-OS **shell** that contributes only
+audio capture, device enumeration, storage, and the tray UI. The
+Windows tray Bridge came first; the macOS tray Bridge is a sibling
+shell over the same core (ADR-0020 records the macOS platform
+choices). Unqualified "the tray Bridge" means the family; qualify with
+the OS only when the shell matters.
+
+_Avoid_: "the tray app" (it is a Bridge — it taps audio into a
+Recorder; a Bundle is what *is* a Recorder), and "the Mac bridge" for
+the family (that names one shell).
+
 ## Bundle · Launcher
 
 A **Bundle** is a self-contained, platform-native distribution of the
