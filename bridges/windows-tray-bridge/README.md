@@ -259,7 +259,7 @@ and the dialog is the source of truth thereafter.
 3. Right-click → **Start meeting**. Play some meeting audio (a video call, a
    YouTube clip) while you speak, pausing between sentences, then **End meeting**.
 4. **Two** sets of WAVs appear under the Recorder's new **detached** session — one
-   under your identity (the microphone) and one under `system` (the loopback) — each
+   under your identity (the microphone) and one under "System audio" (the loopback) — each
    split into Utterances by the level gate. Both sides of the meeting are recorded as
    separately-attributed speakers in the same session (issue #105's acceptance check).
    "Start meeting" mints the detached session and starts one pipeline per device.
@@ -282,7 +282,7 @@ server, so a wire regression is caught in CI without needing a live Recorder.
 To see per-device sensitivity take effect mid-meeting:
 
 1. **Start meeting** with the far end (system audio) quiet — quiet enough that the
-   system loopback gate doesn't open, so no `system` WAVs appear.
+   system loopback gate doesn't open, so no "System audio" WAVs appear.
 2. Open **Settings… → Devices**, raise **only** the system-audio Sensitivity, and
    **Save** (don't Stop). The far end starts being captured immediately, with no
    Stop/Start, and the mic pipeline is untouched.
@@ -302,7 +302,7 @@ run a second bridge concurrently against the same Recorder:
    `python bridges/local-test-bridge/local_test_bridge.py` (it taps `/tap` with no
    `?session=`, so it lands in the Recorder's global current session).
 3. On the dashboard you'll see **two** sessions filling at once: the tray Bridge's
-   detached session (mic + `system`) and the local-test-bridge's global one — never
+   detached session (mic + "System audio") and the local-test-bridge's global one — never
    muddled into one folder.
 
 That isolation is a Recorder-side property (the `?session=` routing landed in #100,
