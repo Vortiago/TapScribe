@@ -1,14 +1,13 @@
 # tray-bridge
 
-The **tray Bridge** family's home (CONTEXT.md → Tray Bridge): one
-cross-platform bridge core plus a thin per-OS shell, in one solution. Today
-that is the Windows shell — it captures the default microphone **and the
-system audio output (WASAPI loopback)** and streams each to the Recorder
-over the standard `/tap` wire contract as its own speaker, so both sides of a
-meeting are recorded under distinct identities in one session. The macOS
-shell is planned (ADR-0020). Built on the C# stack proven by the tracer
-bullet (PRD #99, issues #103/#105): capture → resample → level gate →
-`/tap` → separately-attributed WAVs in the Recorder's session.
+Home of the **tray Bridge** family (CONTEXT.md → Tray Bridge). Its one
+shell today is the Windows one: it captures the default microphone **and
+the system audio output (WASAPI loopback)** and streams each to the
+Recorder over the standard `/tap` wire contract as its own speaker, so both
+sides of a meeting are recorded under distinct identities in one session.
+The macOS shell is planned (ADR-0020). Built on the C# stack proven by the
+tracer bullet (PRD #99, issues #103/#105): capture → resample → level gate
+→ `/tap` → separately-attributed WAVs in the Recorder's session.
 
 It is the repo's first native desktop Bridge; see `../README.md` for the wire
 contract every Bridge speaks and `../../CONTEXT.md` for the domain vocabulary

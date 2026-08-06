@@ -230,11 +230,17 @@ public sealed class BridgeSettings
 /// <summary>Loads/saves <see cref="BridgeSettings"/> as JSON under %APPDATA%.</summary>
 public static class BridgeSettingsStore
 {
-    // The filename is an on-disk contract predating the bridges/tray-bridge/
-    // rename — changing it orphans every operator's saved settings.
+    /// <summary>
+    /// The on-disk settings filename — an operator-facing contract predating
+    /// the bridges/tray-bridge/ directory rename. Renaming it orphans every
+    /// operator's saved settings (including the DPAPI-protected token); a
+    /// change here needs a migration, not a rename.
+    /// </summary>
+    public const string SettingsFileName = "windows-tray-bridge.json";
+
     private static string DefaultPath => Path.Join(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "TapScribe", "windows-tray-bridge.json");
+        "TapScribe", SettingsFileName);
 
     /// <summary>Load from the default %APPDATA% path.</summary>
     public static BridgeSettings Load() => Load(DefaultPath);
