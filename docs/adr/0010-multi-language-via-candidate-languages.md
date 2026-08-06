@@ -6,106 +6,82 @@ status: accepted
 
 ## Decision
 
-TapScribe transcribes mixed-language meetings (motivating case: 1–2 Danish +
-1–2 Norwegian speakers) by having the operator declare the **expected
-languages** for a meeting — a [candidate-language set](../../CONTEXT.md#candidate-languages--language-pin)
+TapScribe transcribes mixed-language meetings (motivating case: Danish +
+Norwegian speakers) by having the operator declare the meeting's **expected
+languages** — a [candidate-language set](../../CONTEXT.md#candidate-languages--language-pin)
 — **not** by picking a model. One uniform run handles every recording: for each
 **region** (a stripped speech-region WAV, or any per-utterance WAV), TapScribe
 runs the model(s) that **cover** the candidate languages, a pluggable
 **selector** picks the best transcript per region, the winner becomes that
-WAV's `_primary` sidecar, and the existing `merge_session` stitches a
-mixed-language transcript. The default candidate set is `{da, no, en}`, so the
-feature works with no configuration ("catch-all" default).
+WAV's `_primary` sidecar, and `merge_session` stitches the mixed-language
+transcript. Default set: `{da, no, en}`, so the feature works unconfigured.
 
 ## Why
 
 Danish and Norwegian Bokmål are orthographically near-identical, so Whisper's
 per-file language auto-detect flips between them unpredictably — the root cause
-of today's poor mixed-meeting results. Naming the *languages* removes the
-guess, and is a far simpler mental model than choosing a model (only
-`whisper-large` does both da+no; `nb-whisper` is Norwegian-only; Parakeet does
-da-not-no) — the operator should not have to hold that matrix in their head.
-Expressing every case as one run — a singleton set → one model (a "pin", for
-free); a multi-set → an ensemble + selection — avoids special-case code paths
-and reuses what already exists: the per-WAV cache already stores multiple
-`(backend, model)` sidecars behind a `_primary` pointer, so "N transcripts,
-pick one" is already the on-disk model.
+of poor mixed-meeting results. Naming the *languages* removes the guess and
+spares the operator the model/language capability matrix (only `whisper-large`
+does both da+no; `nb-whisper` is Norwegian-only; Parakeet does da-not-no). One
+run expresses every case — a singleton set → one model (a "pin", for free); a
+multi-set → ensemble + selection — and the per-WAV cache already stores
+multiple `(backend, model)` sidecars behind a `_primary` pointer, so "N
+transcripts, pick one" is already the on-disk model.
 
 ## Scope
 
-v1 covers the **after-meeting batch path** — the end-of-meeting pipeline and
-`transcribe_session` — because batch quality matters more for this feature than
-live (operator's stated priority). The pipeline already does
-strip → transcribe(regions) → summarize, so the run slots into its transcribe
-stage. Manual single-WAV transcribe and the live channel are unchanged in v1.
+v1 covers the after-meeting batch path — the end-of-meeting pipeline's
+transcribe stage and `transcribe_session` — because batch quality matters more
+than live for this feature.
 
 > **Extended by [ADR-0011](0011-interactive-batch-is-language-driven.md):** the
-> interactive Transcript page later dropped its model picker and became
-> language-driven, which brought the manual single-WAV path into the cover (it
-> now runs the same generalist + specialist ensemble as the range). The live
-> channel remains out of scope.
+> Transcript page dropped its model picker and became language-driven, bringing
+> the manual single-WAV path into the cover. The live channel stays out of
+> scope.
 
-## Seams (deliberately swappable, for later experimentation)
+## Seams (deliberately swappable)
 
-- **Generalist model** = the existing `config/batch-model.txt` (default
-  `whisper-large-v3-turbo`). Pointing it at `parakeet-tdt-0.6b-v3` is the
-  sanctioned way to A/B the Danish/generalist engine without touching the
-  pipeline.
-- **Specialist table** — a small catalog map `language → purpose-built model`
-  for languages where a specialist beats the generalist. v1: `{no →
-  nb-whisper-large}`. The models run for a candidate set `S` = `{generalist} ∪
-  {specialist[l] for l in S if l in table}`. The default is **nb-whisper-large**,
-  not medium: a 20-clip FLEURS comparison (vs a `large-v3-turbo` generalist)
-  showed nb-large win-or-tie 19/20 on Norwegian (+0.07 word-recall, ~40% lower
-  WER), while nb-**medium** only TIED — i.e. medium didn't earn its extra decode,
-  large does. (Constrained language *detection* itself was 77/77 correct across
-  da/no/sv/en in that run, so the routing foundation is solid regardless.)
-- **Selector** — picks the winning sidecar per region. Default:
-  **specialist-routing** — route each region to the model the specialist table
-  names for the language the generalist detected there (the table *declares*
-  which model is best per language); where the detected language has no
-  specialist, **keep the generalist** (the right-language transcript for that
-  region) — there is NO acoustic fallback. We deliberately do not compare
-  `avg_logprob` across different-language models: it isn't comparable even within
-  the Whisper family (a confident nb-whisper rendering English as Norwegian wins
-  that comparison — the real bug the real-audio tests caught), and the FLEURS
-  comparison showed nb-whisper-large genuinely beats the generalist on Norwegian
-  (19/20) but `avg_logprob` does not reflect that across two checkpoints. So route
-  by the declared specialist, else keep the generalist. Result: the Danish region
-  goes to the generalist (best Danish), the Norwegian region to nb-whisper (best
-  Norwegian); an unscored Parakeet/Voxtral generalist on a no-specialist language
-  also just stays the winner. `AcousticConfidenceSelector` (duration-weighted
-  mean avg_logprob) is retained as a same-family, non-default seam alternative.
-  Still swappable for a **text-LID** or **LLM-judge** selector for
-  cross-architecture pairs (where the generalist's per-region language detection
-  is unreliable); the
-  `test_da_no_routing_benchmark` (committed `solen-da` + `marlene-nb`) and the
-  FLEURS comparison harness are the yardsticks for any such change and for every
-  future model.
+- **Generalist** = `config/batch-model.txt` (default `whisper-large-v3-turbo`).
+  Pointing it at another model (e.g. `parakeet-tdt-0.6b-v3`) is the sanctioned
+  way to A/B the generalist without touching the pipeline.
+- **Specialist table** — a catalog map `language → purpose-built model`; v1:
+  `{no → nb-whisper-large}`. The models run for a set `S` = `{generalist} ∪
+  {specialist[l] for l in S if l in table}`. nb-**large**, not medium: a
+  20-clip FLEURS comparison vs a `large-v3-turbo` generalist showed nb-large
+  win-or-tie 19/20 on Norwegian (~40% lower WER) while nb-medium only tied —
+  medium doesn't earn its extra decode. (Constrained language *detection* was
+  77/77 across da/no/sv/en in that run.)
+- **Selector** — default **specialist-routing**: route each region to the model
+  the specialist table names for the language the generalist detected there;
+  no specialist for that language → keep the generalist. There is NO acoustic
+  fallback: `avg_logprob` is not comparable across different-language models
+  even within the Whisper family (a confident nb-whisper rendering English as
+  Norwegian wins that comparison — the real bug the real-audio tests caught),
+  and FLEURS shows nb-large genuinely wins on Norwegian while `avg_logprob`
+  doesn't reflect it. `AcousticConfidenceSelector` (duration-weighted mean
+  avg_logprob) is retained as a same-family, non-default alternative. Still
+  swappable for a **text-LID** or **LLM-judge** selector for cross-architecture
+  pairs, where the generalist's per-region language detection is unreliable;
+  `test_da_no_routing_benchmark` and the FLEURS harness are the yardsticks for
+  any such change and every future model.
 
 ## Considered and rejected (for v1)
 
-- **Per-speaker manual language pins + a single-/multi-person code branch.**
-  More UI and more code for a marginal v1 gain; deferred as an "improvement
-  later" that composes with diarization (#78). The
-  [single-/multi-person tap](../../CONTEXT.md#single-person-tap--multi-person-tap)
-  concept stays in the glossary, and per-identity language aggregation (vote a
-  single-person tap's regions to one language) lands with diarization.
-- **LID-first, single decode** (detect the language, then run only that model).
-  Cheapest, but the LID is exactly the confusable da/no decision and a wrong
-  call leaves no second transcript to recover from.
-- **Operator picks a model directly.** Forces the operator to internalise the
-  model/language capability matrix; replaced by "declare languages, system
-  routes to models."
+- **Per-speaker manual language pins + a single-/multi-person code branch** —
+  more UI and code for marginal gain; per-identity aggregation (vote a
+  [single-person tap](../../CONTEXT.md#single-person-tap--multi-person-tap)'s
+  regions to one language) lands with diarization (#78).
+- **LID-first, single decode** — cheapest, but the LID is exactly the
+  confusable da/no decision, and a wrong call leaves no second transcript.
+- **Operator picks a model directly** — forces the capability matrix on the
+  operator.
 
 ## Consequences
 
-- Running both models on every region wastes a decode on monolingual taps.
-  Accepted: batch latency is the cheap axis. The later optimisation — stop
-  re-running the ensemble once a single-person tap has voted itself to one
-  language — arrives with diarization + per-identity aggregation.
-- The end-of-meeting pipeline's model resolution changes from "one
-  `batch-model.txt`" to "the candidate set + the map", with `batch-model.txt`
-  retained as the generalist slot. The candidate set's operator default lives
-  in a new `config/languages.txt` (catalog-validated, same pattern as
-  `batch-model.txt`), with a per-meeting override on session-meta.
+- The cover runs every model on every region, wasting a decode on monolingual
+  taps. Accepted: batch latency is the cheap axis; skipping the ensemble once
+  a single-person tap has voted itself to one language arrives with
+  diarization + per-identity aggregation.
+- The candidate set's operator default lives in `config/languages.txt`
+  (catalog-validated, same pattern as `batch-model.txt`), with a per-meeting
+  override on session-meta; `batch-model.txt` stays the generalist slot.
