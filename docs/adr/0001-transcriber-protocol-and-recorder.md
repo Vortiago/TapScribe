@@ -5,116 +5,73 @@ date: 2026-05-14
 
 # Transcriber protocol, A2 pipeline, and the Recorder context
 
-This ADR captures the load-bearing architectural decisions from the
-deepening pass that produced Lands 1–4 (Transcriber protocol, session
-merge, live-cmd builder, Recorder context). The four decisions below are
-each reasonable to re-suggest in a future architecture review; this ADR
-exists so the rejection doesn't have to be re-derived.
+Four decisions, each reasonable to re-suggest in a future architecture
+review; this ADR exists so the rejection doesn't have to be re-derived.
 
 ## 1. Stateful Transcribers, one instance per `(backend × model_name)`
 
-A `Transcriber` instance *is* one loaded model — it owns the underlying
-model object, the model name, and the device label. The factory
-(`load_transcriber(name, *, use_mlx)`) caches per `(model_name, use_mlx)`.
-There is no tagged tuple, no dispatcher; the contract is the single
+A `Transcriber` instance *is* one loaded model — it owns the model
+object, the model name, and the device label. The contract is the single
 `transcribe(path, *, initial_prompt, hotwords) -> TranscriptionResult`
-method.
+method; the factory `load_transcriber` caches instances. No tagged
+tuple, no dispatcher.
 
-**Why not stateless strategies** (one `FasterWhisperStrategy` /
-`MlxStrategy` / `VoxtralStrategy`, each taking a model object per call):
-mixing models within one session — e.g. an `nb-whisper-medium` for
-Norwegian speakers and a different model for Danish — is a deliberate
-near-future use case. With stateful Transcribers the caller picks one
-thing (which Transcriber for this WAV); with stateless strategies the
-caller picks two (which strategy + which model) and has to dispatch
-between them anyway. The strategy split would relocate the dispatcher
-we set out to eliminate, not remove it.
+**Rejected — stateless strategies** (one strategy class per backend,
+model object passed per call): mixing models within one session is a
+deliberate use case, and a strategy caller picks two things (strategy +
+model) and dispatches between them anyway — the split relocates the
+dispatcher, it doesn't remove it.
 
 ## 2. Pipeline-style post-processors via caller composition (A2)
 
-`Transcriber.transcribe(...)` returns a raw `TranscriptionResult` — no
-hallucination filtering. Post-processors are pure functions that the
-caller composes:
+`transcribe(...)` returns a raw `TranscriptionResult`; post-processors
+(hallucination filtering today; PII redaction, phrase replacement later)
+are pure functions the caller composes on the result.
 
-```python
-result = transcriber.transcribe(wav, initial_prompt=…, hotwords=…)
-result = hallucinations.apply(result, rules)
-# future: result = apply_pii_redaction(result, …)
-# future: result = apply_phrase_replacement(result, …)
-```
-
-**Why not bake hallucination filtering into `transcribe()`** (option A3
-during grilling): future post-processors (PII removal, name
-canonicalisation) are concrete enough roadmap items that keeping the
-Transcriber's contract narrow buys real optionality. Burying the first
-post-step inside `transcribe()` would create asymmetric handling — one
-step privileged, others external — for no current benefit.
-
-Trade-off accepted: the route handler has to remember to call
-`hallucinations.apply` on the way through. The merger in Land 2
-(`cached_transcribe` + `merge_session`) does this once, so in practice
-every production callsite goes through that helper.
+**Rejected — baking hallucination filtering into `transcribe()`**: it
+would privilege one post-step while the rest stay external, for no
+current benefit. Accepted trade-off: callers must remember
+`hallucinations.apply` — in practice every production call site goes
+through `cached_transcribe` + `merge_session`, which does it once.
 
 ## 3. The Recorder context, dependency-injected via `app.state`
 
-Runtime mutable state lives on a single `Recorder` instance that
-FastAPI routes receive via `Depends(get_recorder)`, where `get_recorder`
-reads from `request.app.state.recorder`. Five sub-components compose
-the Recorder: `LiveChannel`, `ActiveStreams`, `LiveTranscripts`,
-`JobTracker`, `AuthState` (see `CONTEXT.md` for what each owns).
+Runtime mutable state lives on a single `Recorder` instance that routes
+receive via `Depends(get_recorder)`, which reads
+`request.app.state.recorder`. `CONTEXT.md` lists the sub-components and
+what each owns.
 
-**Why not module-level globals** (the pre-refactor shape): tests cannot
-construct a clean instance — they have to monkeypatch ~8 module
-attributes across `config.py`, `auth.py`, `live.py`, `sessions.py`.
-With a Recorder + DI, `TestClient(app)` with
-`app.state.recorder = Recorder(...)` gives full per-test isolation.
+**Rejected — module-level globals** (the prior shape): tests had to
+monkeypatch ~8 module attributes for isolation; with DI,
+`app.state.recorder = Recorder(...)` isolates each test.
+**Rejected — an importable singleton**: `app.state` is the well-trodden
+FastAPI idiom, supports `app.dependency_overrides[get_recorder]`, and
+doesn't tie the Recorder to import-time construction.
 
-**Why not a module-level singleton accessed directly** (e.g.
-`from tapscribe.recorder import current_recorder`): the FastAPI idiom
-of `app.state` is well-trodden, supports test overrides cleanly via
-`app.dependency_overrides[get_recorder]`, and doesn't tie the Recorder
-to import-time construction.
+## 4. Backend preference (né `use_mlx`) is per-call, not per-process
 
-## 4. `use_mlx` is per-call, not per-process
+`load_transcriber(model_name, *, backend: Literal["auto","mlx","cuda","cpu"])`
+takes the preference as an explicit kwarg — the `Recorder` holds the
+operator's choice (`--backend`; `--no-mlx` is a legacy alias) — and the
+transcriber cache is keyed `(model_name, resolved_kind)`. The registry
+resolves `auto` against each model's BackendBindings, walking
+mlx → cuda → cpu and silently skipping a kind that is unavailable on
+this machine or that the model has no binding for — so NB-Whisper, which
+has no MLX binding, routes to faster-whisper under `auto` instead of
+raising. (Originally `use_mlx: bool`; the ADR-0003 registry widened it,
+preserving the per-call property. `use_mlx` remains a read-only
+back-compat property on `Recorder`.)
 
-`use_mlx` is a field on `Recorder`, set from `--no-mlx` at boot.
-`load_transcriber(model_name, *, use_mlx: bool)` takes it as an explicit
-kwarg; the transcriber cache is keyed by `(model_name, use_mlx)`.
-
-**Why not a module-level `config.USE_MLX`** (its prior location): two
-forward-looking cases are easier with per-call:
-
-- A future "use MLX" dashboard toggle becomes `recorder.use_mlx = False`
-  plus cache invalidation. With a global, the factory contract has to
-  change.
-- Per-WAV MLX choice (e.g. "force CPU for this one suspicious WAV")
-  becomes naturally possible — different `use_mlx` per call yields
-  different cache entries. Structurally impossible with a global.
-
-NB-Whisper's "always faster-whisper regardless of MLX" rule is
-unaffected; that's routing logic inside `load_transcriber`, not a
-question about where `use_mlx` lives.
-
-**Amendment (ADR-0003 follow-on)**: `use_mlx: bool` has widened to
-`backend: Literal["auto","mlx","cuda","cpu"]` on the `Recorder` and on
-`load_transcriber(model_name, *, backend)`. The cache key correspondingly
-shifted to `(model_name, resolved_kind)` where `resolved_kind` is one
-of `mlx`/`cuda`/`cpu` (the operator's `auto` preference resolved against
-the registry's BackendBindings). The "per-call, not per-process"
-property is preserved; CUDA simply becomes the third value the kwarg
-can take, alongside MLX and CPU. The old `use_mlx` field stays as a
-read-only property on `Recorder` so any not-yet-migrated caller keeps
-working without crashing.
+**Rejected — a module-level `config.USE_MLX`**: with per-call, a
+dashboard backend toggle is a field write plus cache invalidation, and
+per-WAV backend choice falls out of the cache keying — both structurally
+impossible with a global.
 
 ## Consequences
 
-- Tests gain a real seam for route-level testing without monkeypatching.
-- A future "transcribe via Backend X on machine A, merge on machine B"
-  workflow becomes mechanically simpler — the merger reads cached
-  per-WAV JSONs; nothing in it requires a loaded model.
-- The wire format for per-WAV JSON and `session-transcript.json`
-  changes (`"backend"` → `"transcriber"`, parallel speaker arrays →
-  dict, `abs_hms` dropped). Locally cached JSONs from before this
-  refactor will be invalidated and re-merged on next access.
-- `tapscribe/config.py` shrinks to paths + immutable boot-time
-  booleans; runtime state moves to the Recorder.
+- Route-level tests get a real seam instead of monkeypatching.
+- The merger reads cached per-WAV JSONs and needs no loaded model, so a
+  transcribe-on-machine-A / merge-on-machine-B split stays mechanically
+  simple.
+- `tapscribe/config.py` is paths plus immutable boot-time booleans;
+  runtime state lives on the Recorder.

@@ -1,130 +1,45 @@
 # tray-bridge
 
-Home of the **tray Bridge** family (CONTEXT.md → Tray Bridge). Its one
-shell today is the Windows one: it captures the default microphone **and
-the system audio output (WASAPI loopback)** and streams each to the
-Recorder over the standard `/tap` wire contract as its own speaker, so both
-sides of a meeting are recorded under distinct identities in one session.
-The macOS shell is planned (ADR-0020). Built on the C# stack proven by the
-tracer bullet (PRD #99, issues #103/#105): capture → resample → level gate
-→ `/tap` → separately-attributed WAVs in the Recorder's session.
+Home of the **tray Bridge** family (CONTEXT.md → Tray Bridge). Its one shell
+today is the Windows one: it captures the default microphone **and the system
+audio output (WASAPI loopback)** and streams each to the Recorder over the
+standard `/tap` wire contract as its own speaker, so both sides of a meeting
+land as separately-attributed WAVs in one **detached session**. The macOS
+shell is planned (ADR-0020). See `../README.md` for the wire contract every
+Bridge speaks and `../../CONTEXT.md` for the vocabulary (Bridge, Tap,
+Recorder, Utterance, Session).
 
-It is the repo's first native desktop Bridge; see `../README.md` for the wire
-contract every Bridge speaks and `../../CONTEXT.md` for the domain vocabulary
-(Bridge, Tap, Recorder, Utterance, Session).
+## What's here
 
-## What's here / what's deferred
-
-**Now (the core audio lifecycle + multi-device capture + the tray shell):** capture
-behind a core interface for both **microphones** and **system-audio loopback** (WASAPI
-is the Windows impl of each), device **enumeration** (mics + loopback-capable render
-devices), a resampler to 16 kHz mono int16, a **level gate** that opens/closes
-Utterances on speech with pre-roll so leading consonants aren't clipped (the
-Bridge-side Mute — a loopback device has no mute event), a resilient `/tap` stream
-with `utterance_id` **reconnect** across blips, a bounded during-gap buffer, and
-bounded **Drain**, a **multi-pipeline orchestrator** that runs N devices
-concurrently — each under its own stable `identity`/`name` — co-located in one
-**detached session**, a control client, a tray runner with at-a-glance **status**
-(idle / streaming / processing / error — event-driven, no idle polling) and Start meeting /
-End meeting / Quit, and a **4-tab Settings dialog** — Connection (host / port / TLS /
-tap token + Test connection), **Devices** (capture the mic and/or system audio, each
-with one Name, its own sensitivity slider **and a live input-level meter** for tuning,
-plus an Advanced expander to pin
-specific endpoints), **Level gate** (the shared hangover/pre-roll in ms), and **Meeting**
-(whether End meeting auto-transcribes/summarizes, or just saves the recordings) — all persisted to
-`%APPDATA%`, with the token protected at rest by Windows DPAPI. Start meeting **resolves** the saved selection against the devices present now
-(follow-default binds to the current default), so a bad token or unreachable Recorder
-fails with a clear, classified message *before* any device opens.
-
-**End meeting** (#107) closes every open tap (gate close + Drain) and then — when the
-**Meeting** tab's *auto-transcribe/summarize* is on (the default) — triggers the
-Recorder's [end-of-meeting pipeline](../../CONTEXT.md) (strip → transcribe → summarize),
-polling per-stage progress into the status line and popping the finished summary up in a
-window with copy-to-clipboard — a busy Recorder (409) or a failed stage is surfaced
-clearly. Turn that setting **off** for *record-only*: End meeting still drains and closes
-every tap (so the recordings are fully written) but fires no pipeline — the session and its
-WAVs are left on the Recorder to strip / transcribe / summarize from the dashboard whenever
-you want. Record-only ends silently back to idle (no summary window, no resume state, no
-Past-meetings entry — there is no summary to re-open). The active session id is persisted to `%APPDATA%`, so a restarted tray resumes
-showing an in-flight pipeline or the finished summary. The depth lives in the
-cross-platform core (`MeetingController`, `PipelineView`, `CaptureOrchestrator`,
-`DeviceSelection`, `StatusView`, `GateTuning`) so a future macOS/Linux shell builds on it.
-
-## Layout
-
-```
-tray-bridge/
-├── global.json                         # pins the .NET 10 SDK band
-├── TapScribe.TrayBridge.slnx
-├── src/
-│   ├── TapScribe.Bridge.Core/          # net10.0 — CROSS-PLATFORM, no NAudio
-│   │   ├── TapWire.cs                   # 16 kHz / mono / 640-byte frame constants
-│   │   ├── AudioFormat.cs, IAudioCapture.cs   # the capture seam
-│   │   ├── Resampler.cs                 # device format -> 16 kHz mono int16
-│   │   ├── FrameChunker.cs              # -> exact 640-byte / 20 ms frames
-│   │   ├── LevelGate.cs                 # Bridge-side Mute: gate Utterances on level + pre-roll (+ GateOptions.cs)
-│   │   ├── AudioLevel.cs                # the RMS reading shared by the gate AND the Settings meter (one scale)
-│   │   ├── InputLevelMeter.cs           # display-only per-device level sampler for the Settings meter (#152)
-│   │   ├── LevelMeterScale.cs           # the meter's display axis: RMS -> [0,1], the slider's own log scale
-│   │   ├── TapConnectionOptions.cs      # URL + subprotocol builders; host normalisation
-│   │   ├── InsecureTls.cs               # the ONE accept-any-cert validator for the opt-in self-signed testing mode (#147)
-│   │   ├── ITapConnection.cs            # the connection seam TapStream drives (TapClient is the impl)
-│   │   ├── TapClient.cs                 # one /tap WebSocket (implements ITapConnection)
-│   │   ├── TapStream.cs                 # resilient Utterance: reconnect + gap buffer + Drain (+ TapStreamOptions.cs)
-│   │   ├── ControlClient.cs             # tap-bearer POST /api/tap/new-session + pipeline trigger/poll; GET /health
-│   │   ├── ConnectionTester.cs          # "Test connection": /health + tap-token probe
-│   │   ├── TapSession.cs                # pipeline: capture -> resampler -> level gate -> a TapStream per Utterance
-│   │   ├── CaptureDevice.cs             # platform-neutral device descriptor + DeviceFlow (Capture/Render)
-│   │   ├── IAudioDeviceEnumerator.cs    # device-listing seam: List() + Open() (WASAPI is the impl)
-│   │   ├── CaptureOrchestrator.cs       # runs N per-identity pipelines (mic + loopback) concurrently
-│   │   ├── DeviceSelection.cs           # follow-default/pinned selections -> Resolve() -> verdict + ToTapOptions (ADR-0005)
-│   │   ├── StartFailure.cs              # classify a Start error: TokenRejected / Unreachable / Other
-│   │   ├── StatusView.cs                # TrayStatus -> menu header + icon + tooltip (pure)
-│   │   ├── Pipeline.cs                  # PipelinePoll/PipelineSummary DTOs + PipelineTriggerOutcome
-│   │   ├── PipelineView.cs              # poll body -> meeting-card view-model (pure; #107)
-│   │   ├── MeetingController.cs         # End-meeting flow: drain -> trigger -> poll -> summary (#107)
-│   │   ├── MeetingState.cs              # restart-resume handle (session id) + JSON (pure)
-│   │   ├── MeetingHistory.cs            # local Past-meetings history model + JSON (bounded; #168)
-│   │   ├── MeetingRecord.cs             # one Past-meetings entry: session id + start time (#168)
-│   │   ├── MeetingFormView.cs           # per-meeting window view-model: PipelineView -> title/caption/body (pure)
-│   │   ├── MeetingViewDriver.cs         # drives an IMeetingView from polls, cross-platform (#168)
-│   │   ├── SummaryMarkdown.cs           # summary markdown -> block/span model (parsing stays out of WinForms)
-│   │   ├── GateSettings.cs              # one device's persisted gate tuning (sensitivity + hangover/pre-roll)
-│   │   └── GateTuning.cs                # sensitivity slider <-> linear RMS threshold
-│   ├── TapScribe.Bridge.Windows/       # net10.0-windows — WASAPI + settings (NAudio + DPAPI)
-│   │   ├── WasapiCaptureBase.cs         # shared WASAPI normalisation + lifecycle (one authority)
-│   │   ├── WasapiAudioCapture.cs        # IAudioCapture over a microphone (default or specific)
-│   │   ├── WasapiLoopbackAudioCapture.cs # IAudioCapture over a render endpoint (system-audio loopback)
-│   │   ├── WasapiDeviceEnumerator.cs    # IAudioDeviceEnumerator over NAudio MMDeviceEnumerator
-│   │   ├── BridgeSettings.cs            # %APPDATA% persistence; DPAPI-protected token
-│   │   ├── SettingsDraft.cs             # the Settings dialog's editable state + decisions (no WinForms)
-│   │   ├── MeetingStateStore.cs         # %APPDATA% restart-resume state file (#107)
-│   │   └── MeetingHistoryStore.cs       # %APPDATA% Past-meetings history file (#168)
-│   └── TapScribe.TrayBridge/           # net10.0-windows WinForms tray runner (GUI only)
-│       ├── Program.cs, TrayContext.cs   # NotifyIcon: status header + Start / End / Settings / Quit
-│       ├── TrayIcons.cs                 # the 3 status icons, drawn at runtime (idle/streaming/error)
-│       ├── LevelMeterBar.cs             # the live input-level meter control (paints level + threshold marker)
-│       ├── MeetingForm.cs               # the per-meeting window: summary + Copy (End meeting + Past-meetings re-open)
-│       ├── SummaryRichText.cs           # renders SummaryMarkdown onto the window's RichTextBox (presentation only)
-│       └── SettingsForm.cs              # 4-tab dialog: Connection / Devices / Level gate / Meeting
-└── tests/
-    ├── TapScribe.Bridge.Core.Tests/     # net10.0 xUnit — cross-platform (most of the suite, incl. CaptureOrchestrator)
-    └── TapScribe.Bridge.Windows.Tests/  # net10.0-windows xUnit — DPAPI / settings + NAudio upstream-contract smoke test
-```
+- **`src/TapScribe.Bridge.Core`** (net10.0, cross-platform): the capture seam
+  (`IAudioCapture` / `IAudioDeviceEnumerator`), resampling to 16 kHz mono
+  int16, the **level gate** that opens/closes Utterances on speech with
+  pre-roll (the Bridge-side Mute — a loopback device has no mute event), a
+  resilient `/tap` stream (stable `utterance_id` across reconnect blips,
+  bounded gap buffer, bounded **Drain**), a multi-pipeline orchestrator
+  running N devices concurrently under stable identities, the control client
+  and connection tester, the End-meeting flow (drain → trigger the Recorder's
+  strip → transcribe → summarize pipeline → poll → summary), restart-resume
+  and Past-meetings state, and every view-model — all pure, so a future
+  macOS/Linux shell reuses it.
+- **`src/TapScribe.Bridge.Windows`** (net10.0-windows): WASAPI capture,
+  loopback and enumeration (NAudio) plus `%APPDATA%` persistence with the tap
+  token DPAPI-protected at rest.
+- **`src/TapScribe.TrayBridge`** (net10.0-windows WinForms): the tray runner —
+  event-driven status (idle / streaming / processing / error), Start meeting /
+  End meeting / Past meetings / Settings… / Quit, the 4-tab Settings dialog,
+  and the per-meeting summary window with Copy.
 
 **The cross-platform invariant:** `TapScribe.Bridge.Core` references **no
-NAudio and no Windows API**. Audio capture sits behind `IAudioCapture`; WASAPI
-is just the Windows implementation, isolated in `TapScribe.Bridge.Windows`. The
-resampler and the `/tap` client live in the core. CI enforces this: the
-`dotnet-core-crossplatform` job builds and tests the core on Linux, which fails
-the moment the core takes a Windows dependency.
+NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
+tests the core on Linux and fails the moment it takes a Windows dependency.
 
 ## Prerequisites
 
-- **.NET 10 SDK** (`global.json` pins the band; `dotnet --version` should report
-  a 10.0.x). Get it from <https://dotnet.microsoft.com/download>.
-- Windows 10/11 to run the tray app (the WASAPI backend). The core and its
-  tests build and run on any OS.
+- **.NET 10 SDK** (`global.json` pins the band; `dotnet --version` should
+  report 10.0.x). Get it from <https://dotnet.microsoft.com/download>.
+- Windows 10/11 to run the tray app. The core and its tests build and run on
+  any OS.
 
 ## Build, test, run
 
@@ -141,10 +56,13 @@ Cross-platform core only (what the ubuntu CI job runs — works on Linux/macOS):
 dotnet test tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 ```
 
-## Packaging: a self-contained single-file exe
+`TapClientWebSocketTests` covers `/tap` negotiation + binary framing (tokened
+and `--no-auth`) against an in-process Kestrel server, and
+`RealRecorderMeetingE2ETests` runs a full meeting against a real Python
+Recorder (self-skips where faster-whisper isn't importable) — so wire
+regressions are caught in CI without a live Recorder on your desk.
 
-To hand someone a single `.exe` that runs without a .NET install, publish the tray
-runner self-contained:
+## Packaging: a self-contained single-file exe
 
 ```powershell
 # from this directory (bridges/tray-bridge/)
@@ -155,182 +73,74 @@ dotnet publish src/TapScribe.TrayBridge -c Release -r win-x64 `
 ```
 
 The exe lands at
-`src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`.
-It bundles the .NET runtime and the NAudio native bits (the `IncludeNative…` flag
-self-extracts them on launch), so it runs on a clean Windows 10/11 box. Use
-`-r win-arm64` for ARM machines. No installer, code signing, or auto-update — those
-are explicitly out of scope for this PRD (#99); it's a copy-and-run exe.
+`src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`
+and runs on a clean Windows 10/11 box (use `-r win-arm64` for ARM). No
+installer, code signing, or auto-update — it's a copy-and-run exe.
 
-## Configuring the Recorder target
+## Configuration
 
-Right-click the tray icon → **Settings…** to edit everything in a tabbed dialog — no
-environment variables required. Settings are saved to
-`%APPDATA%\TapScribe\windows-tray-bridge.json` and remembered across restarts.
+Right-click the tray icon → **Settings…** — no environment variables
+required. Settings are saved to `%APPDATA%\TapScribe\windows-tray-bridge.json`
+and remembered across restarts.
 (The filename deliberately keeps the pre-rename `windows-tray-bridge` spelling —
 it is the on-disk contract pinned by `BridgeSettingsStore.SettingsFileName`, and
 renaming it would orphan every operator's saved settings and protected token.)
-The **tap token is never written in cleartext**: it is protected at rest with
-Windows DPAPI (CurrentUser scope), so only the same Windows user can read it.
+The **tap token is never written in cleartext**: it is protected with Windows
+DPAPI (CurrentUser scope). On first run the Connection fields are seeded from
+the legacy `TAPSCRIBE_HOST` / `TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` /
+`TAPSCRIBE_TLS_ALLOW_SELF_SIGNED` / `TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` /
+`TAPSCRIBE_TAP_TOKEN` environment variables when present; the dialog is the
+source of truth thereafter.
 
-### Connection tab
+- **Connection** — Recorder host (tolerant: a hostname, an IP, or a pasted
+  `wss://host:9000/` all work; Port/TLS stay authoritative), port (default
+  `8001`), **Use TLS**, and the tap token (from the Recorder's boot log /
+  `.tap-token`; **empty = `--no-auth`**). **Allow self-signed certificate
+  (insecure)** is the `curl -k` equivalent — accepts **any** cert on every
+  connection, TLS-gated, off by default, local testing only. **Test
+  connection** probes `GET /health`, then a throwaway `/tap` handshake to
+  confirm the token.
+- **Devices** — two checkboxes, each with one **Name**: capture the mic
+  and/or the system audio. The Name labels the source on the dashboard and
+  tags the recording filenames (the two must differ, or Start refuses). Both
+  are *follow-default*: they bind to the current default device at Start
+  (ADR-0005). Each has its own **Sensitivity** slider (per-device tuning —
+  ADR-0007) with a live input-level meter drawing that device's threshold on
+  the same scale; Saving mid-meeting re-tunes only that device's pipeline, no
+  Stop/Start. **▸ Advanced** pins specific endpoints (an unplugged pin is
+  kept, not erased); **Refresh devices** re-enumerates.
+- **Level gate** — the two knobs shared across devices: **Hangover** (how
+  long silence lasts before an Utterance closes) and **Pre-roll** (leading
+  audio replayed on open so first consonants aren't clipped), both in
+  milliseconds.
+- **Meeting** — **Transcribe and summarize automatically when the meeting
+  ends** (default on): End meeting drains and closes every tap, triggers the
+  Recorder's end-of-meeting pipeline, tracks per-stage progress in the status
+  line, and pops the summary window. Off = *record-only*: End meeting still
+  drains and closes every tap but fires no pipeline — strip / transcribe /
+  summarize from the dashboard later. The active session id is persisted, so
+  a restarted tray resumes an in-flight pipeline or the finished summary.
 
-| Field | Default | Meaning |
-|---|---|---|
-| Recorder host | `localhost` | Recorder host |
-| Port | `8001` | Recorder port |
-| Use TLS | off | connect over `wss://` (Recorder started with `--tls`) |
-| Allow invalid / self-signed certificate | off | **insecure, testing only** — accept any TLS cert (see below); greyed out unless **Use TLS** is on |
-| Tap token | empty | tap token; **empty = `--no-auth`** (offer no subprotocol) |
+## Dev loop (the acceptance check)
 
-> **Allow invalid / self-signed certificate** is the `curl -k` equivalent: when ticked,
-> the Bridge accepts **any** server certificate over TLS — self-signed, expired, or
-> wrong-host — so you can target a Recorder serving a local self-signed cert without
-> first trusting it in the Windows certificate store. It is **off by default**, only
-> selectable when **Use TLS** is on (and forced off when TLS is off), and it **removes
-> MITM protection** — use it for local testing only, never against an untrusted network.
-> It threads through every connection: the `/tap` stream, the session pre-flight, and both
-> halves of **Test connection**. Seedable on first run via `TAPSCRIBE_TLS_ALLOW_SELF_SIGNED=1`.
-
-The **Test connection** button (like the SpatialChat bridge) probes `GET /health`
-for reachability and then opens a throwaway `/tap` handshake to confirm the tap
-token is accepted, reporting "Recorder reachable; tap token accepted" or the
-specific failure. The **Recorder host** field is tolerant — a plain hostname, an
-IP, or a pasted `wss://host:9000/`-style value all work; the scheme/port/path are
-stripped and the Port/TLS fields stay authoritative. The tap token is the value the
-Recorder prints at boot (also stored in `.tap-token`). (Per-source names are edited on
-the **Devices** tab, below — not here.)
-
-### Devices tab
-
-The common case is two checkboxes, each with a single **Name**:
-
-- **Capture my microphone** — your mic.
-- **Capture system audio (the other side of the meeting)** — the system loopback.
-
-The Name labels the source on the dashboard *and* tags it in the recording filenames
-— the Recorder makes a filename-safe version automatically, so you only fill in one
-thing. Give the two different names (a shared name is refused at Start, since the
-Recorder would cross-attribute them into one speaker).
-
-Both are *follow-default* selections: they bind to whatever your current default
-device is *at Start*, so switching your default output (Bluetooth ↔ speakers) keeps
-"system audio" working without reconfiguring (see ADR-0005). If no default is
-configured but devices exist, the first device of that kind is used.
-
-Each row also has its **own Sensitivity slider** (per-device tuning — ADR-0007). The
-mic defaults less sensitive (so room noise doesn't open it) and the system loopback
-more sensitive (so the quiet far end is captured). Changing a slider and Saving during
-a live meeting re-tunes **only that device's** pipeline, with no Stop/Start.
-
-Under each slider is a **live input-level meter** (#152): a bar that moves with the
-real input, with that device's threshold drawn as a marker on the **same** scale — so
-instead of guessing a threshold and restarting to test it, you talk (mic) or play
-meeting audio (loopback) and nudge Sensitivity until the level sits above the line. It
-samples only while the dialog is open (a second, display-only capture) and never
-changes what's recorded.
-
-**▸ Advanced — pin specific devices…** expands a grid of every concrete endpoint so a
-power user can pin a specific interface (e.g. a particular USB mic) instead of
-following the default, again with its own Name. **Refresh devices** re-enumerates
-after you plug something in. A pinned device that's currently unplugged is kept (not
-erased) so re-plugging it restores the pin.
-
-With nothing selected, the Bridge falls back to the default mic + system-audio pair
-(the pre-#106 behaviour). A selection where nothing is available is refused at Start
-with a clear message rather than recording an empty session.
-
-### Level gate tab
-
-The Bridge-side gate that turns sound into Utterances (a loopback device has no mute
-event, so the level gate *is* the Mute — see CONTEXT.md). **Sensitivity** is set per
-device on the **Devices** tab (it maps to the gate's linear RMS threshold; higher =
-opens on quieter sound). This tab holds the two knobs shared across every device:
-**Hangover** (ms) is how long silence must last before an Utterance closes, and
-**Pre-roll** (ms) is how much leading audio is replayed when it opens so the first
-consonants aren't clipped. An old settings file's single global tuning migrates into
-each device's default on upgrade (no reset — ADR-0007).
-
-### Meeting tab
-
-One checkbox: **Transcribe and summarize automatically when the meeting ends** (on by
-default). On, **End meeting** runs the Recorder's strip → transcribe → summarize pipeline
-and pops up the finished summary (the flow described above). Off (*record-only*), End
-meeting only drains and closes the taps: the detached session and its recordings are saved
-on the Recorder untouched, and you strip / transcribe / summarize them from the dashboard
-later. A settings file written before this option existed defaults to **on**, so upgrading
-keeps the original behaviour.
-
-On first run the **Connection** fields are pre-seeded from the legacy `TAPSCRIBE_HOST` /
-`TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` / `TAPSCRIBE_TLS_ALLOW_SELF_SIGNED` /
-`TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` / `TAPSCRIBE_TAP_TOKEN` environment variables
-when present, so an existing env-based setup migrates automatically. They are optional,
-and the dialog is the source of truth thereafter.
-
-## Dev loop / demo (the acceptance check)
-
-1. Start a Recorder. Simplest: `python -m tapscribe --no-auth` (or `./start.ps1`).
-2. `dotnet run --project src/TapScribe.TrayBridge`. A TapScribe icon appears in
-   the notification area.
-3. Right-click → **Start meeting**. Play some meeting audio (a video call, a
-   YouTube clip) while you speak, pausing between sentences, then **End meeting**.
-4. **Two** sets of WAVs appear under the Recorder's new **detached** session — one
-   under your identity (the microphone) and one under "System audio" (the loopback) — each
-   split into Utterances by the level gate. Both sides of the meeting are recorded as
-   separately-attributed speakers in the same session (issue #105's acceptance check).
-   "Start meeting" mints the detached session and starts one pipeline per device.
-5. **End meeting** (issue #107) drains and closes every tap (bounded, concurrently),
-   then triggers the end-of-meeting pipeline on that session. The status line tracks
-   it (Ending… → Stripping silence… → Transcribing n/m… → Summarizing…), and on
-   completion a **summary window** pops up with a **Copy** button plus a notification.
-   The same summary is on the dashboard for that session afterwards. Kill and relaunch
-   the tray mid-pipeline and it resumes showing the progress / summary.
-6. To exercise the tokened path: open **Settings…**, paste the token (from the
-   Recorder's boot log / `.tap-token`) into the **Tap token** field, Save, then
-   **Start meeting** — against a Recorder started **without** `--no-auth`.
-
-The `TapClientWebSocketTests` cover the same negotiation + binary-frame
-round-trip (both `--no-auth` and tokened) against an in-process Kestrel `/tap`
-server, so a wire regression is caught in CI without needing a live Recorder.
-
-### Live per-device re-tune demo (#153)
-
-To see per-device sensitivity take effect mid-meeting:
-
-1. **Start meeting** with the far end (system audio) quiet — quiet enough that the
-   system loopback gate doesn't open, so no "System audio" WAVs appear.
-2. Open **Settings… → Devices**, raise **only** the system-audio Sensitivity, and
-   **Save** (don't Stop). The far end starts being captured immediately, with no
-   Stop/Start, and the mic pipeline is untouched.
-
-This routes by identity through `CaptureOrchestrator.UpdateGates(map)`; the
-`UpdateGates_RoutesEachUpdateToItsOwnPipeline_ByIdentity` /
-`UpdateGates_SkipsAnIdentityWithNoRunningPipeline_WithoutError` /
-`UpdateGates_DoesNotDisturbAnotherPipelinesOpenUtterance` tests pin the routing in CI.
-
-### Isolation demo (per-bridge sessions)
-
-To see that the tray Bridge's **detached** session is isolated from other bridges,
-run a second bridge concurrently against the same Recorder:
-
-1. Start the Recorder and **Start meeting** from the tray (above).
-2. In parallel, run the developer bridge **without** a session id, e.g.
-   `python bridges/local-test-bridge/local_test_bridge.py` (it taps `/tap` with no
-   `?session=`, so it lands in the Recorder's global current session).
-3. On the dashboard you'll see **two** sessions filling at once: the tray Bridge's
-   detached session (mic + "System audio") and the local-test-bridge's global one — never
-   muddled into one folder.
-
-That isolation is a Recorder-side property (the `?session=` routing landed in #100,
-covered by the Recorder's Python tests); on the bridge side, `ResolveResult.ToTapOptions`
-stamps the detached session id onto **every** device's tap, which is asserted by
-`DeviceSelectionTests.ToTapOptions_StampsTheDetachedSessionAndPerDeviceIdentityName`.
+1. Start a Recorder: `python -m tapscribe --no-auth` (or `./start.ps1`).
+2. `dotnet run --project src/TapScribe.TrayBridge`.
+3. Right-click → **Start meeting**. Play meeting audio while you speak,
+   pausing between sentences, then **End meeting**.
+4. **Two** sets of WAVs appear under the Recorder's new detached session —
+   your identity (the mic) and "System audio" (the loopback) — each split
+   into Utterances by the level gate, and the pipeline runs through to a
+   summary window with **Copy**.
+5. Tokened path: paste the Recorder's token into **Settings… → Connection**,
+   Save, then Start meeting against a Recorder started **without**
+   `--no-auth`.
 
 ## Wire contract (summary)
 
-One `/tap` WebSocket per Utterance; raw PCM, 16 kHz mono int16, 20 ms (640-byte)
-binary frames; tap token via the `tapscribe.v1.tap.<token>` subprotocol. The level
-gate mints a fresh `utterance_id` per speech segment and the stream keeps it stable
-across reconnects, so a mid-Utterance blip appends to the same WAV; **Drain**
-flushes the trailing buffered audio (bounded) when an Utterance ends while
-reconnecting. The Bridge sends only PCM — no JSON, no control messages, and it
-never talks to WhisperLiveKit (ADR-0002). The full contract lives in `../README.md`.
+One `/tap` WebSocket per Utterance; raw PCM, 16 kHz mono int16, 20 ms
+(640-byte) binary frames; tap token via the `tapscribe.v1.tap.<token>`
+subprotocol. The gate mints a fresh `utterance_id` per speech segment and the
+stream keeps it stable across reconnects; **Drain** flushes the bounded
+trailing buffer when an Utterance ends while reconnecting. The Bridge sends
+only PCM — no JSON, no control messages (ADR-0002). The full contract lives
+in `../README.md`.
