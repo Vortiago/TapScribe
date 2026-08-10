@@ -80,6 +80,12 @@ fi
 # affect pass/fail and costs ~5s we don't want on every push. The
 # real_pip e2e test self-skips when its prerequisites are missing, so
 # including all of tests/ is safe even in a barebones env.
+#
+# `-m "not real_audio"` keeps that mirror honest on a developer box. CI's
+# `tests` job installs no ASR extra, so the real_audio tests self-skip
+# there; they get their own job with its own narrower deps. Without the
+# marker a machine that HAS the extras runs a heavier suite than CI ever
+# does, and pays minutes of real transcription on every push.
 if ! python3 -c "import pytest" 2>/dev/null; then
     echo "[pre-push] BLOCKED — pytest not importable. Install test deps" >&2
     echo "           (see .claude/hooks/session-start.sh) before pushing." >&2
@@ -87,7 +93,7 @@ if ! python3 -c "import pytest" 2>/dev/null; then
 fi
 
 echo "[pre-push] pytest tests (CI parity; usually ~30-60s)…" >&2
-if ! python3 -m pytest tests >&2; then
+if ! python3 -m pytest tests -m "not real_audio" >&2; then
     block
 fi
 
