@@ -9,6 +9,7 @@ namespace TapScribe.Bridge.Core.Tests;
 /// store behind that seam (DPAPI on Windows, the Keychain on macOS) — so every persistence
 /// rule is pinned here and runs on every OS instead of only on the Windows CI job.
 /// </summary>
+[Collection(EnvironmentSeedCollection.Name)] // Load's fallback reads the TAPSCRIBE_* vars
 public class BridgeSettingsStoreTests : IDisposable
 {
     private readonly string _dir =
@@ -117,6 +118,52 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal("", loaded.Token);
         Assert.Equal("rec.example", loaded.Host); // proves the file parsed, not a defaults fallback
         Assert.Equal(9100, loaded.Port);
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsAPinnedSelection_AndItsPerDeviceGate()
+    {
+        // The polymorphic half of the device list: a pin carries a device id the
+        // follow-default case has no field for, so the discriminator has to survive too.
+        var gate = new GateSettings(Sensitivity: 70, HangoverMs: 500, PreRollMs: 250);
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+        store.Save(new BridgeSettings
+        {
+            Devices = [new DeviceSelection.Pinned("usb-123", "system", "USB Loopback", gate)],
+        });
+
+        var pinned = Assert.IsType<DeviceSelection.Pinned>(Assert.Single(store.Load().Devices));
+
+        Assert.Equal("usb-123", pinned.DeviceId);
+        Assert.Equal("system", pinned.Identity);
+        Assert.Equal("USB Loopback", pinned.Name);
+        Assert.Equal(gate, pinned.Gate);
+    }
+
+    [Fact]
+    public void Load_AFileWithoutProcessOnEnd_DefaultsToTrue()
+    {
+        // A settings file written before ProcessOnEnd existed has no such key. The default
+        // must be true so upgrading keeps the original auto-process-on-End behaviour.
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(store.FilePath, "{ \"Host\": \"rec.example\", \"Port\": 8001 }");
+
+        BridgeSettings loaded = store.Load();
+
+        Assert.Equal("rec.example", loaded.Host); // proves the file parsed (not the corrupt fallback)
+        Assert.True(loaded.ProcessOnEnd);
+    }
+
+    [Fact]
+    public void Load_AMissingFile_ReturnsSeededDefaults()
+    {
+        // Nothing written yet: a first run must land on the environment-seeded defaults.
+        BridgeSettings loaded = Store(new FakeTapTokenStore()).Load();
+        BridgeSettings expected = BridgeSettings.SeedFromEnvironment();
+
+        Assert.Equal(expected.Host, loaded.Host);
+        Assert.Equal(expected.Port, loaded.Port);
     }
 
     [Fact]
