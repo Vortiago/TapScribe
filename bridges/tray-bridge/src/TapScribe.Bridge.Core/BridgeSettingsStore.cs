@@ -14,20 +14,29 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
     public string FilePath { get; } = Path.Join(directory, fileName);
 
     /// <summary>
-    /// Load the settings. A missing file falls back to environment-seeded defaults, so the
-    /// app always launches.
+    /// Load the settings. A missing, corrupt, or unreadable file falls back to
+    /// environment-seeded defaults rather than throwing, so the app always launches.
     /// </summary>
     public BridgeSettings Load()
     {
-        if (File.Exists(FilePath))
+        try
         {
-            using FileStream stream = File.OpenRead(FilePath);
-            BridgeSettings? loaded = JsonSerializer.Deserialize<BridgeSettings>(stream);
-            if (loaded is not null)
+            if (File.Exists(FilePath))
             {
-                loaded.Token = ReadToken(loaded.ProtectedToken);
-                return loaded;
+                using FileStream stream = File.OpenRead(FilePath);
+                BridgeSettings? loaded = JsonSerializer.Deserialize<BridgeSettings>(stream);
+                if (loaded is not null)
+                {
+                    loaded.Token = ReadToken(loaded.ProtectedToken);
+                    return loaded;
+                }
             }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            // Corrupt or unreadable settings file: fall back to seeded defaults rather than
+            // failing to launch. What's lost is whatever the operator had saved; they
+            // re-save from the dialog, which overwrites the bad file.
         }
         return BridgeSettings.SeedFromEnvironment();
     }

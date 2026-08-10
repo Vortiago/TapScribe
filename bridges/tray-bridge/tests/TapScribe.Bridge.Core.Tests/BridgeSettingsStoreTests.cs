@@ -119,6 +119,20 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal(9100, loaded.Port);
     }
 
+    [Fact]
+    public void Load_ACorruptFile_FallsBackToSeededDefaults_WithoutThrowing()
+    {
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(store.FilePath, "{ this is not valid json at all ");
+
+        BridgeSettings loaded = store.Load(); // must not throw
+        BridgeSettings expected = BridgeSettings.SeedFromEnvironment();
+
+        Assert.Equal(expected.Host, loaded.Host);
+        Assert.Equal(expected.Port, loaded.Port);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir))
