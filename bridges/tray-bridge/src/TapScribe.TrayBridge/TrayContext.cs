@@ -44,6 +44,9 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _pastMeetingsItem;
     private readonly System.Windows.Forms.Timer _resumeTimer;
     private readonly object _gate = new();
+    // Read and written under _gate, always — Start/End/Resume/OpenPastMeeting snapshot it
+    // and then carry the snapshot into thread-pool continuations, so there is no thread
+    // this field is private to.
     private BridgeSettings _settings = BridgeSettingsStore.Load();
     private CaptureOrchestrator? _orchestrator;
     private WasapiDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
@@ -730,14 +733,23 @@ internal sealed class TrayContext : ApplicationContext
         // form disposes them on close) — the same ownership shape as the meeting path.
         // Declared before the form so it disposes AFTER it (captures released first).
         using var meterEnumerator = new WasapiDeviceEnumerator();
-        using var form = new SettingsForm(_settings, ListDevices, meterEnumerator.Open);
+        BridgeSettings current;
+        lock (_gate)
+            current = _settings;
+        using var form = new SettingsForm(current, ListDevices, meterEnumerator.Open);
         if (form.ShowDialog() != DialogResult.OK)
             return;
 
-        _settings = form.Result;
+        // Publish the edit under the same lock every other reader of _settings takes (Start,
+        // End, Resume, OpenPastMeeting). Those read it from thread-pool continuations, so
+        // "they all happen to run on the UI thread" was never true — and an unlocked write
+        // of a reference field is not ordered against them.
+        BridgeSettings updated = form.Result;
+        lock (_gate)
+            _settings = updated;
         try
         {
-            BridgeSettingsStore.Save(_settings);
+            BridgeSettingsStore.Save(updated);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -756,7 +768,7 @@ internal sealed class TrayContext : ApplicationContext
         CaptureOrchestrator? running;
         lock (_gate)
             running = _orchestrator;
-        running?.UpdateGates(_settings.ToGateOptionsByIdentity());
+        running?.UpdateGates(updated.ToGateOptionsByIdentity());
     }
 
     private static IReadOnlyList<CaptureDevice> ListDevices()
