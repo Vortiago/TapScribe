@@ -101,6 +101,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                 onFailed(identity, ex);
             }
         }
+
+        // Zero pipelines is not a meeting. The per-device catch above is best-effort so
+        // one dead device can't sink the others — but when EVERY device dies, handing
+        // back an empty orchestrator lets the caller publish it as a live meeting:
+        // "End meeting" goes live and the status line claims 0/N devices are streaming
+        // while nothing is recorded. Refuse instead, the symmetric half of the caller's
+        // own refusal when no device could be OPENED. (Every capture was already
+        // released by the catch, so nothing leaks past this throw.)
+        if (sessions.Count == 0)
+            throw new InvalidOperationException("No selected device could be started.");
+
         return new CaptureOrchestrator(sessions);
     }
 
