@@ -165,16 +165,19 @@ internal sealed class TrayContext : ApplicationContext
                 // Every resolved device failed to OPEN (in use, format unsupported, …).
                 throw new InvalidOperationException("No selected device could be opened.");
 
-            int total = specs.Count;
-            var connected = new HashSet<string>(StringComparer.Ordinal);
+            // Which devices are actually streaming, and what that means for the status line,
+            // is the core's DeviceTally — including the drop the shell used to show only as
+            // a balloon while the header kept claiming a full house. Touched on the UI
+            // thread only (both callbacks marshal first), which is the tally's contract.
+            var tally = new DeviceTally(specs.Count);
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 specs,
-                onConnected: id => ui.Post(_ =>
+                onConnected: id => ui.Post(_ => ApplyStatus(tally.Connected(id)), null),
+                onFailed: (id, ex) => ui.Post(_ =>
                 {
-                    connected.Add(id);
-                    ApplyStatus(new TrayStatus.Streaming(connected.Count, total));
-                }, null),
-                onFailed: (id, ex) => ui.Post(_ => ShowBalloon($"{id} stopped", ex.Message), null));
+                    ApplyStatus(tally.Dropped(id));
+                    ShowBalloon($"{id} stopped", ex.Message);
+                }, null));
                 // No shared gate arg: each spec already carries its own per-device gate.
 
             lock (_gate)
@@ -197,7 +200,7 @@ internal sealed class TrayContext : ApplicationContext
             ui.Post(_ =>
             {
                 SetMeetingControls(running: true);
-                ApplyStatus(new TrayStatus.Streaming(connected.Count, total));
+                ApplyStatus(tally.Status);
             }, null);
         }
         catch (Exception ex) when (
