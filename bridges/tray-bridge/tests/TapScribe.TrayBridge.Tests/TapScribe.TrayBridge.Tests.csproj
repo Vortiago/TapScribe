@@ -19,6 +19,16 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <UseWindowsForms>true</UseWindowsForms>
+
+    <!-- xUnit1031 ("don't block on tasks in a test method") guards against deadlocking a
+         test thread that owns a SynchronizationContext the awaited work needs. Neither half
+         applies here and both are load-bearing the other way: these tests MUST be
+         synchronous, because they drive an STA thread that is not the test's, and they block
+         on the shell's fire-and-forget tasks precisely because the shell hands them to
+         nobody. The xunit thread has no SynchronizationContext, the shell's continuations
+         all run on the thread pool (ConfigureAwait(false) throughout), and every wait here
+         is bounded, so a hang fails the test rather than the job. -->
+    <NoWarn>$(NoWarn);xUnit1031</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
