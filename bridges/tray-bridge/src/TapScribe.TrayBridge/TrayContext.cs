@@ -30,6 +30,12 @@ internal sealed class TrayContext : ApplicationContext
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1.5);
 
+    /// <summary>How long Quit waits for a Start that is still in flight to reach the point
+    /// where it can tear its own meeting down. A backstop, not a promise: the session mint
+    /// it is usually blocked on carries its own 20 s timeout, and Quit must stay responsive
+    /// against a Recorder that accepted the connection and then went quiet.</summary>
+    private static readonly TimeSpan StartSettleTimeout = TimeSpan.FromSeconds(5);
+
     private readonly NotifyIcon _icon;
     private readonly TrayIcons _icons = new();
     private readonly ToolStripMenuItem _statusItem;
@@ -45,6 +51,13 @@ internal sealed class TrayContext : ApplicationContext
     // The in-flight End/Resume flow's cancellation, published for Quit. Whoever takes it
     // out of this field owns it, so a Cancel can never race the Dispose.
     private CancellationTokenSource? _flowCancellation;
+    // The in-flight StartAsync, if any. A meeting exists from the operator's first click,
+    // not from the moment it is published, and Quit has to be able to see that window —
+    // TakeMeeting reports "nothing running" throughout it.
+    private Task? _startTask;
+    // Set once Quit has run. A start that is mid-flight then tears its own meeting down
+    // instead of publishing it into a shell whose message loop is gone.
+    private bool _quitting;
     private DateTimeOffset _startedAt; // wall-clock start of the running meeting, for Past-meetings history (#168)
 
     public TrayContext()
@@ -91,7 +104,9 @@ internal sealed class TrayContext : ApplicationContext
         BridgeSettings settings;
         lock (_gate)
         {
-            if (_orchestrator is not null)
+            // Already running, already starting (the mint is a network round-trip long), or
+            // on the way out.
+            if (_orchestrator is not null || _startTask is { IsCompleted: false } || _quitting)
                 return;
             settings = _settings;
         }
@@ -108,7 +123,13 @@ internal sealed class TrayContext : ApplicationContext
         // async (a network round-trip to mint the session) and resolves on the UI thread.
         _startItem.Enabled = false;
         ApplyStatus(new TrayStatus.Starting());
-        _ = StartAsync(settings, ui);
+        // Publish the task, not just fire and forget it: Quit waits on this so a meeting
+        // minted a moment before the operator quit is torn down instead of abandoned. Safe
+        // to assign after the call — StartAsync yields at the first await and both this and
+        // Quit run on the UI thread, so nothing can observe the gap.
+        Task start = StartAsync(settings, ui);
+        lock (_gate)
+            _startTask = start;
     }
 
     private async Task StartAsync(BridgeSettings settings, SynchronizationContext ui)
@@ -192,13 +213,32 @@ internal sealed class TrayContext : ApplicationContext
                 // No shared gate arg: each spec already carries its own per-device gate.
             unowned = null; // every capture now belongs to the orchestrator, including on its throw paths
 
+            bool abandoned;
             lock (_gate)
             {
-                _orchestrator = orchestrator;
-                _enumerator = enumerator;
-                _sessionId = sessionId;
-                _startedAt = DateTimeOffset.Now; // captured for the Past-meetings history at End (#168)
+                // Quit ran while this start was in flight. Publishing now would hand the
+                // meeting to a shell that has already torn down and stopped its message
+                // loop: nobody would ever dispose it, the captures would keep streaming,
+                // and the detached session would stay open on the Recorder. Take the
+                // teardown ourselves instead — this is the same lock Quit's TakeMeeting
+                // uses, so exactly one of the two runs it.
+                abandoned = _quitting;
+                if (!abandoned)
+                {
+                    _orchestrator = orchestrator;
+                    _enumerator = enumerator;
+                    _sessionId = sessionId;
+                    _startedAt = DateTimeOffset.Now; // captured for the Past-meetings history at End (#168)
+                }
             }
+            if (abandoned)
+            {
+                // The 2 s-per-session bounded teardown, the same one Quit uses; the finally
+                // then releases the enumerator, after the captures it opened.
+                await orchestrator.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
+
             enumerator = null; // ownership transferred; the finally below must not dispose it
             started = new StartedMeeting(tally, resolution.Missing); // the meeting is live from here
         }
@@ -612,12 +652,35 @@ internal sealed class TrayContext : ApplicationContext
         // of the field makes this the owner; the flow then leaves it alone (and we don't
         // dispose it — the process is on its way out).
         CancellationTokenSource? flow;
+        Task? start;
         lock (_gate)
         {
             flow = _flowCancellation;
             _flowCancellation = null;
+            _quitting = true; // an in-flight start must tear itself down, not publish
+            start = _startTask;
         }
         flow?.Cancel();
+
+        // Let a start that is mid-flight settle. Until it publishes, TakeMeeting below sees
+        // nothing to take — so without this wait, quitting during the session mint left the
+        // captures streaming, the meeting undisposed and the detached session open on the
+        // Recorder, all the way until the process died. Bounded: the mint has its own 20 s
+        // timeout, and Quit must not hang behind a Recorder that accepted the connection
+        // and went quiet. Past the bound the start is abandoned exactly as it was before.
+        if (start is { IsCompleted: false })
+        {
+            try
+            {
+                start.Wait(StartSettleTimeout);
+            }
+            catch (AggregateException)
+            {
+                // StartAsync faulted with something outside its own catch filter. The
+                // meeting was never published, so there is nothing here left to tear down;
+                // what is lost is the failure's detail, on a path that is exiting anyway.
+            }
+        }
 
         (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, _, _) = TakeMeeting();
 
