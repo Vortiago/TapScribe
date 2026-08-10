@@ -37,6 +37,8 @@ internal sealed class TrayContext : ApplicationContext
     private static readonly TimeSpan StartSettleTimeout = TimeSpan.FromSeconds(5);
 
     private readonly NotifyIcon _icon;
+    // Held so Quit can dispose it: NotifyIcon.Dispose does NOT dispose its ContextMenuStrip.
+    private readonly ContextMenuStrip _menu;
     private readonly TrayIcons _icons = new();
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _startItem;
@@ -76,22 +78,22 @@ internal sealed class TrayContext : ApplicationContext
         var settingsItem = new ToolStripMenuItem("Settings…", null, (_, _) => OpenSettings());
         var quitItem = new ToolStripMenuItem("Quit", null, (_, _) => Quit());
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add(_statusItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(_startItem);
-        menu.Items.Add(_endItem);
-        menu.Items.Add(_pastMeetingsItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(settingsItem);
-        menu.Items.Add(quitItem);
+        _menu = new ContextMenuStrip();
+        _menu.Items.Add(_statusItem);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add(_startItem);
+        _menu.Items.Add(_endItem);
+        _menu.Items.Add(_pastMeetingsItem);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add(settingsItem);
+        _menu.Items.Add(quitItem);
 
         _icon = new NotifyIcon
         {
             Icon = _icons[TrayIcon.Idle],
             Text = "TapScribe — idle",
             Visible = true,
-            ContextMenuStrip = menu,
+            ContextMenuStrip = _menu,
         };
 
         // Resume a pipeline left running by a previous tray session, once the message loop
@@ -722,6 +724,12 @@ internal sealed class TrayContext : ApplicationContext
 
         _icon.Visible = false;
         _icon.Dispose();
+        // NotifyIcon.Dispose does NOT dispose the ContextMenuStrip it renders, so the whole
+        // menu outlived the tray. Disposing the strip cascades through its items — including
+        // _pastMeetingsItem's drop-down, whose LAST rebuilt set is the one
+        // RebuildPastMeetingsMenu never gets to dispose (it only ever disposes the PREVIOUS
+        // set, on the next open).
+        _menu.Dispose();
         _icons.Dispose();
         ExitThread();
     }
