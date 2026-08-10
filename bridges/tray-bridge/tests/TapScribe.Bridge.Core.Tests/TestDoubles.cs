@@ -212,6 +212,25 @@ internal sealed class FakeTapTokenStore : ITapTokenStore
 }
 
 /// <summary>
+/// The other shape of <see cref="ITapTokenStore"/>: the secret lives OUT-OF-BAND (the
+/// macOS Keychain), so <see cref="Write"/> keeps it here and returns null — the settings
+/// file gets no at-rest value at all, and <see cref="Read"/> ignores what the file says.
+/// <see cref="Held"/> is what the platform secret store would be holding.
+/// </summary>
+internal sealed class OutOfBandTapTokenStore : ITapTokenStore
+{
+    public string? Held { get; private set; }
+
+    public string? Write(string token)
+    {
+        Held = string.IsNullOrEmpty(token) ? null : token;
+        return null;
+    }
+
+    public string Read(string? atRest) => Held ?? "";
+}
+
+/// <summary>
 /// Hands out <see cref="FakeTapConnection"/>s gated by one switch: <see cref="Up"/>
 /// false makes every connect and every active send throw (a blip / outage), with
 /// no real socket — so <see cref="TapStream"/>'s reconnect/buffer/drain logic is

@@ -66,8 +66,10 @@ public sealed class BridgeSettings
     /// <summary>
     /// The tap token at rest, as the platform's <see cref="ITapTokenStore"/> spells it —
     /// a base64 DPAPI blob on Windows, null when the secret lives out-of-band. Written and
-    /// read only by <see cref="BridgeSettingsStore"/>.
+    /// read only by <see cref="BridgeSettingsStore"/>. Omitted when null, so a platform
+    /// that keeps the secret out-of-band leaves no token key in the file at all.
     /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ProtectedToken { get; set; }
 
     /// <summary>The tap token in plaintext (not serialised). Empty = offer no subprotocol.</summary>

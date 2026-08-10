@@ -70,6 +70,19 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Contains("ProtectedToken", json);    // only the store's opaque value is persisted
     }
 
+    [Fact]
+    public void Save_WhenTheTokenStoreKeepsTheSecretOutOfBand_WritesNoTokenKeyAtAll()
+    {
+        // The macOS shape: the Keychain holds the secret and Write returns null, so the
+        // settings file must carry no token key whatsoever — not a null one. A stray
+        // "ProtectedToken": null would read as an at-rest value that platform never wrote.
+        BridgeSettingsStore store = Store(new OutOfBandTapTokenStore());
+
+        store.Save(new BridgeSettings { Token = "tok-in-the-keychain" });
+
+        Assert.DoesNotContain("ProtectedToken", File.ReadAllText(store.FilePath));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir))
