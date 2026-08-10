@@ -231,6 +231,20 @@ internal sealed class OutOfBandTapTokenStore : ITapTokenStore
 }
 
 /// <summary>
+/// A token store the platform refuses: every <see cref="Read"/> throws, the stand-in for a
+/// Keychain the operator declined to unlock or a secrets daemon that isn't up. The
+/// interface asks an implementation to degrade rather than throw, but the store this is
+/// handed to can't verify that of a platform it doesn't own — so the portable half is
+/// pinned to survive one that misbehaves.
+/// </summary>
+internal sealed class DeniedTapTokenStore : ITapTokenStore
+{
+    public string? Write(string token) => throw new UnauthorizedAccessException("denied by the platform");
+
+    public string Read(string? atRest) => throw new UnauthorizedAccessException("denied by the platform");
+}
+
+/// <summary>
 /// Hands out <see cref="FakeTapConnection"/>s gated by one switch: <see cref="Up"/>
 /// false makes every connect and every active send throw (a blip / outage), with
 /// no real socket — so <see cref="TapStream"/>'s reconnect/buffer/drain logic is

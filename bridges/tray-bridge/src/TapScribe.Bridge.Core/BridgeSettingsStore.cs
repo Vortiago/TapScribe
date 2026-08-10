@@ -25,7 +25,7 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
             BridgeSettings? loaded = JsonSerializer.Deserialize<BridgeSettings>(stream);
             if (loaded is not null)
             {
-                loaded.Token = tokens.Read(loaded.ProtectedToken);
+                loaded.Token = ReadToken(loaded.ProtectedToken);
                 return loaded;
             }
         }
@@ -45,4 +45,28 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
         using FileStream stream = File.Create(FilePath);
         JsonSerializer.Serialize(stream, settings, new JsonSerializerOptions { WriteIndented = true });
     }
+
+    // The token read is platform IO — a Keychain the operator declined to unlock, a DPAPI
+    // blob from another user, a secrets daemon that isn't up. An implementation is asked to
+    // degrade to "" itself, but this half doesn't own the platform, so a denial here means
+    // "no saved token" rather than a tray that won't launch. What's lost is the operator's
+    // saved token; the rest of their settings still load and they re-enter it in the dialog.
+    private string ReadToken(string? atRest)
+    {
+        try
+        {
+            return tokens.Read(atRest);
+        }
+        catch (Exception ex) when (IsPlatformSecretFailure(ex))
+        {
+            return "";
+        }
+    }
+
+    // Deliberately the widest filter in this codebase: DPAPI raises CryptographicException,
+    // a Keychain binding raises whatever it chooses, and the NEXT platform raises something
+    // nobody has listed here — a narrow filter would put the tray back to not launching,
+    // which is the bug ReadToken exists to prevent. OutOfMemoryException is excluded because
+    // then the process is doomed regardless and swallowing it would only hide that.
+    private static bool IsPlatformSecretFailure(Exception ex) => ex is not OutOfMemoryException;
 }

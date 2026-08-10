@@ -102,6 +102,23 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal("", store.Load().Token);
     }
 
+    [Fact]
+    public void Load_WhenThePlatformDeniesTheTokenRead_DegradesToNoToken_AndKeepsTheRest()
+    {
+        // Reading the secret is platform IO that can fail for reasons the Bridge can't fix:
+        // a DPAPI blob from another user, a Keychain the operator declined to unlock, a
+        // secrets daemon that isn't up. None of those may stop the tray launching or lose
+        // the settings around the token — the operator just re-enters it in the dialog.
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+        store.Save(new BridgeSettings { Host = "rec.example", Port = 9100, Token = "tok-1" });
+
+        BridgeSettings loaded = Store(new DeniedTapTokenStore()).Load(); // must not throw
+
+        Assert.Equal("", loaded.Token);
+        Assert.Equal("rec.example", loaded.Host); // proves the file parsed, not a defaults fallback
+        Assert.Equal(9100, loaded.Port);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir))
