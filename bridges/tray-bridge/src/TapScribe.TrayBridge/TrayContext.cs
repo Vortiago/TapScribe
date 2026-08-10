@@ -118,6 +118,12 @@ internal sealed class TrayContext : ApplicationContext
         // reach them, so an exception in that window would strand every one of them for the
         // process lifetime — the finally below is their only owner until StartAll takes over.
         List<PipelineSpec>? unowned = null;
+        // Non-null once the meeting is published, which is the LAST thing the try does.
+        // Everything the shell still has to render then happens BELOW the catch, where it
+        // cannot reach FailToIdle: a throw while balloon-ing a skipped device used to roll
+        // a live, streaming meeting back to "idle" — Start re-enabled, End greyed out, and
+        // no way left to end the meeting that was still recording.
+        StartedMeeting? started = null;
         try
         {
             // 1) Resolve the operator's device selection against what's present RIGHT NOW
@@ -194,20 +200,7 @@ internal sealed class TrayContext : ApplicationContext
                 _startedAt = DateTimeOffset.Now; // captured for the Past-meetings history at End (#168)
             }
             enumerator = null; // ownership transferred; the finally below must not dispose it
-
-            // Devices that didn't resolve are a non-fatal warning — the meeting runs on the
-            // ones that did.
-            if (resolution.Missing.Count > 0)
-            {
-                string skipped = string.Join(", ", resolution.Missing.Select(DescribeSelection));
-                ui.Post(_ => ShowBalloon("Some devices unavailable", $"Skipped: {skipped}"), null);
-            }
-
-            ui.Post(_ =>
-            {
-                SetMeetingControls(running: true);
-                ApplyStatus(tally.Status);
-            }, null);
+            started = new StartedMeeting(tally, resolution.Missing); // the meeting is live from here
         }
         catch (Exception ex) when (
             ex is HttpRequestException
@@ -241,7 +234,33 @@ internal sealed class TrayContext : ApplicationContext
                 foreach (PipelineSpec spec in unowned)
                     spec.Capture.Dispose();
         }
+
+        if (started is null)
+            return; // the catch (or the non-Ok early return) already surfaced the failure
+
+        // From here the meeting IS streaming, and everything left is presentation. It sits
+        // outside the try on purpose: a failure to render must never be classified as a
+        // failure to START.
+        //
+        // Devices that didn't resolve are a non-fatal warning — the meeting runs on the
+        // ones that did.
+        if (started.Missing.Count > 0)
+        {
+            string skipped = string.Join(", ", started.Missing.Select(DescribeSelection));
+            ui.Post(_ => ShowBalloon("Some devices unavailable", $"Skipped: {skipped}"), null);
+        }
+
+        ui.Post(_ =>
+        {
+            SetMeetingControls(running: true);
+            ApplyStatus(started.Tally.Status);
+        }, null);
     }
+
+    /// <summary>A published, streaming meeting's presentation state — the live
+    /// <see cref="DeviceTally"/> and the selections that didn't resolve. Its non-nullness
+    /// is what tells <see cref="StartAsync"/> the meeting reached the point of no return.</summary>
+    private sealed record StartedMeeting(DeviceTally Tally, IReadOnlyList<DeviceSelection> Missing);
 
     // Open one resolved device behind the capture seam and add a pipeline for it.
     // Best-effort: a device that fails to OPEN is surfaced and skipped, so a dead loopback
