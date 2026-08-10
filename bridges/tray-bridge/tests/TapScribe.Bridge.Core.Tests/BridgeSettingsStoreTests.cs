@@ -53,6 +53,23 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal(micGate, device.Gate);
     }
 
+    [Fact]
+    public void Save_NeverWritesTheTokenInCleartext()
+    {
+        // This is the test behind the README's security claim: the plaintext token must
+        // never reach the file, only whatever opaque value the platform's token store
+        // hands back. A change that serialised Token directly would fail here.
+        const string secret = "super-secret-tap-token-abc123";
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+
+        store.Save(new BridgeSettings { Host = "rec.example", Token = secret });
+        string json = File.ReadAllText(store.FilePath);
+
+        Assert.DoesNotContain(secret, json);        // plaintext token never on disk
+        Assert.DoesNotContain("\"Token\"", json);   // the plaintext property isn't serialised
+        Assert.Contains("ProtectedToken", json);    // only the store's opaque value is persisted
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir))

@@ -24,15 +24,20 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
             using FileStream stream = File.OpenRead(FilePath);
             BridgeSettings? loaded = JsonSerializer.Deserialize<BridgeSettings>(stream);
             if (loaded is not null)
+            {
+                loaded.Token = tokens.Read(loaded.ProtectedToken);
                 return loaded;
+            }
         }
         return BridgeSettings.SeedFromEnvironment();
     }
 
-    /// <summary>Save the settings, creating the directory if needed.</summary>
+    /// <summary>Save the settings, creating the directory if needed. The plaintext token
+    /// is handed to the token store and only its opaque answer is serialised.</summary>
     public void Save(BridgeSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        settings.ProtectedToken = tokens.Write(settings.Token);
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         using FileStream stream = File.Create(FilePath);
         JsonSerializer.Serialize(stream, settings, new JsonSerializerOptions { WriteIndented = true });

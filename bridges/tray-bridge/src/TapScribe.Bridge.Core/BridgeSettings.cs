@@ -63,7 +63,15 @@ public sealed class BridgeSettings
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? GatePreRollMs { get; set; }
 
-    /// <summary>The tap token in plaintext. Empty = offer no subprotocol.</summary>
+    /// <summary>
+    /// The tap token at rest, as the platform's <see cref="ITapTokenStore"/> spells it —
+    /// a base64 DPAPI blob on Windows, null when the secret lives out-of-band. Written and
+    /// read only by <see cref="BridgeSettingsStore"/>.
+    /// </summary>
+    public string? ProtectedToken { get; set; }
+
+    /// <summary>The tap token in plaintext (not serialised). Empty = offer no subprotocol.</summary>
+    [JsonIgnore]
     public string Token { get; set; } = "";
 
     /// <summary>
