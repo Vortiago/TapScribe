@@ -95,6 +95,13 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     /// a late Failed reaches nobody.</summary>
     public bool ThrowOnStart { get; init; }
 
+    /// <summary>When set, <see cref="Stop"/> throws — the endpoint was invalidated while
+    /// the meeting ran (unplugged / disabled / default-device switch), which is what
+    /// AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does not
+    /// promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is
+    /// contract-bound), so the core must survive a backend that doesn't swallow it.</summary>
+    public bool ThrowOnStop { get; init; }
+
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
     public bool IsMuted { get; private set; }
@@ -109,7 +116,12 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
         Started = true;
     }
 
-    public void Stop() => Stopped = true;
+    public void Stop()
+    {
+        Stopped = true;
+        if (ThrowOnStop)
+            throw new InvalidOperationException("endpoint invalidated");
+    }
     public void Dispose() => Disposed = true;
 
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));

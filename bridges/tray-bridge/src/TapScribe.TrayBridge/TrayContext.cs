@@ -301,11 +301,21 @@ internal sealed class TrayContext : ApplicationContext
             // controller awaits this to completion before it triggers the pipeline.
             drainAsync: async () =>
             {
-                // End-meeting teardown is ONE call — drain every tap to completion
-                // THEN stop+dispose capture — so it can't be reduced to a drain that
-                // leaks the devices and streams past the barrier (see EndMeetingAsync).
-                await orchestrator.EndMeetingAsync().ConfigureAwait(false);
-                enumerator?.Dispose();
+                try
+                {
+                    // End-meeting teardown is ONE call — drain every tap to completion
+                    // THEN stop+dispose capture — so it can't be reduced to a drain that
+                    // leaks the devices and streams past the barrier (see EndMeetingAsync).
+                    await orchestrator.EndMeetingAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    // Release the endpoints even if the teardown above failed. Sequenced
+                    // after the await it was skipped on a throw, and nothing else holds
+                    // this enumerator once End has detached the meeting — so the devices
+                    // stayed open until the process exited.
+                    enumerator?.Dispose();
+                }
             });
     }
 
@@ -323,9 +333,11 @@ internal sealed class TrayContext : ApplicationContext
         controller.Updated += view => ui.Post(_ => RenderPipeline(view), null);
         controller.OperatorNotice += message => ui.Post(_ => ShowBalloon("Meeting", message), null);
 
+        bool handled = false;
         try
         {
             await run(controller).ConfigureAwait(false);
+            handled = true;
         }
         catch (Exception ex) when (
             ex is HttpRequestException or OperationCanceledException or InvalidOperationException)
@@ -335,10 +347,18 @@ internal sealed class TrayContext : ApplicationContext
             // processing state. The filter keeps this off CodeQL's catch-all radar.
             StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
             ui.Post(_ => FailPipeline(failure.Message), null);
+            handled = true;
         }
         finally
         {
             MeetingStateStore.Clear();
+            if (!handled)
+                // An exception OUTSIDE the filter above is escaping this fire-and-forget
+                // task. Nobody observes it, and both menu items are disabled with the header
+                // stuck on "● Ending meeting…" — the tray is unusable until it is restarted.
+                // The exception still propagates (it is not this method's to classify); this
+                // only returns the menu to a usable state on its way out.
+                ui.Post(_ => FailPipeline("The meeting could not be completed."), null);
         }
     }
 

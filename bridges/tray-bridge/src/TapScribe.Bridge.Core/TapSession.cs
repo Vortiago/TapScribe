@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
@@ -256,7 +258,26 @@ public sealed class TapSession : IAsyncDisposable
         }
 
         if (_captureStarted)
-            _capture.Stop();
+        {
+            try
+            {
+                _capture.Stop();
+            }
+            catch (Exception ex) when (ex is COMException or InvalidOperationException)
+            {
+                // The endpoint was invalidated while the meeting ran (unplugged / disabled /
+                // default-device switch): stopping a WASAPI client for a device that is gone
+                // raises AUDCLNT_E_DEVICE_INVALIDATED. There is nothing left to stop, and the
+                // one thing that still matters — RELEASING the device below — must not be
+                // skipped over it. Swallowed rather than surfaced because teardown has no
+                // caller who could act on it: this runs from End meeting (whose drain callback
+                // disposes the device enumerator on the next line) and from Quit (which blocks
+                // on DisposeAsync and is documented to rely on it being throw-free). What is
+                // lost is the stop error's detail; the device loss itself already reached the
+                // operator through IAudioCapture.Failed -> onFailed. The filter is what a
+                // capture backend's Stop can raise, so an unexpected exception still escapes.
+            }
+        }
 
         if (current is not null)
             draining.Add(current.DrainAndDisposeAsync());
