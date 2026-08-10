@@ -764,10 +764,11 @@ internal sealed class TrayContext : ApplicationContext
         _icon.Visible = false;
         _icon.Dispose();
         // NotifyIcon.Dispose does NOT dispose the ContextMenuStrip it renders, so the whole
-        // menu outlived the tray. Disposing the strip cascades through its items — including
-        // _pastMeetingsItem's drop-down, whose LAST rebuilt set is the one
-        // RebuildPastMeetingsMenu never gets to dispose (it only ever disposes the PREVIOUS
-        // set, on the next open).
+        // menu outlived the tray. A ToolStrip disposes the items it owns, so take the
+        // Past-meetings drop-down (itself a ToolStrip) explicitly first — its LAST rebuilt
+        // set is the one RebuildPastMeetingsMenu never gets to dispose, since it only ever
+        // disposes the PREVIOUS set on the next open — and then the strip itself.
+        _pastMeetingsItem.DropDown.Dispose();
         _menu.Dispose();
         _icons.Dispose();
         ExitThread();
