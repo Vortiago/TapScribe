@@ -83,6 +83,25 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.DoesNotContain("ProtectedToken", File.ReadAllText(store.FilePath));
     }
 
+    [Fact]
+    public void Save_WithAClearedToken_DeletesTheStoredSecret_AndLoadsAsNoToken()
+    {
+        // Blanking the token field in the dialog means "forget my token". Both halves of
+        // the seam have to hear it: the FILE loses the at-rest value, and the platform
+        // store is told to delete an out-of-band secret (Write("") is that instruction) —
+        // otherwise a Keychain entry outlives the settings that referenced it.
+        var tokens = new OutOfBandTapTokenStore();
+        BridgeSettingsStore store = Store(tokens);
+        store.Save(new BridgeSettings { Token = "tok-1" });
+
+        BridgeSettings loaded = store.Load();
+        loaded.Token = "";
+        store.Save(loaded);
+
+        Assert.Null(tokens.Held);                          // the platform secret is gone
+        Assert.Equal("", store.Load().Token);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir))

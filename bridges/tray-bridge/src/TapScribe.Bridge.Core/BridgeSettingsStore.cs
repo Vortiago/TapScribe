@@ -37,6 +37,9 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
     public void Save(BridgeSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        // Unconditional, empty token included: Write("") is how a platform is told to
+        // DELETE an out-of-band secret. Guarding this on a non-empty token would leave a
+        // Keychain entry alive after the operator blanked the field.
         settings.ProtectedToken = tokens.Write(settings.Token);
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         using FileStream stream = File.Create(FilePath);
