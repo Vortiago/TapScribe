@@ -354,14 +354,6 @@ filterwarnings = [
     #  `strip_silence._local_silero_model` both go through `tapscribe.vad`,
     #  which runs the vendored ONNX model on onnxruntime. The deprecated
     #  TorchScript loader is unreachable, not merely unused.)
-    # starlette 1.x started nagging that `httpx` should become `httpx2`
-    # in TestClient. fastapi.testclient -> starlette.testclient imports
-    # raise this at module load, which breaks every collection that uses
-    # TestClient under filterwarnings=error. The warning class is its own
-    # `UserWarning` subclass (NOT a DeprecationWarning), so the filter
-    # has to name it explicitly. Remove once starlette finalises the
-    # httpx2 migration (or pins httpx2 itself).
-    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real transcription backend (Whisper via faster-whisper, or Parakeet via transformers). Skipped unless tests/fixtures/audio/ is populated and the backend's package is installed.",
