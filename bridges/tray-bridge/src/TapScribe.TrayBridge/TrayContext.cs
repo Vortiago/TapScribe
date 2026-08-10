@@ -42,6 +42,9 @@ internal sealed class TrayContext : ApplicationContext
     private CaptureOrchestrator? _orchestrator;
     private WasapiDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
     private string? _sessionId; // the detached session the running meeting taps into
+    // The in-flight End/Resume flow's cancellation, published for Quit. Whoever takes it
+    // out of this field owns it, so a Cancel can never race the Dispose.
+    private CancellationTokenSource? _flowCancellation;
     private DateTimeOffset _startedAt; // wall-clock start of the running meeting, for Past-meetings history (#168)
 
     public TrayContext()
@@ -296,7 +299,7 @@ internal sealed class TrayContext : ApplicationContext
             settings, sessionId, ui,
             // Record-only (ProcessOnEnd == false) still drains below but skips the trigger/poll,
             // ending at a terminal Saved view; the default runs the full pipeline (issue #107).
-            run: controller => controller.EndAsync(triggerPipeline: process),
+            run: (controller, ct) => controller.EndAsync(triggerPipeline: process, cancellationToken: ct),
             // Close every open tap (gate close + Drain) BEFORE the pipeline strips; the
             // controller awaits this to completion before it triggers the pipeline.
             drainAsync: async () =>
@@ -323,7 +326,7 @@ internal sealed class TrayContext : ApplicationContext
     // Resume), and always clear the persisted state when it terminates. The one place the
     // End and Resume paths share — they differ only in the run delegate and the drain.
     private async Task RunPipelineFlowAsync(BridgeSettings settings, string sessionId,
-        SynchronizationContext ui, Func<MeetingController, Task> run, Func<Task>? drainAsync)
+        SynchronizationContext ui, Func<MeetingController, CancellationToken, Task> run, Func<Task>? drainAsync)
     {
         using var control = new ControlClient(
             settings.Host, settings.Port, settings.Tls, settings.Token,
@@ -333,10 +336,19 @@ internal sealed class TrayContext : ApplicationContext
         controller.Updated += view => ui.Post(_ => RenderPipeline(view), null);
         controller.OperatorNotice += message => ui.Post(_ => ShowBalloon("Meeting", message), null);
 
+        // The flow's poll loop runs on an uncancellable path today: Quit ends the message
+        // loop and leaves it polling into a dead UI. Publish a source Quit can cancel —
+        // the same seam OpenPastMeeting already owns for its window. Ownership is the
+        // field: whoever takes the CTS out of it is responsible for it, so Quit's Cancel
+        // and this method's Dispose can never race.
+        var cancellation = new CancellationTokenSource();
+        lock (_gate)
+            _flowCancellation = cancellation;
+
         bool handled = false;
         try
         {
-            await run(controller).ConfigureAwait(false);
+            await run(controller, cancellation.Token).ConfigureAwait(false);
             handled = true;
         }
         catch (Exception ex) when (
@@ -352,6 +364,15 @@ internal sealed class TrayContext : ApplicationContext
         finally
         {
             MeetingStateStore.Clear();
+            bool owned;
+            lock (_gate)
+            {
+                owned = ReferenceEquals(_flowCancellation, cancellation);
+                if (owned)
+                    _flowCancellation = null;
+            }
+            if (owned)
+                cancellation.Dispose(); // Quit didn't take it, so disposing it can't race its Cancel
             if (!handled)
                 // An exception OUTSIDE the filter above is escaping this fire-and-forget
                 // task. Nobody observes it, and both menu items are disabled with the header
@@ -386,7 +407,7 @@ internal sealed class TrayContext : ApplicationContext
 
     // Resume polls only — no drain, no re-trigger (RunPipelineFlowAsync with a null drain).
     private Task ResumeAsync(BridgeSettings settings, string sessionId, SynchronizationContext ui) =>
-        RunPipelineFlowAsync(settings, sessionId, ui, run: controller => controller.ResumeAsync(), drainAsync: null);
+        RunPipelineFlowAsync(settings, sessionId, ui, run: (controller, ct) => controller.ResumeAsync(ct), drainAsync: null);
 
     // Render a MeetingController emission on the UI thread: the status line tracks the
     // pipeline phase, and the terminal phases pop the summary / the failure.
@@ -550,6 +571,19 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Quit()
     {
+        // Stop an in-flight End/Resume flow first: ExitThread below kills the message loop
+        // it renders into, so an uncancelled poll loop would keep talking to the Recorder
+        // and posting into a dead context for as long as the process lingers. Taking it out
+        // of the field makes this the owner; the flow then leaves it alone (and we don't
+        // dispose it — the process is on its way out).
+        CancellationTokenSource? flow;
+        lock (_gate)
+        {
+            flow = _flowCancellation;
+            _flowCancellation = null;
+        }
+        flow?.Cancel();
+
         (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, _, _) = TakeMeeting();
 
         // Tear every pipeline down: the orchestrator drains + closes all of them
