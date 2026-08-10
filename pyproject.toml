@@ -349,6 +349,9 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
+    # huggingface_hub's xet download path still calls the deprecated
+    # hf_xet.download_files(). Remove when huggingface_hub migrates.
+    "ignore:hf_xet\\.download_files\\(\\) is deprecated:DeprecationWarning",
     # (No torch.jit.load ignore needed: since #374 nothing in the core install
     #  imports torch at all — `speech_gate.load_silero_model` and
     #  `strip_silence._local_silero_model` both go through `tapscribe.vad`,
