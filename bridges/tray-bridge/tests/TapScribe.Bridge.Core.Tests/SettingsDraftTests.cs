@@ -1,15 +1,14 @@
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.Bridge.Windows.Tests;
+namespace TapScribe.Bridge.Core.Tests;
 
 /// <summary>
 /// Tests for <see cref="SettingsDraft"/> — the pure editable state behind the tray
 /// Settings dialog, seeded from a <see cref="BridgeSettings"/> and collected back into
-/// one. This is the logic the WinForms <c>SettingsForm</c> used to hold inline (and so
-/// couldn't be tested on the cross-platform runner): which selection to build per device,
-/// how the per-device gate is sourced, migration-aware seeding, and the absent-pin
-/// carry-forward. No WinForms here — the form is now a thin binding over these methods.
-/// (Token is left empty throughout so nothing hits DPAPI, which is Windows-only.)
+/// one. This is the logic the WinForms <c>SettingsForm</c> used to hold inline: which
+/// selection to build per device, how the per-device gate is sourced, migration-aware
+/// seeding, and the absent-pin carry-forward. No WinForms here — the form is a thin
+/// binding over these methods, and a second platform's dialog will be another one.
 /// </summary>
 public class SettingsDraftTests
 {
@@ -297,6 +296,9 @@ public class SettingsDraftTests
         string label = SettingsDraft.SensitivityLabel(50);
 
         Assert.Contains("50 / 100", label);
-        Assert.Contains("0.", label); // the RMS-threshold readout
+        // The RMS-threshold readout, asserted through the CURRENT culture's decimal
+        // separator: the label is operator-facing text and formats with the machine's
+        // locale, so a hardcoded "0." only ever passed because this ran on en-US Windows.
+        Assert.Contains(GateTuning.SliderToThreshold(50).ToString("0.000"), label);
     }
 }
