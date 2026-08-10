@@ -571,27 +571,52 @@ internal sealed class TrayContext : ApplicationContext
 
         var form = new MeetingForm();
         var cts = new CancellationTokenSource();
+        // Two parties hold this source — the window (which cancels on close) and the poll
+        // loop (which reads its token) — and the LAST one out disposes it. Closing the
+        // window used to Cancel and Dispose in the same breath, while the loop was still
+        // inside DriveAsync: it survived only because Cancel ran first, and an
+        // ObjectDisposedException from any later touch of the token isn't in
+        // MeetingViewDriver's catch filter, so it would escape this fire-and-forget task
+        // silently. Both releases run on the UI thread (the loop's is marshalled), so the
+        // count needs no interlocking.
+        int holders = 2;
+        void Release()
+        {
+            if (--holders == 0)
+                cts.Dispose();
+        }
+
         form.FormClosed += (_, _) =>
         {
             cts.Cancel(); // stop the poll loop the instant the user closes the window
-            cts.Dispose();
+            Release();
             form.Dispose();
         };
         form.Show();
-        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cts.Token);
+        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cts.Token, Release);
     }
 
     private async Task OpenPastMeetingAsync(BridgeSettings settings, string sessionId,
-        MeetingForm form, SynchronizationContext ui, CancellationToken cancellationToken)
+        MeetingForm form, SynchronizationContext ui, CancellationToken cancellationToken,
+        Action release)
     {
-        using var control = new ControlClient(
-            settings.Host, settings.Port, settings.Tls, settings.Token,
-            allowSelfSignedCert: settings.AllowSelfSignedCert);
-        var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
-        // The render-marshaling + ride-to-summary lives in the cross-platform-tested Core
-        // MeetingViewDriver (the form is the IMeetingView); this shell just supplies the
-        // ControlClient, the WinForms SynchronizationContext, and the window.
-        await MeetingViewDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var control = new ControlClient(
+                settings.Host, settings.Port, settings.Tls, settings.Token,
+                allowSelfSignedCert: settings.AllowSelfSignedCert);
+            var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
+            // The render-marshaling + ride-to-summary lives in the cross-platform-tested Core
+            // MeetingViewDriver (the form is the IMeetingView); this shell just supplies the
+            // ControlClient, the WinForms SynchronizationContext, and the window.
+            await MeetingViewDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Done with the token — hand the source back on the UI thread, where the
+            // window's own release runs, so the two can't race to dispose it.
+            ui.Post(_ => release(), null);
+        }
     }
 
     private void FailPipeline(string reason, string? stage = null)
