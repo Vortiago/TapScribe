@@ -114,6 +114,10 @@ internal sealed class TrayContext : ApplicationContext
     private async Task StartAsync(BridgeSettings settings, SynchronizationContext ui)
     {
         WasapiDeviceEnumerator? enumerator = null;
+        // Captures we have opened but not yet handed to the orchestrator. Nothing else can
+        // reach them, so an exception in that window would strand every one of them for the
+        // process lifetime — the finally below is their only owner until StartAll takes over.
+        List<PipelineSpec>? unowned = null;
         try
         {
             // 1) Resolve the operator's device selection against what's present RIGHT NOW
@@ -154,6 +158,7 @@ internal sealed class TrayContext : ApplicationContext
             IReadOnlyList<TapConnectionOptions> perDevice =
                 resolution.ToTapOptions(sessionId, settings.ToConnectionOptions());
             var specs = new List<PipelineSpec>();
+            unowned = specs;
             for (int i = 0; i < resolution.Resolved.Count; i++)
             {
                 ResolvedDevice resolved = resolution.Resolved[i];
@@ -179,6 +184,7 @@ internal sealed class TrayContext : ApplicationContext
                     ShowBalloon($"{id} stopped", ex.Message);
                 }, null));
                 // No shared gate arg: each spec already carries its own per-device gate.
+            unowned = null; // every capture now belongs to the orchestrator, including on its throw paths
 
             lock (_gate)
             {
@@ -227,6 +233,13 @@ internal sealed class TrayContext : ApplicationContext
             // completion. Once the orchestrator owns the enumerator (line above), this is
             // null and the dispose is a no-op, so the running meeting keeps its devices.
             enumerator?.Dispose();
+            // Same rule one level down for the captures themselves: any we opened but never
+            // handed over. Null once StartAll has them (it releases what it refuses), so a
+            // running meeting's devices are never touched here. Dispose is contract-bound
+            // not to throw, so it needs no guard of its own.
+            if (unowned is not null)
+                foreach (PipelineSpec spec in unowned)
+                    spec.Capture.Dispose();
         }
     }
 
