@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Windows-only tests for the WinForms tray shell itself (TrayContext): the meeting
+       lifecycle decisions — ownership, publish ordering, teardown, cancellation — that
+       cannot be moved into the cross-platform core because they ARE the shell. Mirrors
+       TapScribe.Bridge.Windows.Tests: net10.0-windows, so it builds and runs under the
+       windows `dotnet-build` CI job (dotnet test on the .slnx) and is never seen by the
+       ubuntu core-only job, which targets the core test csproj directly.
+
+       UseWindowsForms is the one addition over the sibling project: the subject under test
+       is a WinForms ApplicationContext, so the tests reference NotifyIcon /
+       ContextMenuStrip / ToolStripMenuItem directly. WinForms types are STA-affine and
+       xunit v2 runs MTA, so every test drives the shell through StaShell (a dedicated STA
+       thread with a hand-pumped SynchronizationContext) — no window is ever shown and no
+       message loop is ever entered. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TapScribe.TrayBridge\TapScribe.TrayBridge.csproj" />
+  </ItemGroup>
+
+</Project>

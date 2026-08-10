@@ -45,13 +45,14 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _endItem;
     private readonly ToolStripMenuItem _pastMeetingsItem;
     private readonly System.Windows.Forms.Timer _resumeTimer;
+    private readonly TrayDependencies _deps;
     private readonly object _gate = new();
     // Read and written under _gate, always — Start/End/Resume/OpenPastMeeting snapshot it
     // and then carry the snapshot into thread-pool continuations, so there is no thread
     // this field is private to.
-    private BridgeSettings _settings = BridgeSettingsStore.Load();
+    private BridgeSettings _settings;
     private CaptureOrchestrator? _orchestrator;
-    private WasapiDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
+    private IAudioDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
     private string? _sessionId; // the detached session the running meeting taps into
     // The in-flight End/Resume flow's cancellation, published for Quit. Whoever takes it
     // out of this field owns it, so a Cancel can never race the Dispose.
@@ -66,7 +67,24 @@ internal sealed class TrayContext : ApplicationContext
     private DateTimeOffset _startedAt; // wall-clock start of the running meeting, for Past-meetings history (#168)
 
     public TrayContext()
+        : this(BridgeSettingsStore.Load(), TrayDependencies.Production)
     {
+    }
+
+    /// <summary>
+    /// Build the shell over an explicit outside world (<see cref="TrayDependencies"/>) and
+    /// an explicit starting <paramref name="settings"/> — the seam the tray tests construct
+    /// through, so they drive the real meeting lifecycle without a WASAPI endpoint, a
+    /// Recorder, or the operator's %APPDATA%. The parameterless constructor is what the app
+    /// runs; nothing else about the shell differs between the two.
+    /// </summary>
+    internal TrayContext(BridgeSettings settings, TrayDependencies dependencies)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(dependencies);
+        _settings = settings;
+        _deps = dependencies;
+
         _statusItem = new ToolStripMenuItem("○ Idle") { Enabled = false };
         _startItem = new ToolStripMenuItem("Start meeting", null, (_, _) => Start());
         _endItem = new ToolStripMenuItem("End meeting", null, (_, _) => End()) { Enabled = false };
@@ -104,7 +122,38 @@ internal sealed class TrayContext : ApplicationContext
         _resumeTimer.Enabled = true;
     }
 
-    private void Start()
+    // Release a device enumerator. The core's IAudioDeviceEnumerator seam doesn't declare
+    // IDisposable — listing endpoints needs no lifetime — but every real backend holds COM
+    // handles and does, so the shell that opened one releases it here.
+    private static void Release(IAudioDeviceEnumerator? enumerator) =>
+        (enumerator as IDisposable)?.Dispose();
+
+    // ---- Test-visible state (read-only) -------------------------------------------------
+    // The tray's observable surface, so TapScribe.TrayBridge.Tests can assert on what the
+    // operator would see without a message loop or a visible window. Nothing here mutates.
+
+    internal ContextMenuStrip Menu => _menu;
+    internal ToolStripMenuItem StartItem => _startItem;
+    internal ToolStripMenuItem EndItem => _endItem;
+    internal ToolStripMenuItem PastMeetingsItem => _pastMeetingsItem;
+    internal string StatusHeader => _statusItem.Text ?? "";
+
+    /// <summary>The in-flight Start, so a test can await the real one instead of polling.</summary>
+    internal Task? StartTask
+    {
+        get { lock (_gate) return _startTask; }
+    }
+
+    /// <summary>Whether <see cref="Quit"/> has claimed the shell — the flag a start in
+    /// flight observes at its publish point.</summary>
+    internal bool IsQuitting
+    {
+        get { lock (_gate) return _quitting; }
+    }
+
+    // -------------------------------------------------------------------------------------
+
+    internal void Start()
     {
         BridgeSettings settings;
         lock (_gate)
@@ -139,7 +188,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private async Task StartAsync(BridgeSettings settings, SynchronizationContext ui)
     {
-        WasapiDeviceEnumerator? enumerator = null;
+        IAudioDeviceEnumerator? enumerator = null;
         // Captures we have opened but not yet handed to the orchestrator. Nothing else can
         // reach them, so an exception in that window would strand every one of them for the
         // process lifetime — the finally below is their only owner until StartAll takes over.
@@ -155,7 +204,7 @@ internal sealed class TrayContext : ApplicationContext
             // 1) Resolve the operator's device selection against what's present RIGHT NOW
             //    (follow-default binds to the current default). A non-Ok verdict is a hard
             //    stop surfaced clearly BEFORE any network call or device open.
-            enumerator = new WasapiDeviceEnumerator();
+            enumerator = _deps.OpenEnumerator();
             ResolveResult resolution = DeviceSelection.Resolve(settings.EffectiveDevices, enumerator.List());
             if (resolution.Verdict != SelectionVerdict.Ok)
             {
@@ -175,14 +224,11 @@ internal sealed class TrayContext : ApplicationContext
             //    Recorder is unreachable or the token is rejected, it throws here, before any
             //    device is opened, and the catch classifies it into a clear message.
             string sessionId;
-            using (var control = new ControlClient(
-                settings.Host, settings.Port, settings.Tls, settings.Token,
-                allowSelfSignedCert: settings.AllowSelfSignedCert))
             using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
                 // Bound the round-trip: without a token HttpClient waits its 100 s default,
                 // which would otherwise wedge the tray on "Starting…" against a host that
                 // accepts the connection but never replies.
-                sessionId = await control.CreateDetachedSessionAsync(cts.Token).ConfigureAwait(false);
+                sessionId = await _deps.MintDetachedSession(settings, cts.Token).ConfigureAwait(false);
 
             // 3) Build one tap per resolved device (each routing into the one session under
             //    its own identity/name) and open its capture. ToTapOptions preserves the
@@ -270,7 +316,7 @@ internal sealed class TrayContext : ApplicationContext
             // List()/Resolve() (whether or not the catch filter matches it), or normal
             // completion. Once the orchestrator owns the enumerator (line above), this is
             // null and the dispose is a no-op, so the running meeting keeps its devices.
-            enumerator?.Dispose();
+            Release(enumerator);
             // Same rule one level down for the captures themselves: any we opened but never
             // handed over. Null once StartAll has them (it releases what it refuses), so a
             // running meeting's devices are never touched here. Dispose is contract-bound
@@ -312,7 +358,7 @@ internal sealed class TrayContext : ApplicationContext
     // doesn't stop the mic from recording. (Opening a device is Windows-side, so the
     // cross-platform CaptureOrchestrator can't own it; it owns the symmetric START-failure
     // half — capture.Start throwing inside TapSession.Begin.)
-    private void TryAddSpec(List<PipelineSpec> into, WasapiDeviceEnumerator enumerator,
+    private void TryAddSpec(List<PipelineSpec> into, IAudioDeviceEnumerator enumerator,
                             CaptureDevice device, TapConnectionOptions options, GateOptions gate,
                             SynchronizationContext ui)
     {
@@ -338,12 +384,12 @@ internal sealed class TrayContext : ApplicationContext
     // End meeting (issue #107): close the open taps and run the end-of-meeting pipeline,
     // showing progress and the finished summary. Detach the running meeting atomically so
     // Quit/Settings can't race it; if nothing is running there's nothing to end.
-    private void End()
+    internal void End()
     {
         SynchronizationContext ui = SynchronizationContext.Current
             ?? throw new InvalidOperationException("End must run on the WinForms UI thread.");
 
-        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, string? sessionId, DateTimeOffset startedAt) = TakeMeeting();
+        (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator, string? sessionId, DateTimeOffset startedAt) = TakeMeeting();
         if (orchestrator is null || sessionId is null)
             return;
 
@@ -359,7 +405,7 @@ internal sealed class TrayContext : ApplicationContext
     }
 
     private Task EndAsync(BridgeSettings settings, string sessionId, DateTimeOffset startedAt,
-        CaptureOrchestrator orchestrator, WasapiDeviceEnumerator? enumerator, SynchronizationContext ui)
+        CaptureOrchestrator orchestrator, IAudioDeviceEnumerator? enumerator, SynchronizationContext ui)
     {
         bool process = settings.ProcessOnEnd;
         // Only persist the resume state + the Past-meetings entry when a pipeline will actually
@@ -370,10 +416,10 @@ internal sealed class TrayContext : ApplicationContext
         {
             // Persist the session so a tray restart mid-pipeline resumes showing it; cleared
             // when the flow reaches a terminal state (RunPipelineFlowAsync's finally).
-            MeetingStateStore.Save(new MeetingState { SessionId = sessionId });
+            _deps.Stores.SaveState(new MeetingState { SessionId = sessionId });
             // Record the meeting in the local Past-meetings history (#168), beside the resume
             // state, at End time.
-            MeetingHistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
+            _deps.Stores.AppendHistory(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
         }
         return RunPipelineFlowAsync(
             settings, sessionId, ui,
@@ -397,7 +443,7 @@ internal sealed class TrayContext : ApplicationContext
                     // after the await it was skipped on a throw, and nothing else holds
                     // this enumerator once End has detached the meeting — so the devices
                     // stayed open until the process exited.
-                    enumerator?.Dispose();
+                    Release(enumerator);
                 }
             });
     }
@@ -443,7 +489,7 @@ internal sealed class TrayContext : ApplicationContext
         }
         finally
         {
-            MeetingStateStore.Clear();
+            _deps.Stores.ClearState();
             bool owned;
             lock (_gate)
             {
@@ -470,7 +516,7 @@ internal sealed class TrayContext : ApplicationContext
         _resumeTimer.Stop();
         _resumeTimer.Dispose();
 
-        MeetingState? state = MeetingStateStore.Load();
+        MeetingState? state = _deps.Stores.LoadState();
         if (state is null)
             return; // the common case: a fresh launch with no meeting to resume
 
@@ -536,7 +582,7 @@ internal sealed class TrayContext : ApplicationContext
     // Rebuild the Past-meetings submenu from the persisted history each time it opens (#168):
     // newest-first, one item per meeting. An empty (or unreadable → empty) history shows a
     // single disabled placeholder rather than a bare submenu.
-    private void RebuildPastMeetingsMenu()
+    internal void RebuildPastMeetingsMenu()
     {
         // Dispose the previous items before rebuilding: DropDownItems.Clear() detaches them but
         // does NOT dispose, so without this each submenu open leaks the prior menu items (the
@@ -547,7 +593,7 @@ internal sealed class TrayContext : ApplicationContext
         foreach (ToolStripItem item in previous)
             item.Dispose();
 
-        MeetingHistory history = MeetingHistoryStore.Load();
+        MeetingHistory history = _deps.Stores.LoadHistory();
         if (history.Meetings.Count == 0)
         {
             _pastMeetingsItem.DropDownItems.Add(new ToolStripMenuItem("(No past meetings)") { Enabled = false });
@@ -572,30 +618,23 @@ internal sealed class TrayContext : ApplicationContext
             settings = _settings;
 
         var form = new MeetingForm();
-        var cts = new CancellationTokenSource();
-        // Two parties hold this source — the window (which cancels on close) and the poll
-        // loop (which reads its token) — and the LAST one out disposes it. Closing the
+        // Two parties hold this cancellation — the window (which cancels on close) and the
+        // poll loop (which reads its token) — and the LAST one out disposes it. Closing the
         // window used to Cancel and Dispose in the same breath, while the loop was still
         // inside DriveAsync: it survived only because Cancel ran first, and an
         // ObjectDisposedException from any later touch of the token isn't in
         // MeetingViewDriver's catch filter, so it would escape this fire-and-forget task
-        // silently. Both releases run on the UI thread (the loop's is marshalled), so the
-        // count needs no interlocking.
-        int holders = 2;
-        void Release()
-        {
-            if (--holders == 0)
-                cts.Dispose();
-        }
-
+        // silently. SharedCancellation owns the counting.
+        var cancellation = new SharedCancellation(holders: 2);
         form.FormClosed += (_, _) =>
         {
-            cts.Cancel(); // stop the poll loop the instant the user closes the window
-            Release();
+            cancellation.Cancel(); // stop the poll loop the instant the user closes the window
+            cancellation.Release();
             form.Dispose();
         };
         form.Show();
-        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cts.Token, Release);
+        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cancellation.Token,
+            () => cancellation.Release());
     }
 
     private async Task OpenPastMeetingAsync(BridgeSettings settings, string sessionId,
@@ -631,12 +670,12 @@ internal sealed class TrayContext : ApplicationContext
     // Atomically detach the running meeting's orchestrator + enumerator + session id,
     // leaving all three null. Shared by End (which then drains + triggers the pipeline)
     // and Quit (which tears down without touching the menu, since it's exiting).
-    private (CaptureOrchestrator?, WasapiDeviceEnumerator?, string?, DateTimeOffset) TakeMeeting()
+    private (CaptureOrchestrator?, IAudioDeviceEnumerator?, string?, DateTimeOffset) TakeMeeting()
     {
         lock (_gate)
         {
             CaptureOrchestrator? orchestrator = _orchestrator;
-            WasapiDeviceEnumerator? enumerator = _enumerator;
+            IAudioDeviceEnumerator? enumerator = _enumerator;
             string? sessionId = _sessionId;
             DateTimeOffset startedAt = _startedAt;
             _orchestrator = null;
@@ -674,7 +713,7 @@ internal sealed class TrayContext : ApplicationContext
             ShowBalloon(title, message);
         }, null);
 
-    private void Quit()
+    internal void Quit()
     {
         // Stop an in-flight End/Resume flow first: ExitThread below kills the message loop
         // it renders into, so an uncancelled poll loop would keep talking to the Recorder
@@ -712,7 +751,7 @@ internal sealed class TrayContext : ApplicationContext
             }
         }
 
-        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, _, _) = TakeMeeting();
+        (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator, _, _) = TakeMeeting();
 
         // Tear every pipeline down: the orchestrator drains + closes all of them
         // CONCURRENTLY, each bounded, and DisposeAsync is throw-free — so this blocking
@@ -720,7 +759,7 @@ internal sealed class TrayContext : ApplicationContext
         // AggregateException. The timeout is a backstop; a sub-second tail may drop on a
         // hard quit.
         orchestrator?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
-        enumerator?.Dispose();
+        Release(enumerator);
 
         _icon.Visible = false;
         _icon.Dispose();
