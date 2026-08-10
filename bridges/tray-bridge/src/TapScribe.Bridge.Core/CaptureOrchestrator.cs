@@ -69,9 +69,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
             .GroupBy(s => s.Options.Identity, StringComparer.Ordinal)
             .FirstOrDefault(g => g.Count() > 1);
         if (duplicate is not null)
+        {
+            // Release the captures we are refusing. The caller opened them and handed
+            // ownership over with the specs (see PipelineSpec); it has no handle left to
+            // dispose them by, so a bare throw here strands every one of them for the
+            // process lifetime. Dispose is contract-bound not to throw, so no guard.
+            foreach (PipelineSpec spec in specs)
+                spec.Capture.Dispose();
             throw new ArgumentException(
                 $"Duplicate pipeline identity '{duplicate.Key}'. Each device must stream " +
                 "under a distinct identity.", nameof(specs));
+        }
 
         var sessions = new Dictionary<string, TapSession>(specs.Count, StringComparer.Ordinal);
         foreach (PipelineSpec spec in specs)
