@@ -10,8 +10,9 @@ namespace TapScribe.Bridge.Core;
 /// like <see cref="MeetingState"/>), the wall-clock start time for a readable list
 /// line, and an optional human label (reserved — no naming UI yet). No cached summary:
 /// it is re-fetched from the session id via the tap-token poll endpoint on each open.
-/// The model + the menu-line formatting live in Core (Linux-tested); the %APPDATA%
-/// file IO is the Windows store's job (<c>MeetingHistoryStore</c>).
+/// The model, the menu-line formatting and the file IO
+/// (<see cref="MeetingHistoryStore"/>) all live in Core; a platform contributes only
+/// the directory the store writes into.
 /// </summary>
 public sealed record MeetingRecord
 {
