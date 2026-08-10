@@ -20,11 +20,14 @@ Recorder, Utterance, Session).
   running N devices concurrently under stable identities, the control client
   and connection tester, the End-meeting flow (drain → trigger the Recorder's
   strip → transcribe → summarize pipeline → poll → summary), restart-resume
-  and Past-meetings state, and every view-model — all pure, so a future
-  macOS/Linux shell reuses it.
+  and Past-meetings state, every view-model, and the on-disk stores
+  (settings / meeting state / meeting history) with the tap token's meaning at
+  rest behind `ITapTokenStore` — all pure, so a future macOS/Linux shell
+  reuses it.
 - **`src/TapScribe.Bridge.Windows`** (net10.0-windows): WASAPI capture,
-  loopback and enumeration (NAudio) plus `%APPDATA%` persistence with the tap
-  token DPAPI-protected at rest.
+  loopback and enumeration (NAudio), plus the Windows half of the storage
+  layer — `DpapiTapTokenStore` and the `TrayStores` binding of the Core stores
+  to `%APPDATA%\TapScribe`.
 - **`src/TapScribe.TrayBridge`** (net10.0-windows WinForms): the tray runner —
   event-driven status (idle / streaming / processing / error), Start meeting /
   End meeting / Past meetings / Settings… / Quit, the 4-tab Settings dialog,
@@ -83,8 +86,8 @@ Right-click the tray icon → **Settings…** — no environment variables
 required. Settings are saved to `%APPDATA%\TapScribe\windows-tray-bridge.json`
 and remembered across restarts.
 (The filename deliberately keeps the pre-rename `windows-tray-bridge` spelling —
-it is the on-disk contract pinned by `BridgeSettingsStore.SettingsFileName`, and
-renaming it would orphan every operator's saved settings and protected token.)
+it is the on-disk contract pinned by `TrayStores.SettingsFileName`, and renaming
+it would orphan every operator's saved settings and protected token.)
 The **tap token is never written in cleartext**: it is protected with Windows
 DPAPI (CurrentUser scope). On first run the Connection fields are seeded from
 the legacy `TAPSCRIBE_HOST` / `TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` /
