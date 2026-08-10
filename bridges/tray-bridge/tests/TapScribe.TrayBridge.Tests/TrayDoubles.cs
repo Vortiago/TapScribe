@@ -28,7 +28,8 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
     /// the End-meeting drain at its very first step (TapSession.DrainAllAsync detaches before
     /// it awaits). A contrived endpoint — the point is the SHELL's behaviour when its
     /// teardown call fails, and this is the only failure that reaches the drain rather than
-    /// the dispose.</summary>
+    /// the dispose. It throws an IOException specifically: that is outside every catch filter
+    /// on the End path, so it exercises the escape rather than the classified failure.</summary>
     public bool ThrowOnDetach { get; init; }
 
     /// <summary>When set, <see cref="Dispose"/> blocks until <see cref="ReleaseDispose"/> —
@@ -49,7 +50,7 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
         remove
         {
             if (ThrowOnDetach)
-                throw new InvalidOperationException("endpoint invalidated");
+                throw new IOException("endpoint invalidated");
             _data -= value;
         }
     }
