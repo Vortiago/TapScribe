@@ -10,6 +10,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TapScribe.TrayBridge</RootNamespace>
+    <!-- Compile (not run) the WinForms shell on a non-Windows dev box, so a macOS
+         contributor still has a compile gate for this side. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <ItemGroup>
