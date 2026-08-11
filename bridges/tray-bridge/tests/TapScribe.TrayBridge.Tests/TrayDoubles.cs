@@ -99,7 +99,9 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
     /// "opened", not "started": the seam hands back a capture that is NOT running (a
     /// TapSession starts it), so this — never <see cref="FakeCapture.Started"/> — is what says
     /// the shell has taken ownership of something it now has to release.</summary>
-    public IReadOnlyList<FakeCapture> Opened { get; } = new List<FakeCapture>();
+    public IReadOnlyList<FakeCapture> Opened => _opened;
+
+    private readonly List<FakeCapture> _opened = [];
 
     /// <summary>The order teardown actually happened in: one entry per capture released and
     /// one for the enumerator. Captures must come first — an enumerator handed its endpoint
@@ -146,7 +148,7 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
             // is what "any unexpected throw between the open and the handoff" means.
             throw new IOException($"opening '{device.Id}' failed unexpectedly");
         FakeCapture capture = _captures[device.Id];
-        ((List<FakeCapture>)Opened).Add(capture);
+        _opened.Add(capture);
         return capture;
     }
 
@@ -286,7 +288,14 @@ internal sealed class TrayHarness
         Devices = [],
     };
 
-    public TrayDependencies Dependencies => new(
+    /// <summary>The shell's outside world, built once. A fresh record per read would hand
+    /// StaShell.Build and a test that reads this directly DIFFERENT instances over the same
+    /// harness — the allocation is trivial, the footgun is not.</summary>
+    public TrayDependencies Dependencies => _dependencies ??= BuildDependencies();
+
+    private TrayDependencies? _dependencies;
+
+    private TrayDependencies BuildDependencies() => new(
         () => Enumerator,
         async (_, cancellationToken) =>
         {

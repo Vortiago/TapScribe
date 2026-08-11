@@ -252,10 +252,10 @@ internal sealed class TrayContext : ApplicationContext
             unowned = null;
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 specs,
-                onConnected: id => ui.Post(_ => ApplyStatus(tally.Connected(id)), null),
+                onConnected: id => ui.Post(_ => ApplyStatusIfChanged(tally.Connected(id)), null),
                 onFailed: (id, ex) => ui.Post(_ =>
                 {
-                    ApplyStatus(tally.Dropped(id));
+                    ApplyStatusIfChanged(tally.Dropped(id));
                     ShowBalloon($"{id} stopped", ex.Message);
                 }, null));
                 // No shared gate arg: each spec already carries its own per-device gate.
@@ -776,6 +776,15 @@ internal sealed class TrayContext : ApplicationContext
         StatusView view = StatusView.For(status);
         _statusItem.Text = view.Header;
         _indicator.Show(view);
+    }
+
+    /// <summary>Apply a status the <see cref="DeviceTally"/> reports, skipping the null it
+    /// returns when the tally didn't actually change — a device that keeps failing to connect
+    /// reports once per Utterance and would otherwise re-render what is already on screen.</summary>
+    private void ApplyStatusIfChanged(TrayStatus? status)
+    {
+        if (status is not null)
+            ApplyStatus(status);
     }
 
     private void ShowBalloon(string title, string message) => _indicator.Warn(title, message);

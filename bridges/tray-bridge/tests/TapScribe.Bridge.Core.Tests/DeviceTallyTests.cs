@@ -33,6 +33,24 @@ public class DeviceTallyTests
     }
 
     [Fact]
+    public void ARepeatedReport_SaysNothingChanged_SoTheCallerCanSkipTheRepaint()
+    {
+        // A tap whose first connect keeps failing raises onFailed once per Utterance, and a
+        // streaming device raises onConnected once per Utterance too. The tally already knows
+        // both, so it says so — otherwise every one of those re-renders a status line
+        // identical to the one on screen for the length of the meeting.
+        var tally = new DeviceTally(2);
+        Assert.NotNull(tally.Connected("mic"));
+        Assert.Null(tally.Connected("mic")); // still streaming; nothing to repaint
+
+        Assert.NotNull(tally.Dropped("system"));
+        Assert.Null(tally.Dropped("system")); // still down; nothing to repaint
+
+        // ...and a real transition still reports, so the skip can't swallow a change.
+        Assert.NotNull(tally.Connected("system"));
+    }
+
+    [Fact]
     public void Connected_AfterADrop_ReturnsToStreaming_OnceTheDeviceIsBack()
     {
         // A tap whose FIRST connect fails is terminal for that Utterance only — the

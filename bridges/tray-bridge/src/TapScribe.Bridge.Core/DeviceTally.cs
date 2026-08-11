@@ -25,28 +25,33 @@ public sealed class DeviceTally
     /// <summary>How many devices the meeting was started on.</summary>
     public int Total { get; }
 
-    /// <summary>A device's tap connected: it is streaming. Returns the status to apply.</summary>
-    public TrayStatus Connected(string identity)
+    /// <summary>A device's tap connected: it is streaming. Returns the status to apply, or
+    /// <c>null</c> when nothing changed — see <see cref="Dropped"/>.</summary>
+    public TrayStatus? Connected(string identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        _live.Add(identity);
+        bool changed = _live.Add(identity);
         // A tap landing clears this device's earlier drop: a first-connect failure is
         // terminal for that Utterance only, so the next one recovering is the signal that
         // the device is streaming again. Without this the warning would outlive the fault
         // for the rest of the meeting.
-        _dropped.Remove(identity);
-        return Status;
+        changed |= _dropped.Remove(identity);
+        return changed ? Status : null;
     }
 
-    /// <summary>A device stopped streaming — its tap couldn't reach the Recorder, or the
-    /// endpoint was invalidated mid-meeting (unplugged / disabled / default-device
-    /// switch). Returns the status to apply.</summary>
-    public TrayStatus Dropped(string identity)
+    /// <summary>
+    /// A device stopped streaming — its tap couldn't reach the Recorder, or the endpoint was
+    /// invalidated mid-meeting (unplugged / disabled / default-device switch). Returns the
+    /// status to apply, or <c>null</c> when the tally already said this: a tap that keeps
+    /// failing to connect reports once per Utterance, and re-rendering a status identical to
+    /// the one on screen is work the caller has no reason to do.
+    /// </summary>
+    public TrayStatus? Dropped(string identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        _live.Remove(identity);
-        _dropped.Add(identity);
-        return Status;
+        bool changed = _live.Remove(identity);
+        changed |= _dropped.Add(identity);
+        return changed ? Status : null;
     }
 
     /// <summary>The status the tally currently implies: an <see cref="TrayStatus.Error"/>
