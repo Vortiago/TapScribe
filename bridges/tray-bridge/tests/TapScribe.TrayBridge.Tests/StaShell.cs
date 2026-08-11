@@ -88,10 +88,11 @@ internal sealed class StaShell : IDisposable
     {
         ArgumentNullException.ThrowIfNull(action);
         // Completed by the queued item below. A TaskCompletionSource rather than a
-        // ManualResetEventSlim on purpose: the STA thread always has to be scheduled, so an
-        // event's spin phase always falls through to a real kernel handle — one finalizable
-        // handle per marshalled call, and then a Set()-after-Dispose race to arbitrate. A TCS
-        // has no handle at all, so neither problem exists.
+        // ManualResetEventSlim on purpose: the event was deliberately never disposed, to dodge
+        // a Set()-after-Dispose race on a timed-out call — sound reasoning about the wrong
+        // tool, since a source with nothing to release cannot have that race in the first
+        // place. (It was NOT about handle allocation: ManualResetEventSlim only materialises
+        // a kernel handle if someone reads .WaitHandle, which nothing here did.)
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         ExceptionDispatchInfo? failure = null;
         _work.Add(() =>
@@ -140,11 +141,36 @@ internal sealed class StaShell : IDisposable
     /// left to a finalizer that runs after the apartment is gone, and a test that asserts its
     /// way out early would otherwise leave exactly that behind.
     /// </summary>
-    public TrayContext Build(TrayHarness harness)
+    /// <param name="dependencies">Overrides the harness's own — for a test that varies one
+    /// port of the outside world and still wants the STA construction and the
+    /// release-on-failure that come with building through here.</param>
+    public TrayContext Build(TrayHarness harness, TrayDependencies? dependencies = null)
     {
         ArgumentNullException.ThrowIfNull(harness);
-        _built = Get(() => new TrayContext(harness.Settings, harness.Dependencies));
+        _built = Get(() => new TrayContext(harness.Settings, dependencies ?? harness.Dependencies));
         return _built;
+    }
+
+    /// <summary>Build the shell and run a Start to completion, draining what it posted — the
+    /// opener every tray test shares. Asserts only that the start SETTLED; whether it
+    /// succeeded is the caller's subject, and several tests are about starts that don't.</summary>
+    public TrayContext BuildAndStart(TrayHarness harness)
+    {
+        TrayContext tray = Build(harness);
+        Run(tray.Start);
+        Assert.True(tray.StartTask!.Wait(CallTimeout), "the start never settled");
+        _ = Drain();
+        return tray;
+    }
+
+    /// <summary>Take a meeting all the way to streaming — the precondition the End-path tests
+    /// share, asserted here so a test that needs a live meeting fails on THAT rather than
+    /// misattributing it to its own subject.</summary>
+    public TrayContext StartMeeting(TrayHarness harness)
+    {
+        TrayContext tray = BuildAndStart(harness);
+        Assert.True(tray.EndItem.Enabled, "the meeting was never published as running");
+        return tray;
     }
 
     /// <summary>
@@ -162,14 +188,14 @@ internal sealed class StaShell : IDisposable
         {
             for (int round = 0; round < 10; round++)
             {
-                IReadOnlyList<SendOrPostCallback> batch = _context.Take(out object?[] states);
+                IReadOnlyList<(SendOrPostCallback Callback, object? State)> batch = _context.Take();
                 if (batch.Count == 0)
                     return;
-                for (int i = 0; i < batch.Count; i++)
+                foreach ((SendOrPostCallback callback, object? state) in batch)
                 {
                     try
                     {
-                        batch[i](states[i]);
+                        callback(state);
                     }
                     catch (Exception ex)
                     {
@@ -275,14 +301,13 @@ internal sealed class StaShell : IDisposable
         public override void Send(SendOrPostCallback d, object? state) =>
             throw new NotSupportedException("the tray shell must never block on the UI thread");
 
-        public IReadOnlyList<SendOrPostCallback> Take(out object?[] states)
+        public IReadOnlyList<(SendOrPostCallback Callback, object? State)> Take()
         {
             lock (_lock)
             {
-                SendOrPostCallback[] callbacks = [.. _posted.Select(p => p.Callback)];
-                states = [.. _posted.Select(p => p.State)];
+                (SendOrPostCallback, object?)[] batch = [.. _posted];
                 _posted.Clear();
-                return callbacks;
+                return batch;
             }
         }
     }

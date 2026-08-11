@@ -57,20 +57,21 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
 
     public bool IsMuted => false;
     public event EventHandler? MuteChanged { add { } remove { } }
-    public event EventHandler<Exception?>? Failed { add { } remove { } }
+
+    public event EventHandler<Exception?>? Failed;
+
+    /// <summary>Raise <see cref="Failed"/> — the stand-in for the OS invalidating this
+    /// endpoint mid-meeting. A real backend raises it once per failure; the pipeline's own
+    /// first-connect failures arrive by the same channel, once per Utterance.</summary>
+    public void RaiseFailed(Exception error) => Failed?.Invoke(this, error);
 
     public void Start() => Started = true;
 
     public void Stop() => Stopped = true;
 
-    /// <summary>The enumerator that handed this capture out, so a release can be recorded
-    /// against the same teardown order the enumerator's own is.</summary>
-    public FakeEnumerator? Owner { get; set; }
-
     public void Dispose()
     {
         Interlocked.Increment(ref _disposals);
-        Owner?.RecordTeardown("capture");
         if (!HoldDispose)
             return;
         _disposeReached.TrySetResult();
@@ -88,7 +89,6 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
 {
     private readonly List<CaptureDevice> _devices = [];
     private readonly Dictionary<string, FakeCapture> _captures = new(StringComparer.Ordinal);
-    private readonly List<string> _teardown = [];
     private int _opens;
     private int _disposals;
 
@@ -103,26 +103,17 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
 
     private readonly List<FakeCapture> _opened = [];
 
-    /// <summary>The order teardown actually happened in: one entry per capture released and
-    /// one for the enumerator. Captures must come first — an enumerator handed its endpoint
-    /// over to the capture it opened, so releasing it while a capture is still live inverts
-    /// the ownership the Settings meter path spells out explicitly.</summary>
-    public IReadOnlyList<string> TeardownOrder
-    {
-        get { lock (_teardown) return [.. _teardown]; }
-    }
-
-    internal void RecordTeardown(string what)
-    {
-        lock (_teardown)
-            _teardown.Add(what);
-    }
+    /// <summary>Whether every capture this enumerator handed out had already been released by
+    /// the time the enumerator itself was. That ordering is the claim: an enumerator hands its
+    /// endpoint over to the capture it opens, so releasing it while a capture is still live
+    /// inverts the ownership the Settings meter path spells out explicitly. Null until the
+    /// enumerator is released at all.</summary>
+    public bool? CapturesReleasedFirst { get; private set; }
 
     public FakeCapture Add(string id, DeviceFlow flow, bool isDefault = true, FakeCapture? capture = null)
     {
         _devices.Add(new CaptureDevice(id, id, flow, isDefault));
         FakeCapture fake = capture ?? new FakeCapture();
-        fake.Owner = this;
         _captures[id] = fake;
         return fake;
     }
@@ -155,7 +146,7 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
     public void Dispose()
     {
         Interlocked.Increment(ref _disposals);
-        RecordTeardown("enumerator");
+        CapturesReleasedFirst = _opened.TrueForAll(c => c.Disposed);
     }
 }
 

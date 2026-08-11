@@ -27,16 +27,6 @@ public class TrayEndTeardownTests
         return settings;
     }
 
-    private static TrayContext StartMeeting(StaShell sta, TrayHarness harness)
-    {
-        TrayContext tray = sta.Build(harness);
-        sta.Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the meeting never started");
-        _ = sta.Drain();
-        Assert.True(tray.EndItem.Enabled, "the meeting was never published as running");
-        return tray;
-    }
-
     [Fact]
     public void End_WhenTheTeardownThrows_StillReleasesTheDevices()
     {
@@ -45,7 +35,7 @@ public class TrayEndTeardownTests
         harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: new FakeCapture { ThrowOnDetach = true });
         harness.Enumerator.Add("system", DeviceFlow.Render);
 
-        TrayContext tray = StartMeeting(sta, harness);
+        TrayContext tray = sta.StartMeeting(harness);
         sta.Run(tray.End);
         // The flow always clears the resume state on its way out, whichever way it ended —
         // so this is "the End flow finished", with no wall clock in it.
@@ -64,7 +54,7 @@ public class TrayEndTeardownTests
         harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: new FakeCapture { ThrowOnDetach = true });
         harness.Enumerator.Add("system", DeviceFlow.Render);
 
-        TrayContext tray = StartMeeting(sta, harness);
+        TrayContext tray = sta.StartMeeting(harness);
         sta.Run(tray.End);
         Assert.False(tray.StartItem.Enabled); // busy while the flow runs — both items greyed
         StaShell.SpinUntil(() => harness.Stores.StateClears > 0, "the End flow to terminate");
@@ -88,7 +78,7 @@ public class TrayEndTeardownTests
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         harness.Enumerator.Add("system", DeviceFlow.Render);
 
-        TrayContext tray = StartMeeting(sta, harness);
+        TrayContext tray = sta.StartMeeting(harness);
         sta.Run(tray.End);
         StaShell.SpinUntil(() => harness.Stores.StateClears > 0, "the End flow to terminate");
         _ = sta.Drain();
@@ -107,7 +97,7 @@ public class TrayEndTeardownTests
         var slowMic = new FakeCapture { HoldDispose = true };
         harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: slowMic);
 
-        TrayContext tray = StartMeeting(sta, harness);
+        TrayContext tray = sta.StartMeeting(harness);
         sta.Run(tray.End);
         Assert.True(slowMic.DisposeReached.Wait(StaShell.CallTimeout), "the End drain never reached the device teardown");
         _ = sta.Drain(); // the "ending" render, while the tray is still alive

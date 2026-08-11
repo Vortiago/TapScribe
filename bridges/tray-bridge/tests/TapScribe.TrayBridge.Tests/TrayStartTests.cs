@@ -57,7 +57,7 @@ public class TrayStartTests
 
         // And released in the right order: the enumerator handed its endpoint to the capture,
         // so it has to outlive it.
-        Assert.Equal(["capture", "enumerator"], harness.Enumerator.TeardownOrder);
+        Assert.True(harness.Enumerator.CapturesReleasedFirst);
     }
 
     [Fact]
@@ -70,28 +70,19 @@ public class TrayStartTests
         // releases what it refuses) and the shell's finally — on a backend that is
         // contract-bound to be throw-free but nowhere promised to be idempotent.
         using var sta = new StaShell();
-        var harness = new TrayHarness
-        {
-            Settings = new BridgeSettings
-            {
-                Host = "127.0.0.1",
-                Port = 9,
-                Identity = "alice",
-                Name = "Alice",
-                Devices =
-                [
-                    new DeviceSelection.FollowDefault(DeviceFlow.Capture, "", ""),
-                    new DeviceSelection.FollowDefault(DeviceFlow.Render, "alice", "alice"),
-                ],
-            },
-        };
+        BridgeSettings settings = TrayHarness.DefaultSettings();
+        settings.Devices =
+        [
+            // A blank identity, and one that IS the base identity — distinct to Resolve,
+            // identical after ToTapOptions substitutes.
+            new DeviceSelection.FollowDefault(DeviceFlow.Capture, "", ""),
+            new DeviceSelection.FollowDefault(DeviceFlow.Render, settings.Identity, settings.Identity),
+        ];
+        var harness = new TrayHarness { Settings = settings };
         harness.Enumerator.Add("mic", DeviceFlow.Capture);
         harness.Enumerator.Add("system", DeviceFlow.Render);
 
-        TrayContext tray = sta.Build(harness);
-        sta.Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
-        _ = sta.Drain();
+        TrayContext tray = sta.BuildAndStart(harness);
 
         // The guard: both devices really were opened and handed over, so StartAll was
         // genuinely reached and refused them — otherwise the release count below is a
@@ -156,10 +147,7 @@ public class TrayStartTests
         using var sta = new StaShell();
         var harness = new TrayHarness(); // no devices registered at all
 
-        TrayContext tray = sta.Build(harness);
-        sta.Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
-        _ = sta.Drain();
+        TrayContext tray = sta.BuildAndStart(harness);
 
         Assert.True(tray.StartItem.Enabled, "Start stayed greyed out after a failed start");
         Assert.False(tray.EndItem.Enabled);

@@ -31,13 +31,42 @@ public class TrayIndicatorTests
         // A status change reaches the indicator and the menu header together, from one
         // StatusView — so a substituted indicator sees exactly what the real one would.
         sta.Run(tray.Start); // no devices registered: resolves to nothing and fails to idle
-        Assert.True(tray.StartTask!.Wait(TimeSpan.FromSeconds(30)), "the start never settled");
+        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
         _ = sta.Drain();
 
         StatusView shown = Assert.IsType<StatusView>(harness.Indicator.LastStatus);
         Assert.Equal(TrayIcon.Error, shown.Icon);
         Assert.Equal(shown.Header, tray.StatusHeader);
         Assert.NotEmpty(harness.Indicator.Balloons);
+    }
+
+    [Fact]
+    public void ADeviceThatKeepsDropping_ShowsTheError_ButToastsOnce()
+    {
+        // B5's shell wiring, and the cost of getting the repeat wrong. A dropped device is
+        // reported once per Utterance for the rest of the meeting: the status line has to say
+        // so throughout, but the operator must be TOLD once — ShowBalloon is a real 4-second
+        // Windows toast, so the naive wiring toasts every utterance until the meeting ends.
+        using var sta = new StaShell();
+        var harness = new TrayHarness();
+        FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
+        harness.Enumerator.Add("system", DeviceFlow.Render);
+
+        TrayContext tray = sta.StartMeeting(harness);
+        int balloonsBefore = harness.Indicator.Balloons.Count;
+
+        mic.RaiseFailed(new IOException("endpoint gone"));
+        mic.RaiseFailed(new IOException("endpoint gone")); // the next utterance says the same
+        mic.RaiseFailed(new IOException("endpoint gone")); // ...and the next
+        _ = sta.Drain();
+
+        (string Title, string Message) toast =
+            Assert.Single(harness.Indicator.Balloons.Skip(balloonsBefore));
+        Assert.Contains("mic", toast.Title, StringComparison.Ordinal);
+
+        // The status still says it, though — that is what the header is for.
+        Assert.Contains("mic", tray.StatusHeader, StringComparison.Ordinal);
+        Assert.Equal(TrayIcon.Error, harness.Indicator.LastStatus!.Icon);
     }
 
     [Fact]
@@ -68,19 +97,13 @@ public class TrayIndicatorTests
         var scheduled = new List<Action>();
         TrayDependencies deps = harness.Dependencies with { ScheduleOnLoopStart = scheduled.Add };
 
-        TrayContext tray = sta.Get(() => new TrayContext(harness.Settings, deps));
-        try
-        {
-            Action kick = Assert.Single(scheduled);   // exactly one, and deferred...
-            Assert.Equal(0, harness.Stores.StateLoads); // ...with nothing done in the ctor
+        sta.Build(harness, deps);
 
-            sta.Run(kick.Invoke); // what the message loop would do on its first turn
+        Action kick = Assert.Single(scheduled);   // exactly one, and deferred...
+        Assert.Equal(0, harness.Stores.StateLoads); // ...with nothing done in the ctor
 
-            Assert.Equal(1, harness.Stores.StateLoads); // and THEN it looks for a meeting to resume
-        }
-        finally
-        {
-            sta.Run(tray.Dispose);
-        }
+        sta.Run(kick.Invoke); // what the message loop would do on its first turn
+
+        Assert.Equal(1, harness.Stores.StateLoads); // and THEN it looks for a meeting to resume
     }
 }

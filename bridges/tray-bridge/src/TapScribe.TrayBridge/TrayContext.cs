@@ -727,9 +727,12 @@ internal sealed class TrayContext : ApplicationContext
         // timeout, and Quit must not hang behind a Recorder that accepted the connection
         // and went quiet. Past the bound the start is abandoned exactly as it was before.
         // Waited through the AsyncWaitHandle rather than Task.Wait: this only needs the start
-        // to have SETTLED, and how it settled is not Quit's business — a start that faulted
-        // never published a meeting, so there is nothing here to tear down either way. The
-        // handle never observes the fault, so there is no AggregateException to discard.
+        // to have SETTLED, and how it settled is not Quit's business — whether it published a
+        // meeting is read from the field below under _gate, not inferred from the task. (It
+        // genuinely can fault AFTER publishing: a failure while rendering the started meeting
+        // escapes StartAsync by design, so "faulted" does not mean "nothing to tear down" and
+        // the TakeMeeting call below is doing real work.) The handle never observes the fault,
+        // so there is no AggregateException to discard.
         if (start is { IsCompleted: false })
             ((IAsyncResult)start).AsyncWaitHandle.WaitOne(StartSettleTimeout);
 
