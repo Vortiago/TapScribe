@@ -36,15 +36,13 @@ internal sealed class TrayContext : ApplicationContext
     /// against a Recorder that accepted the connection and then went quiet.</summary>
     private static readonly TimeSpan StartSettleTimeout = TimeSpan.FromSeconds(5);
 
-    private readonly NotifyIcon _icon;
-    // Held so Quit can dispose it: NotifyIcon.Dispose does NOT dispose its ContextMenuStrip.
+    // Held so teardown can dispose it: NotifyIcon.Dispose does NOT dispose its ContextMenuStrip.
     private readonly ContextMenuStrip _menu;
-    private readonly TrayIcons _icons = new();
+    private readonly ITrayIndicator _indicator;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _startItem;
     private readonly ToolStripMenuItem _endItem;
     private readonly ToolStripMenuItem _pastMeetingsItem;
-    private readonly System.Windows.Forms.Timer _resumeTimer;
     private readonly TrayDependencies _deps;
     private readonly object _gate = new();
     // Read and written under _gate, always — Start/End/Resume/OpenPastMeeting snapshot it
@@ -106,20 +104,13 @@ internal sealed class TrayContext : ApplicationContext
         _menu.Items.Add(settingsItem);
         _menu.Items.Add(quitItem);
 
-        _icon = new NotifyIcon
-        {
-            Icon = _icons[TrayIcon.Idle],
-            Text = "TapScribe — idle",
-            Visible = true,
-            ContextMenuStrip = _menu,
-        };
+        _indicator = _deps.CreateIndicator();
+        _indicator.Attach(_menu);
 
-        // Resume a pipeline left running by a previous tray session, once the message loop
-        // is pumping (so SynchronizationContext.Current is the WinForms context — capturing
-        // it in the ctor is too early). A one-shot UI-thread timer is the seam for that.
-        _resumeTimer = new System.Windows.Forms.Timer { Interval = 200 };
-        _resumeTimer.Tick += ResumeIfNeeded;
-        _resumeTimer.Enabled = true;
+        // Resume a pipeline left running by a previous tray session, once the message loop is
+        // pumping (so SynchronizationContext.Current is the WinForms context — capturing it in
+        // the ctor is too early).
+        _deps.ScheduleOnLoopStart(ResumeIfNeeded);
     }
 
     // Release a device enumerator. The core's IAudioDeviceEnumerator seam doesn't declare
@@ -511,11 +502,8 @@ internal sealed class TrayContext : ApplicationContext
 
     // Once the message loop is running, resume a pipeline a previous tray session left
     // behind (the Recorder keeps it going across both restarts). No drain, no re-trigger.
-    private void ResumeIfNeeded(object? sender, EventArgs e)
+    private void ResumeIfNeeded()
     {
-        _resumeTimer.Stop();
-        _resumeTimer.Dispose();
-
         MeetingState? state = _deps.Stores.LoadState();
         if (state is null)
             return; // the common case: a fresh launch with no meeting to resume
@@ -761,17 +749,34 @@ internal sealed class TrayContext : ApplicationContext
         orchestrator?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
         Release(enumerator);
 
-        _icon.Visible = false;
-        _icon.Dispose();
-        // NotifyIcon.Dispose does NOT dispose the ContextMenuStrip it renders, so the whole
-        // menu outlived the tray. A ToolStrip disposes the items it owns, so take the
-        // Past-meetings drop-down (itself a ToolStrip) explicitly first — its LAST rebuilt
-        // set is the one RebuildPastMeetingsMenu never gets to dispose, since it only ever
-        // disposes the PREVIOUS set on the next open — and then the strip itself.
-        _pastMeetingsItem.DropDown.Dispose();
-        _menu.Dispose();
-        _icons.Dispose();
+        Dispose();
         ExitThread();
+    }
+
+    /// <summary>
+    /// Release the tray's own UI: the menu (including the Past-meetings drop-down) and the
+    /// notification-area indicator. Quit is the operator's route here; the override exists so
+    /// the shell honours the IDisposable it inherits — an ApplicationContext that leaks its
+    /// entire menu when disposed is the bug this branch fixed, and leaving the release only
+    /// in Quit would leave the same hole one level up.
+    /// </summary>
+    private bool _uiReleased;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && !_uiReleased)
+        {
+            _uiReleased = true; // Quit disposes, and then so does whoever owns the context
+            // NotifyIcon.Dispose does NOT dispose the ContextMenuStrip it renders, so the
+            // whole menu outlived the tray. A ToolStrip disposes the items it owns, so take
+            // the Past-meetings drop-down (itself a ToolStrip) explicitly first — its LAST
+            // rebuilt set is the one RebuildPastMeetingsMenu never gets to dispose, since it
+            // only ever disposes the PREVIOUS set on the next open — and then the strip.
+            _pastMeetingsItem.DropDown.Dispose();
+            _menu.Dispose();
+            _indicator.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     /// <summary>Apply a status to the menu header line, the icon, and the tooltip — the
@@ -780,16 +785,12 @@ internal sealed class TrayContext : ApplicationContext
     {
         StatusView view = StatusView.For(status);
         _statusItem.Text = view.Header;
-        _icon.Icon = _icons[view.Icon];
-        // NotifyIcon.Text is capped at 63 chars.
-        _icon.Text = view.Tooltip.Length <= 63 ? view.Tooltip : view.Tooltip[..63];
+        _indicator.Show(view);
     }
 
-    private void ShowBalloon(string title, string message) =>
-        _icon.ShowBalloonTip(4000, title, message, ToolTipIcon.Warning);
+    private void ShowBalloon(string title, string message) => _indicator.Warn(title, message);
 
-    private void ShowInfoBalloon(string title, string message) =>
-        _icon.ShowBalloonTip(5000, title, message, ToolTipIcon.Info);
+    private void ShowInfoBalloon(string title, string message) => _indicator.Inform(title, message);
 
     private void OpenSettings()
     {

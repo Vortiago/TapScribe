@@ -141,9 +141,21 @@ internal sealed class FakeStores : IMeetingStores
     private MeetingHistory _history = MeetingHistory.Empty;
     private int _stateClears;
 
+    private int _stateLoads;
+
     public MeetingState? LoadState()
     {
-        lock (_lock) return _state;
+        lock (_lock)
+        {
+            _stateLoads++;
+            return _state;
+        }
+    }
+
+    /// <summary>How many times the shell has asked whether there is a meeting to resume.</summary>
+    public int StateLoads
+    {
+        get { lock (_lock) return _stateLoads; }
     }
 
     public void SaveState(MeetingState state)
@@ -185,6 +197,34 @@ internal sealed class FakeStores : IMeetingStores
 }
 
 /// <summary>
+/// The tray's notification-area presence, recorded instead of registered. This is the ONE
+/// double that exists for the host rather than for the assertions: a real
+/// <c>NotifyIcon</c> with <c>Visible = true</c> calls <c>Shell_NotifyIcon</c>, which on a
+/// runner with no interactive shell to answer it blocks for seconds and then took the test
+/// host down with it (PR #428's first run: the whole assembly aborted before a single result,
+/// with no assertion and no stack). Nothing under test needs an icon in the notification
+/// area; the status the icon WOULD show is asserted through the menu's header line, which is
+/// a plain object.
+/// </summary>
+internal sealed class FakeIndicator : ITrayIndicator
+{
+    public ContextMenuStrip? AttachedMenu { get; private set; }
+    public StatusView? LastStatus { get; private set; }
+    public List<(string Title, string Message)> Balloons { get; } = [];
+    public bool Disposed { get; private set; }
+
+    public void Attach(ContextMenuStrip menu) => AttachedMenu = menu;
+
+    public void Show(StatusView view) => LastStatus = view;
+
+    public void Warn(string title, string message) => Balloons.Add((title, message));
+
+    public void Inform(string title, string message) => Balloons.Add((title, message));
+
+    public void Dispose() => Disposed = true;
+}
+
+/// <summary>
 /// Builds the settings + <c>TrayDependencies</c> a tray test drives the shell with, and owns
 /// the mint gate. Named for what it is: the shell's whole outside world, scripted.
 /// </summary>
@@ -195,6 +235,7 @@ internal sealed class TrayHarness
 
     public FakeEnumerator Enumerator { get; } = new();
     public FakeStores Stores { get; } = new();
+    public FakeIndicator Indicator { get; } = new();
 
     /// <summary>Completes once the shell has asked for a detached session and is waiting.</summary>
     public Task MintReached => _mintReached.Task;
@@ -228,5 +269,11 @@ internal sealed class TrayHarness
                 return SessionId;
             return await _mint.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         },
-        Stores);
+        Stores,
+        () => Indicator,
+        // No message loop is ever pumped here, so the resume kick would never fire anyway —
+        // and production schedules it with a WinForms timer, which registers a native timer
+        // window on the calling thread. Leaving one behind on a thread that then exits is a
+        // teardown crash waiting to happen, so the test shell schedules nothing at all.
+        static _ => { });
 }

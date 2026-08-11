@@ -50,15 +50,42 @@ internal sealed class AppDataMeetingStores : IMeetingStores
 /// doubling as the connection pre-flight — it throws when the Recorder is unreachable or
 /// refuses the token.</param>
 /// <param name="Stores">The resume state and Past-meetings history.</param>
+/// <param name="CreateIndicator">The tray's notification-area presence — see
+/// <see cref="ITrayIndicator"/> for why the OS-facing sliver is separable at all.</param>
+/// <param name="ScheduleOnLoopStart">Runs a callback once, on the UI thread, as soon as the
+/// message loop is pumping. The tray's resume kick cannot run in the constructor (the
+/// WinForms SynchronizationContext isn't installed until Application.Run), and production
+/// schedules it with a one-shot WinForms timer — which registers a native timer window on
+/// the calling thread. A caller that will never pump a loop supplies a no-op instead of
+/// leaving that window behind on a thread that then goes away.</param>
 internal sealed record TrayDependencies(
     Func<IAudioDeviceEnumerator> OpenEnumerator,
     Func<BridgeSettings, CancellationToken, Task<string>> MintDetachedSession,
-    IMeetingStores Stores)
+    IMeetingStores Stores,
+    Func<ITrayIndicator> CreateIndicator,
+    Action<Action> ScheduleOnLoopStart)
 {
     public static TrayDependencies Production { get; } = new(
         static () => new WasapiDeviceEnumerator(),
         MintDetachedSessionAsync,
-        new AppDataMeetingStores());
+        new AppDataMeetingStores(),
+        static () => new NotifyIconIndicator(),
+        ScheduleOnMessageLoop);
+
+    // A one-shot UI-thread timer: the only way to get a callback onto the message loop from
+    // a constructor that runs before Application.Run installs it. It disposes itself on the
+    // single tick it exists for.
+    private static void ScheduleOnMessageLoop(Action action)
+    {
+        var timer = new System.Windows.Forms.Timer { Interval = 200 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+            action();
+        };
+        timer.Enabled = true;
+    }
 
     private static async Task<string> MintDetachedSessionAsync(
         BridgeSettings settings, CancellationToken cancellationToken)

@@ -8,11 +8,13 @@
        ubuntu core-only job, which targets the core test csproj directly.
 
        UseWindowsForms is the one addition over the sibling project: the subject under test
-       is a WinForms ApplicationContext, so the tests reference NotifyIcon /
-       ContextMenuStrip / ToolStripMenuItem directly. WinForms types are STA-affine and
-       xunit v2 runs MTA, so every test drives the shell through StaShell (a dedicated STA
-       thread with a hand-pumped SynchronizationContext) — no window is ever shown and no
-       message loop is ever entered. -->
+       is a WinForms ApplicationContext, so the tests reference ContextMenuStrip and
+       ToolStripMenuItem directly. Those are plain components — nothing here registers a
+       notification-area icon, creates a native timer window, shows a window, or enters a
+       message loop, because the first run of this assembly on windows-latest crashed the
+       test host before a single result doing exactly the first of those. WinForms types are
+       STA-affine and xunit v2 runs MTA, so every test drives the shell through StaShell (a
+       dedicated STA thread with a hand-pumped SynchronizationContext). -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

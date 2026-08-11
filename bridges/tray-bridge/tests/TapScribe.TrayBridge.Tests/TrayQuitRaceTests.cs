@@ -24,11 +24,12 @@ public class TrayQuitRaceTests
     public void Quit_WhileAStartIsInFlight_TearsThatMeetingDown_InsteadOfPublishingIt()
     {
         using var sta = new StaShell();
+        sta.RequireWinForms();
         var harness = new TrayHarness { HoldMint = true };
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         FakeCapture system = harness.Enumerator.Add("system", DeviceFlow.Render);
 
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, harness.Dependencies));
+        TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
         Assert.True(harness.MintReached.Wait(Settle), "the start never reached the session mint");
 
@@ -60,10 +61,11 @@ public class TrayQuitRaceTests
         // unguarded in the shell's own model (the greyed-out menu item was the only thing
         // stopping a second meeting).
         using var sta = new StaShell();
+        sta.RequireWinForms();
         var harness = new TrayHarness { HoldMint = true };
         harness.Enumerator.Add("mic", DeviceFlow.Capture);
 
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, harness.Dependencies));
+        TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
         Assert.True(harness.MintReached.Wait(Settle), "the start never reached the session mint");
         Task first = tray.StartTask!;
@@ -81,10 +83,11 @@ public class TrayQuitRaceTests
     public void Start_AfterQuit_IsRefused()
     {
         using var sta = new StaShell();
+        sta.RequireWinForms();
         var harness = new TrayHarness();
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
 
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, harness.Dependencies));
+        TrayContext tray = sta.Build(harness);
         sta.Run(tray.Quit);
         sta.Run(tray.Start);
 

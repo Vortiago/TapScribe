@@ -24,6 +24,7 @@ public class TrayStartTests
     public void Start_WhenOpeningADeviceThrowsUnexpectedly_ReleasesTheCapturesAlreadyOpened()
     {
         using var sta = new StaShell();
+        sta.RequireWinForms();
         var harness = new TrayHarness();
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         harness.Enumerator.Add("system", DeviceFlow.Render);
@@ -32,7 +33,7 @@ public class TrayStartTests
         // "any unexpected throw between the open and the handoff" case.
         harness.Enumerator.FailOpen("system", unexpected: true);
 
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, harness.Dependencies));
+        TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
         Task start = tray.StartTask!;
         var failure = Assert.Throws<AggregateException>(() => start.Wait(Settle));
@@ -50,13 +51,14 @@ public class TrayStartTests
     public void Start_WhenAPostFailsAfterThePublish_LeavesTheLiveMeetingsControlsAlone()
     {
         using var sta = new StaShell();
+        sta.RequireWinForms();
         var harness = new TrayHarness();
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         // No render endpoint is present, so the system-audio selection does not resolve and
         // the shell has a "some devices unavailable" balloon to post AFTER it publishes the
         // meeting. That balloon is the first thing it posts, and it is exactly the window
         // B6 lives in.
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, harness.Dependencies));
+        TrayContext tray = sta.Build(harness);
         sta.ThrowOnPost(1);
 
         sta.Run(tray.Start);
@@ -67,10 +69,11 @@ public class TrayStartTests
         catch (AggregateException)
         {
             // With the fix the failed post is outside the try, so it escapes this
-            // fire-and-forget task; before the fix it was caught and classified. Both
-            // outcomes are fine here — what matters is the menu state asserted below, so
-            // swallowing this only keeps the test from depending on which one happened.
-            // What is lost: nothing, the escape itself is asserted by the Pending check.
+            // fire-and-forget task; before the fix it was caught and classified as a failed
+            // START. WHICH of the two happened is the bug, and it is asserted below through
+            // what the operator would see — so swallowing the exception here is what keeps
+            // this test on the observable rather than on the mechanism. Nothing is lost: an
+            // escape that carried a different failure would still show up in the menu state.
         }
         _ = sta.Drain(); // let any consequences the shell did post actually happen
 
@@ -92,9 +95,10 @@ public class TrayStartTests
         // must still roll the menu back to idle, so "never roll back" can't be implemented
         // by never rolling back at all.
         using var sta = new StaShell();
+        sta.RequireWinForms();
         var harness = new TrayHarness(); // no devices registered at all
 
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, harness.Dependencies));
+        TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
         Assert.True(tray.StartTask!.Wait(Settle), "the start never settled");
         _ = sta.Drain();
