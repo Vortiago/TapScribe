@@ -352,6 +352,14 @@ filterwarnings = [
     # huggingface_hub's xet download path still calls the deprecated
     # hf_xet.download_files(). Remove when huggingface_hub migrates.
     "ignore:hf_xet\\.download_files\\(\\) is deprecated:DeprecationWarning",
+    # starlette's TestClient nags that `httpx` should become `httpx2`, and
+    # fastapi.testclient raises it at module load — which breaks every
+    # collection that touches TestClient under `error`. Matched by MESSAGE, not
+    # by class: which starlette resolves depends on whether `httpx` or `httpx2`
+    # is in the environment, and only the pre-1.0 line defines (and raises)
+    # StarletteDeprecationWarning, so naming the class aborts the whole run
+    # wherever it is absent. Remove when starlette itself pins httpx2.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:Warning",
     # (No torch.jit.load ignore needed: since #374 nothing in the core install
     #  imports torch at all — `speech_gate.load_silero_model` and
     #  `strip_silence._local_silero_model` both go through `tapscribe.vad`,
