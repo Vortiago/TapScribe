@@ -303,18 +303,22 @@ internal sealed class TrayContext : ApplicationContext
         }
         finally
         {
-            // Dispose on every exit path — the non-Ok early return, an exception from
-            // List()/Resolve() (whether or not the catch filter matches it), or normal
-            // completion. Once the orchestrator owns the enumerator (line above), this is
-            // null and the dispose is a no-op, so the running meeting keeps its devices.
-            Release(enumerator);
-            // Same rule one level down for the captures themselves: any we opened but never
-            // handed over. Null once StartAll has them (it releases what it refuses), so a
-            // running meeting's devices are never touched here. Dispose is contract-bound
-            // not to throw, so it needs no guard of its own.
+            // Captures FIRST, then the enumerator that opened them. An enumerator hands its
+            // endpoint over to each capture it opens, so it must outlive them — the same
+            // ordering the Settings meter path spells out ("declared before the form so it
+            // disposes AFTER it") and the same one End and Quit already follow by construction.
+            //
+            // These are the captures we opened but never handed over. Null once StartAll has
+            // them (it releases what it refuses), so a running meeting's devices are never
+            // touched here. Dispose is contract-bound not to throw, so no guard of its own.
             if (unowned is not null)
                 foreach (PipelineSpec spec in unowned)
                     spec.Capture.Dispose();
+            // Released on every exit path — the non-Ok early return, an exception from
+            // List()/Resolve() (whether or not the catch filter matches it), or normal
+            // completion. Once the orchestrator owns the enumerator (line above), this is
+            // null and the release is a no-op, so the running meeting keeps its devices.
+            Release(enumerator);
         }
 
         if (started is null)

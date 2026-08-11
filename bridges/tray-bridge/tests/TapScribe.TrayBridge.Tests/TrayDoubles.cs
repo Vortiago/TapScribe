@@ -63,9 +63,14 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
 
     public void Stop() => Stopped = true;
 
+    /// <summary>The enumerator that handed this capture out, so a release can be recorded
+    /// against the same teardown order the enumerator's own is.</summary>
+    public FakeEnumerator? Owner { get; set; }
+
     public void Dispose()
     {
         Interlocked.Increment(ref _disposals);
+        Owner?.RecordTeardown("capture");
         if (!HoldDispose)
             return;
         _disposeReached.TrySetResult();
@@ -83,52 +88,73 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
 {
     private readonly List<CaptureDevice> _devices = [];
     private readonly Dictionary<string, FakeCapture> _captures = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _failOpen = new(StringComparer.Ordinal);
+    private readonly List<string> _teardown = [];
+    private int _opens;
     private int _disposals;
 
     public bool Disposed => Volatile.Read(ref _disposals) > 0;
     public int Disposals => Volatile.Read(ref _disposals);
 
-    /// <summary>Captures handed out, oldest first — what the shell is on the hook for.</summary>
+    /// <summary>Captures handed out, oldest first — what the shell is on the hook for. Note
+    /// "opened", not "started": the seam hands back a capture that is NOT running (a
+    /// TapSession starts it), so this — never <see cref="FakeCapture.Started"/> — is what says
+    /// the shell has taken ownership of something it now has to release.</summary>
     public IReadOnlyList<FakeCapture> Opened { get; } = new List<FakeCapture>();
+
+    /// <summary>The order teardown actually happened in: one entry per capture released and
+    /// one for the enumerator. Captures must come first — an enumerator handed its endpoint
+    /// over to the capture it opened, so releasing it while a capture is still live inverts
+    /// the ownership the Settings meter path spells out explicitly.</summary>
+    public IReadOnlyList<string> TeardownOrder
+    {
+        get { lock (_teardown) return [.. _teardown]; }
+    }
+
+    internal void RecordTeardown(string what)
+    {
+        lock (_teardown)
+            _teardown.Add(what);
+    }
 
     public FakeCapture Add(string id, DeviceFlow flow, bool isDefault = true, FakeCapture? capture = null)
     {
         _devices.Add(new CaptureDevice(id, id, flow, isDefault));
         FakeCapture fake = capture ?? new FakeCapture();
+        fake.Owner = this;
         _captures[id] = fake;
         return fake;
     }
 
-    /// <summary>Make <see cref="Open"/> throw for this device. <paramref name="unexpected"/>
-    /// picks an exception OUTSIDE the shell's per-device catch filter, which is what turns a
-    /// skippable device failure into an escape that strands its siblings.</summary>
-    public void FailOpen(string id, bool unexpected = false)
-    {
-        _failOpen.Add(id);
-        if (unexpected)
-            UnexpectedFailures.Add(id);
-    }
-
-    public List<string> UnexpectedFailures { get; } = [];
+    /// <summary>
+    /// Make the Nth (1-based) <see cref="Open"/> throw, whichever device that turns out to be.
+    /// Counted rather than named on purpose: a test about "the captures already opened when
+    /// something threw" must not also depend on the order the shell happens to resolve devices
+    /// in — name the failing device and a reordering silently turns the test into one that
+    /// opens nothing at all and proves nothing.
+    /// </summary>
+    public int FailOpenNumber { get; set; }
 
     public IReadOnlyList<CaptureDevice> List() => [.. _devices];
 
     public IAudioCapture Open(CaptureDevice device)
     {
         ArgumentNullException.ThrowIfNull(device);
-        if (_failOpen.Contains(device.Id))
-            throw UnexpectedFailures.Contains(device.Id)
-                // Outside TrayContext's TryAddSpec filter (COM / NotSupported / Argument /
-                // InvalidOperation), so it escapes the whole build loop.
-                ? new IOException($"'{device.Id}' blew up unexpectedly")
-                : new InvalidOperationException($"'{device.Id}' is in use");
+        if (++_opens == FailOpenNumber)
+            // An IOException is outside BOTH filters on this path — TryAddSpec's per-device
+            // one (COM / NotSupported / Argument / InvalidOperation) and StartAsync's own — so
+            // it escapes the build loop entirely instead of being skipped or classified. That
+            // is what "any unexpected throw between the open and the handoff" means.
+            throw new IOException($"opening '{device.Id}' failed unexpectedly");
         FakeCapture capture = _captures[device.Id];
         ((List<FakeCapture>)Opened).Add(capture);
         return capture;
     }
 
-    public void Dispose() => Interlocked.Increment(ref _disposals);
+    public void Dispose()
+    {
+        Interlocked.Increment(ref _disposals);
+        RecordTeardown("enumerator");
+    }
 }
 
 /// <summary>In-memory stand-ins for the tray's two %APPDATA% files, so no test touches the

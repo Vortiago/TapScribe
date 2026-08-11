@@ -25,25 +25,40 @@ public class TrayStartTests
     {
         using var sta = new StaShell();
         var harness = new TrayHarness();
-        FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
+        harness.Enumerator.Add("mic", DeviceFlow.Capture);
         harness.Enumerator.Add("system", DeviceFlow.Render);
-        // The mic opens; the loopback blows up with something outside the shell's per-device
-        // catch filter, so it escapes the whole build loop instead of being skipped — the
-        // "any unexpected throw between the open and the handoff" case.
-        harness.Enumerator.FailOpen("system", unexpected: true);
+        // One device opens, the NEXT one blows up. Counted rather than named: which device the
+        // shell reaches first is not this test's subject, and pinning it to one made the test
+        // unable to reach its subject at all the first time it ran for real.
+        harness.Enumerator.FailOpenNumber = 2;
 
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
         Task start = tray.StartTask!;
         var failure = Assert.Throws<AggregateException>(() => start.Wait(Settle));
 
-        // It really did escape the shell's own classification (that is what makes the
-        // finally the captures' only owner).
+        // It really did escape the shell's own classification — that is what leaves the
+        // finally as the captures' only owner.
         Assert.IsType<IOException>(failure.InnerException);
-        Assert.True(mic.Started, "the mic capture was never opened, so this proves nothing");
-        Assert.True(mic.Disposed, "the mic capture was opened and then stranded with no owner");
-        Assert.Equal(1, mic.Disposals); // released once — not double-released by a second owner
+
+        // The guard, on the right property this time. A capture is handed out NOT started (a
+        // TapSession starts it, and StartAll — which builds those — is never reached on this
+        // path), so "was it opened" is the enumerator's record, never capture.Started. With
+        // nothing opened there is nothing that could have leaked and the rest proves nothing.
+        FakeCapture stranded = Assert.Single(harness.Enumerator.Opened);
+        Assert.False(stranded.Started, "StartAll was reached, so this is no longer the pre-handoff path");
+
+        // The subject: nothing the shell took out of the enumerator is left un-owned.
+        Assert.All(harness.Enumerator.Opened, capture =>
+        {
+            Assert.True(capture.Disposed, "a capture the shell opened was stranded with no owner");
+            Assert.Equal(1, capture.Disposals); // released once, not double-released
+        });
         Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded too");
+
+        // And released in the right order: the enumerator handed its endpoint to the capture,
+        // so it has to outlive it.
+        Assert.Equal(["capture", "enumerator"], harness.Enumerator.TeardownOrder);
     }
 
     [Fact]
