@@ -20,7 +20,7 @@ public class DeviceTallyTests
         tally.Connected("mic");
         tally.Connected("system");
 
-        TrayStatus? status = tally.Dropped("system"); // the loopback endpoint goes away
+        TrayStatus status = tally.Dropped("system").Status; // the loopback endpoint goes away
 
         var error = Assert.IsType<TrayStatus.Error>(status);
         Assert.Contains("system", error.Reason, StringComparison.Ordinal); // which device stopped
@@ -33,21 +33,25 @@ public class DeviceTallyTests
     }
 
     [Fact]
-    public void ARepeatedReport_SaysNothingChanged_SoTheCallerCanSkipTheRepaint()
+    public void ARepeatedReport_IsNotATransition_SoTheOperatorIsToldOnce()
     {
-        // A tap whose first connect keeps failing raises onFailed once per Utterance, and a
-        // streaming device raises onConnected once per Utterance too. The tally already knows
-        // both, so it says so — otherwise every one of those re-renders a status line
-        // identical to the one on screen for the length of the meeting.
+        // Both callbacks fire once per UTTERANCE. A device that dropped once goes on
+        // reporting it for the rest of the meeting, and the shell answers a drop with a
+        // 4-second Windows toast — so "is this news" has to be a question the tally answers,
+        // separately from the status, which stays a total function of the set.
         var tally = new DeviceTally(2);
-        Assert.NotNull(tally.Connected("mic"));
-        Assert.Null(tally.Connected("mic")); // still streaming; nothing to repaint
+        Assert.True(tally.Connected("mic").Transition);
+        Assert.False(tally.Connected("mic").Transition); // still streaming; nothing new to say
 
-        Assert.NotNull(tally.Dropped("system"));
-        Assert.Null(tally.Dropped("system")); // still down; nothing to repaint
+        Assert.True(tally.Dropped("system").Transition);
+        Assert.False(tally.Dropped("system").Transition); // still down; nothing new to say
 
-        // ...and a real transition still reports, so the skip can't swallow a change.
-        Assert.NotNull(tally.Connected("system"));
+        // ...and a real transition still reports, so the quiet can't swallow a change.
+        Assert.True(tally.Connected("system").Transition);
+
+        // The status is reported either way — whether it differs from what is ON SCREEN is
+        // the view's question, not this one's.
+        Assert.NotNull(tally.Dropped("system").Status);
     }
 
     [Fact]
@@ -62,7 +66,7 @@ public class DeviceTallyTests
         tally.Connected("system");
         tally.Dropped("system");
 
-        TrayStatus? status = tally.Connected("system");
+        TrayStatus status = tally.Connected("system").Status;
 
         var streaming = Assert.IsType<TrayStatus.Streaming>(status);
         Assert.Equal(2, streaming.Connected);

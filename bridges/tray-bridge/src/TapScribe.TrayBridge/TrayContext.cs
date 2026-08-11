@@ -65,6 +65,7 @@ internal sealed class TrayContext : ApplicationContext
     private bool _quitting;
     private DateTimeOffset _startedAt; // wall-clock start of the running meeting, for Past-meetings history (#168)
     private bool _uiReleased; // Quit disposes, and then so does whoever owns the context
+    private TrayStatus? _lastStatus; // what the header and icon are currently showing
 
     public TrayContext()
         : this(BridgeSettingsStore.Load(), TrayDependencies.Production)
@@ -257,11 +258,16 @@ internal sealed class TrayContext : ApplicationContext
             unowned = null;
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 specs,
-                onConnected: id => ui.Post(_ => ApplyStatusIfChanged(tally.Connected(id)), null),
+                onConnected: id => ui.Post(_ => ApplyStatus(tally.Connected(id).Status), null),
                 onFailed: (id, ex) => ui.Post(_ =>
                 {
-                    ApplyStatusIfChanged(tally.Dropped(id));
-                    ShowBalloon($"{id} stopped", ex.Message);
+                    TallyReport report = tally.Dropped(id);
+                    ApplyStatus(report.Status);
+                    // Only on a transition. The balloon is a real 4-second Windows toast, and
+                    // a tap that cannot reach the Recorder reports once per Utterance — so a
+                    // device that dropped ONCE would otherwise toast for the whole meeting.
+                    if (report.Transition)
+                        ShowBalloon($"{id} stopped", ex.Message);
                 }, null));
                 // No shared gate arg: each spec already carries its own per-device gate.
 
@@ -765,22 +771,24 @@ internal sealed class TrayContext : ApplicationContext
         base.Dispose(disposing);
     }
 
-    /// <summary>Apply a status to the menu header line, the icon, and the tooltip — the
-    /// pure <see cref="StatusView"/> decides all three (issue #106 at-a-glance status).</summary>
+    /// <summary>
+    /// Apply a status to the menu header line, the icon, and the tooltip — the pure
+    /// <see cref="StatusView"/> decides all three (issue #106 at-a-glance status).
+    ///
+    /// Re-applying the status already showing is skipped here, at the one point that knows
+    /// what is on screen, rather than by each caller guessing. Every caller repeats itself:
+    /// the per-device callbacks fire once per Utterance, and a running pipeline re-renders its
+    /// progress line on every poll. <see cref="TrayStatus"/> is a record hierarchy, so value
+    /// equality across all six call sites is free.
+    /// </summary>
     private void ApplyStatus(TrayStatus status)
     {
+        if (status == _lastStatus)
+            return;
+        _lastStatus = status;
         StatusView view = StatusView.For(status);
         _statusItem.Text = view.Header;
         _indicator.Show(view);
-    }
-
-    /// <summary>Apply a status the <see cref="DeviceTally"/> reports, skipping the null it
-    /// returns when the tally didn't actually change — a device that keeps failing to connect
-    /// reports once per Utterance and would otherwise re-render what is already on screen.</summary>
-    private void ApplyStatusIfChanged(TrayStatus? status)
-    {
-        if (status is not null)
-            ApplyStatus(status);
     }
 
     private void ShowBalloon(string title, string message) => _indicator.Warn(title, message);

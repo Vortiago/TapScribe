@@ -1,6 +1,20 @@
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
+/// What a <see cref="DeviceTally"/> makes of one report about one device: the
+/// <paramref name="Status"/> the meeting is now in, and whether the report was a
+/// <paramref name="Transition"/> — news the operator has not been told — rather than a repeat
+/// of something the tally already knew.
+///
+/// Both callbacks fire once per Utterance, so the distinction is load-bearing: a device that
+/// dropped once goes on reporting it for the rest of the meeting, and a shell that treats
+/// every report as news pops a toast every time. It is deliberately NOT the same question as
+/// "does this differ from what is on screen" — that one belongs to whoever owns the screen,
+/// and a tally has no way to know it.
+/// </summary>
+public sealed record TallyReport(TrayStatus Status, bool Transition);
+
+/// <summary>
 /// Which of a running meeting's devices are actually streaming, and the
 /// <see cref="TrayStatus"/> that follows from it — the state behind the status line's
 /// "N/M devices", fed by the per-identity connect/fail callbacks
@@ -25,33 +39,28 @@ public sealed class DeviceTally
     /// <summary>How many devices the meeting was started on.</summary>
     public int Total { get; }
 
-    /// <summary>A device's tap connected: it is streaming. Returns the status to apply, or
-    /// <c>null</c> when nothing changed — see <see cref="Dropped"/>.</summary>
-    public TrayStatus? Connected(string identity)
+    /// <summary>A device's tap connected: it is streaming.</summary>
+    public TallyReport Connected(string identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        bool changed = _live.Add(identity);
+        bool transition = _live.Add(identity);
         // A tap landing clears this device's earlier drop: a first-connect failure is
         // terminal for that Utterance only, so the next one recovering is the signal that
         // the device is streaming again. Without this the warning would outlive the fault
         // for the rest of the meeting.
-        changed |= _dropped.Remove(identity);
-        return changed ? Status : null;
+        transition |= _dropped.Remove(identity);
+        return new TallyReport(Status, transition);
     }
 
-    /// <summary>
-    /// A device stopped streaming — its tap couldn't reach the Recorder, or the endpoint was
-    /// invalidated mid-meeting (unplugged / disabled / default-device switch). Returns the
-    /// status to apply, or <c>null</c> when the tally already said this: a tap that keeps
-    /// failing to connect reports once per Utterance, and re-rendering a status identical to
-    /// the one on screen is work the caller has no reason to do.
-    /// </summary>
-    public TrayStatus? Dropped(string identity)
+    /// <summary>A device stopped streaming — its tap couldn't reach the Recorder, or the
+    /// endpoint was invalidated mid-meeting (unplugged / disabled / default-device
+    /// switch).</summary>
+    public TallyReport Dropped(string identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        bool changed = _live.Remove(identity);
-        changed |= _dropped.Add(identity);
-        return changed ? Status : null;
+        bool transition = _live.Remove(identity);
+        transition |= _dropped.Add(identity);
+        return new TallyReport(Status, transition);
     }
 
     /// <summary>The status the tally currently implies: an <see cref="TrayStatus.Error"/>
