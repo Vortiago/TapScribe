@@ -1,4 +1,5 @@
 using TapScribe.Bridge.Core;
+using TapScribe.Bridge.Windows;
 
 namespace TapScribe.TrayBridge.Tests;
 
@@ -48,9 +49,20 @@ public class TrayIndicatorTests
         // so throughout, but the operator must be TOLD once — ShowBalloon is a real 4-second
         // Windows toast, so the naive wiring toasts every utterance until the meeting ends.
         using var sta = new StaShell();
-        var harness = new TrayHarness();
-        FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
-        harness.Enumerator.Add("system", DeviceFlow.Render);
+        // A device is reported by the IDENTITY its tap streams under — what the Recorder
+        // attributes its recordings to, and what the operator sees on the dashboard — not by
+        // the endpoint's device name. Spelled out here rather than left to the default pair,
+        // where the mic's identity is quietly the operator's own label.
+        const string micIdentity = "Alice";
+        BridgeSettings settings = TrayHarness.DefaultSettings();
+        settings.Devices =
+        [
+            new DeviceSelection.FollowDefault(DeviceFlow.Capture, micIdentity, micIdentity),
+            new DeviceSelection.FollowDefault(DeviceFlow.Render, "System audio", "System audio"),
+        ];
+        var harness = new TrayHarness { Settings = settings };
+        FakeCapture mic = harness.Enumerator.Add("mic-endpoint", DeviceFlow.Capture);
+        harness.Enumerator.Add("system-endpoint", DeviceFlow.Render);
 
         TrayContext tray = sta.StartMeeting(harness);
         int balloonsBefore = harness.Indicator.Balloons.Count;
@@ -62,10 +74,10 @@ public class TrayIndicatorTests
 
         (string Title, string Message) toast =
             Assert.Single(harness.Indicator.Balloons.Skip(balloonsBefore));
-        Assert.Contains("mic", toast.Title, StringComparison.Ordinal);
+        Assert.Equal($"{micIdentity} stopped", toast.Title); // the whole message, not just the name
 
         // The status still says it, though — that is what the header is for.
-        Assert.Contains("mic", tray.StatusHeader, StringComparison.Ordinal);
+        Assert.Contains($"{micIdentity} stopped", tray.StatusHeader, StringComparison.Ordinal);
         Assert.Equal(TrayIcon.Error, harness.Indicator.LastStatus!.Icon);
     }
 
