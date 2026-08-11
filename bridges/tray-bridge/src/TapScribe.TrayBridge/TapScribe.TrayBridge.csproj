@@ -17,6 +17,12 @@
     <ProjectReference Include="..\TapScribe.Bridge.Windows\TapScribe.Bridge.Windows.csproj" />
   </ItemGroup>
 
+  <!-- TrayContext is internal (it is the app's own shell, not an API), and its meeting
+       lifecycle is exactly what the tray tests drive. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="TapScribe.TrayBridge.Tests" />
+  </ItemGroup>
+
   <!-- System.Security.Cryptography.ProtectedData (DPAPI, used by
        BridgeSettings to protect the tap token at rest) ships in the
        net10.0-windows framework, so no PackageReference is needed (NU1510). -->

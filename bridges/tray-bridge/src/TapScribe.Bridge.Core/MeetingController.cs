@@ -16,6 +16,16 @@ namespace TapScribe.Bridge.Core;
 /// </summary>
 public sealed class MeetingController
 {
+    /// <summary>
+    /// How many CONSECUTIVE transient poll failures the loop rides out before it stops
+    /// following the meeting. A blip (a network hiccup, a Recorder mid-restart) heals
+    /// well inside this; a Recorder that keeps failing does not, and the caller needs
+    /// the flow to END so its UI can be handed back to the operator. Counted in polls
+    /// rather than seconds because the cadence is the caller's (<c>pollDelay</c>): at
+    /// the tray's 1.5 s it is a little over half a minute of continuous failure.
+    /// </summary>
+    public const int MaxConsecutivePollFailures = 20;
+
     private readonly ControlClient _control;
     private readonly string _sessionId;
     private readonly Func<Task>? _drainAsync;
@@ -89,6 +99,7 @@ public sealed class MeetingController
 
     private async Task PollToTerminalAsync(CancellationToken cancellationToken)
     {
+        int consecutiveFailures = 0;
         while (true)
         {
             PipelineView view;
@@ -96,6 +107,7 @@ public sealed class MeetingController
             {
                 PipelinePoll poll = await _control.PollPipelineAsync(_sessionId, cancellationToken).ConfigureAwait(false);
                 view = PipelineView.Map(poll);
+                consecutiveFailures = 0; // the Recorder answered: whatever blip preceded it is over
             }
             catch (HttpRequestException ex)
             {
@@ -109,7 +121,19 @@ public sealed class MeetingController
                     return;
                 }
                 // A transient poll failure (network blip / Recorder mid-restart): hold the
-                // rendered state and self-heal at the poll cadence rather than aborting.
+                // rendered state and self-heal at the poll cadence rather than aborting —
+                // but only for a bounded RUN of them. Past that the Recorder isn't blipping,
+                // it's failing, and a loop that never returns leaves the caller's UI pinned
+                // on a processing state it can never leave (the tray greys both Start and
+                // End for the whole flow). Emit a terminal view and stop; the run resets on
+                // the first answered poll, so an intermittent Recorder still rides through.
+                if (++consecutiveFailures >= MaxConsecutivePollFailures)
+                {
+                    Updated?.Invoke(PipelineView.Unavailable(
+                        "Lost contact with the recorder while following this meeting. " +
+                        "It may still be running — re-open it from Past meetings."));
+                    return;
+                }
                 await _pollDelay(cancellationToken).ConfigureAwait(false);
                 continue;
             }

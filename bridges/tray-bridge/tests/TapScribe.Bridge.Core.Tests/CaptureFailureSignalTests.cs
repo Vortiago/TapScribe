@@ -19,9 +19,6 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 public class CaptureFailureSignalTests
 {
-    private static PipelineSpec Spec(IAudioCapture capture, string identity) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = "" }, null);
-
     [Fact]
     public async Task CaptureFailingMidStream_SurfacesThroughOnFailed_TaggedByIdentity()
     {
@@ -117,10 +114,14 @@ public class CaptureFailureSignalTests
     {
         var transport = new FakeTapTransport();
         var capture = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true };
+        // A healthy sibling, so the meeting still has a pipeline: an orchestrator on which
+        // EVERY device failed to start is refused outright (ZeroPipelineMeetingTests), and
+        // this test is about the failed device's ctor unwind, not about that refusal.
+        var healthy = new FakeAudioCapture(RecorderFormat);
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            [Spec(capture, "mic"), Spec(healthy, "system")],
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
             FastGate(), FastStream(), transport.Create);
