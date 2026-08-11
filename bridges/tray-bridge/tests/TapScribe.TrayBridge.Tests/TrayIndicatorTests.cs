@@ -20,7 +20,6 @@ public class TrayIndicatorTests
     public void TheShell_RoutesItsStatusThroughTheIndicator_NotTheOSDirectly()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
 
         TrayContext tray = sta.Build(harness);
@@ -47,7 +46,6 @@ public class TrayIndicatorTests
         // The OS registration must go when the tray goes — it is the one resource that
         // outlives the process's own memory if it is leaked.
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
 
         TrayContext tray = sta.Build(harness);
@@ -66,12 +64,11 @@ public class TrayIndicatorTests
         // thread — left behind on any thread that never pumps a loop and then exits. It is a
         // scheduling decision now, so a caller that has no message loop supplies none.
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
         var scheduled = new List<Action>();
         TrayDependencies deps = harness.Dependencies with { ScheduleOnLoopStart = scheduled.Add };
 
-        TrayContext tray = sta.Run(() => new TrayContext(harness.Settings, deps));
+        TrayContext tray = sta.Get(() => new TrayContext(harness.Settings, deps));
         try
         {
             Action kick = Assert.Single(scheduled);   // exactly one, and deferred...

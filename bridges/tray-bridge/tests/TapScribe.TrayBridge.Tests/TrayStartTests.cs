@@ -24,7 +24,6 @@ public class TrayStartTests
     public void Start_WhenOpeningADeviceThrowsUnexpectedly_ReleasesTheCapturesAlreadyOpened()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         harness.Enumerator.Add("system", DeviceFlow.Render);
@@ -51,7 +50,6 @@ public class TrayStartTests
     public void Start_WhenAPostFailsAfterThePublish_LeavesTheLiveMeetingsControlsAlone()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         // No render endpoint is present, so the system-audio selection does not resolve and
@@ -95,7 +93,6 @@ public class TrayStartTests
         // must still roll the menu back to idle, so "never roll back" can't be implemented
         // by never rolling back at all.
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness(); // no devices registered at all
 
         TrayContext tray = sta.Build(harness);

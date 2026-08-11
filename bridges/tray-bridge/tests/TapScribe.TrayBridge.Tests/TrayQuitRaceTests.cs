@@ -24,7 +24,6 @@ public class TrayQuitRaceTests
     public void Quit_WhileAStartIsInFlight_TearsThatMeetingDown_InsteadOfPublishingIt()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness { HoldMint = true };
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         FakeCapture system = harness.Enumerator.Add("system", DeviceFlow.Render);
@@ -61,7 +60,6 @@ public class TrayQuitRaceTests
         // unguarded in the shell's own model (the greyed-out menu item was the only thing
         // stopping a second meeting).
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness { HoldMint = true };
         harness.Enumerator.Add("mic", DeviceFlow.Capture);
 
@@ -83,7 +81,6 @@ public class TrayQuitRaceTests
     public void Start_AfterQuit_IsRefused()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
 

@@ -16,7 +16,6 @@ public class TrayMenuLifetimeTests
     public void Quit_DisposesTheMenu_AndEveryItemUnderIt()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
         harness.Stores.Seed(
             new MeetingRecord { SessionId = "2026-08-01T10-00-00", StartedAt = DateTimeOffset.Now },
@@ -56,7 +55,6 @@ public class TrayMenuLifetimeTests
         // The empty case takes the other branch of the rebuild (a single disabled
         // placeholder rather than one item per meeting) — and it has no other owner either.
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness();
 
         TrayContext tray = sta.Build(harness);

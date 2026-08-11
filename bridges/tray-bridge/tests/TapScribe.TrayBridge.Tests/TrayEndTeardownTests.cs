@@ -45,7 +45,6 @@ public class TrayEndTeardownTests
     public void End_WhenTheTeardownThrows_StillReleasesTheDevices()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness { Settings = RecordOnly() };
         harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: new FakeCapture { ThrowOnDetach = true });
         harness.Enumerator.Add("system", DeviceFlow.Render);
@@ -65,7 +64,6 @@ public class TrayEndTeardownTests
     public void End_WhenTheTeardownThrowsUnexpectedly_ReturnsTheMenuToTheOperator()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness { Settings = RecordOnly() };
         harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: new FakeCapture { ThrowOnDetach = true });
         harness.Enumerator.Add("system", DeviceFlow.Render);
@@ -90,7 +88,6 @@ public class TrayEndTeardownTests
         // same released devices and usable menu, so neither can pass by a teardown that
         // never runs or a menu that is never busy in the first place.
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness { Settings = RecordOnly() };
         FakeCapture mic = harness.Enumerator.Add("mic", DeviceFlow.Capture);
         harness.Enumerator.Add("system", DeviceFlow.Render);
@@ -110,7 +107,6 @@ public class TrayEndTeardownTests
     public void Quit_CancelsTheInFlightEndFlow_SoItNeverReachesTheRecorder()
     {
         using var sta = new StaShell();
-        sta.RequireWinForms();
         var harness = new TrayHarness(); // ProcessOnEnd defaults to true: the trigger runs
         var slowMic = new FakeCapture { HoldDispose = true };
         harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: slowMic);
