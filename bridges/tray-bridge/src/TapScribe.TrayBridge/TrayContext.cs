@@ -621,13 +621,21 @@ internal sealed class TrayContext : ApplicationContext
             settings = _settings;
 
         var form = new MeetingForm();
-        // Never disposed, deliberately. Two parties hold it — the window (which cancels on
-        // close) and the poll loop (which reads its token until it finishes) — and their
-        // lifetimes end in either order, so ANY disposal point is wrong for one of them:
-        // dispose on close and the loop holds a dead source, dispose when the loop ends and a
-        // later close calls Cancel on a disposed one, which throws. A CancellationTokenSource
-        // with no linked source, no timer and no observed WaitHandle holds nothing unmanaged,
-        // so there is nothing to release and the question does not arise.
+        // Never disposed, deliberately — and this is the considered answer to CodeQL's
+        // cs/local-not-disposed here, not an oversight.
+        //
+        // Two parties hold it: the window, which cancels on close, and the poll loop, which
+        // reads its token until it returns. Their lifetimes end in EITHER order, so every
+        // disposal point is wrong for one of them — dispose on close and the loop is left
+        // holding a dead source; dispose when the loop ends and a later close calls Cancel on
+        // a disposed one, which throws, out of a fire-and-forget task with nothing to report
+        // it. Disposal can be made safe (unhook the close handler first, on the UI thread both
+        // run on), but only by reinstating the arbitration protocol this replaced — and there
+        // is nothing on the other side of that trade: a CancellationTokenSource with no linked
+        // source, no timer and no observed WaitHandle holds nothing unmanaged, so Dispose is
+        // an optimisation and the question does not arise. The behaviour it protects — the
+        // loop always holds a live token, so closing the window stops it quietly rather than
+        // rendering a failure — is pinned cross-platform in MeetingViewDriverTests.
         var cancellation = new CancellationTokenSource();
         form.FormClosed += (_, _) =>
         {

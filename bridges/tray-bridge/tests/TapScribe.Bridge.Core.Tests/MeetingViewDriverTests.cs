@@ -15,9 +15,18 @@ public class MeetingViewDriverTests
 {
     // Renders are posted through a SynchronizationContext; running them inline keeps the test
     // deterministic — every Render has happened by the time DriveAsync returns.
-    private sealed class InlineSyncContext : SynchronizationContext
+    private sealed class InlineSyncContext(Action? afterFirstPost = null) : SynchronizationContext
     {
-        public override void Post(SendOrPostCallback d, object? state) => d(state);
+        private bool _posted;
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            d(state);
+            if (_posted)
+                return;
+            _posted = true;
+            afterFirstPost?.Invoke(); // the window closing the instant it has something to show
+        }
     }
 
     private sealed class FakeView : IMeetingView
@@ -57,6 +66,32 @@ public class MeetingViewDriverTests
         Assert.Equal(PipelinePhase.Done, view.Last!.Phase);
         Assert.Equal("decided to ship", view.Last.SummaryText);
         Assert.Equal(0, server.TriggerCount);
+    }
+
+    [Fact]
+    public async Task ClosingTheWindowMidPoll_StopsCleanly_WithoutRenderingAFailure()
+    {
+        // The other half of the past-meeting lifetime (B9): the operator closes the window
+        // while the poll is still riding a running pipeline. The shell cancels the token on
+        // close, and the loop must stop QUIETLY — a "couldn't reach the recorder" splashed
+        // into a window the user just closed is a lie about a deliberate act. This is also
+        // the only observable the tray's never-dispose-the-source rule protects: the loop
+        // holds this token until it returns here, so anything that invalidated it earlier
+        // would surface as a failure render instead of a clean stop.
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            pollScript: [Running("strip")]); // the last entry repeats: never terminal
+        using var http = new HttpClient();
+        var view = new FakeView();
+        using var closing = new CancellationTokenSource();
+
+        // Cancel the moment the first poll has been rendered — the window closing mid-flight.
+        var cancelOnFirstRender = new InlineSyncContext(() => closing.Cancel());
+
+        await MeetingViewDriver.DriveAsync(
+            Resumer(server, http, "meet-open"), view, cancelOnFirstRender, closing.Token);
+
+        Assert.True(view.RenderCount > 0, "nothing was ever rendered, so this proves nothing");
+        Assert.NotEqual(PipelinePhase.Failed, view.Last!.Phase);
     }
 
     [Fact]
