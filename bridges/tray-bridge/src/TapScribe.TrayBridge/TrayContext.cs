@@ -52,8 +52,9 @@ internal sealed class TrayContext : ApplicationContext
     private CaptureOrchestrator? _orchestrator;
     private IAudioDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
     private string? _sessionId; // the detached session the running meeting taps into
-    // The in-flight End/Resume flow's cancellation, published for Quit. Whoever takes it
-    // out of this field owns it, so a Cancel can never race the Dispose.
+    // The in-flight End/Resume flow's cancellation, published for Quit and cleared when the
+    // flow ends. Never disposed — see the construction site for why that is the simplification
+    // and not the leak.
     private CancellationTokenSource? _flowCancellation;
     // The in-flight StartAsync, if any. A meeting exists from the operator's first click,
     // not from the moment it is published, and Quit has to be able to see that window —
@@ -461,11 +462,12 @@ internal sealed class TrayContext : ApplicationContext
         controller.Updated += view => ui.Post(_ => RenderPipeline(view), null);
         controller.OperatorNotice += message => ui.Post(_ => ShowBalloon("Meeting", message), null);
 
-        // The flow's poll loop runs on an uncancellable path today: Quit ends the message
-        // loop and leaves it polling into a dead UI. Publish a source Quit can cancel —
-        // the same seam OpenPastMeeting already owns for its window. Ownership is the
-        // field: whoever takes the CTS out of it is responsible for it, so Quit's Cancel
-        // and this method's Dispose can never race.
+        // The flow's poll loop would otherwise run uncancellable: Quit ends the message loop
+        // and leaves it polling into a dead UI. Publish a source Quit can cancel. Never
+        // disposed, deliberately — a CancellationTokenSource with no linked source, no timer
+        // and no observed WaitHandle holds nothing unmanaged, so Dispose is an optimisation,
+        // while Cancel-after-Dispose throws. Not disposing removes the race rather than
+        // arbitrating it.
         var cancellation = new CancellationTokenSource();
         lock (_gate)
             _flowCancellation = cancellation;
@@ -489,15 +491,9 @@ internal sealed class TrayContext : ApplicationContext
         finally
         {
             _deps.Stores.ClearState();
-            bool owned;
             lock (_gate)
-            {
-                owned = ReferenceEquals(_flowCancellation, cancellation);
-                if (owned)
-                    _flowCancellation = null;
-            }
-            if (owned)
-                cancellation.Dispose(); // Quit didn't take it, so disposing it can't race its Cancel
+                if (ReferenceEquals(_flowCancellation, cancellation))
+                    _flowCancellation = null; // this flow is over; Quit has nothing left to cancel
             if (!handled)
                 // An exception OUTSIDE the filter above is escaping this fire-and-forget
                 // task. Nobody observes it, and both menu items are disabled with the header
@@ -614,46 +610,34 @@ internal sealed class TrayContext : ApplicationContext
             settings = _settings;
 
         var form = new MeetingForm();
-        // Two parties hold this cancellation — the window (which cancels on close) and the
-        // poll loop (which reads its token) — and the LAST one out disposes it. Closing the
-        // window used to Cancel and Dispose in the same breath, while the loop was still
-        // inside DriveAsync: it survived only because Cancel ran first, and an
-        // ObjectDisposedException from any later touch of the token isn't in
-        // MeetingViewDriver's catch filter, so it would escape this fire-and-forget task
-        // silently. SharedCancellation owns the counting.
-        var cancellation = new SharedCancellation(holders: 2);
+        // Never disposed, deliberately. Two parties hold it — the window (which cancels on
+        // close) and the poll loop (which reads its token until it finishes) — and their
+        // lifetimes end in either order, so ANY disposal point is wrong for one of them:
+        // dispose on close and the loop holds a dead source, dispose when the loop ends and a
+        // later close calls Cancel on a disposed one, which throws. A CancellationTokenSource
+        // with no linked source, no timer and no observed WaitHandle holds nothing unmanaged,
+        // so there is nothing to release and the question does not arise.
+        var cancellation = new CancellationTokenSource();
         form.FormClosed += (_, _) =>
         {
             cancellation.Cancel(); // stop the poll loop the instant the user closes the window
-            cancellation.Release();
             form.Dispose();
         };
         form.Show();
-        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cancellation.Token,
-            () => cancellation.Release());
+        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cancellation.Token);
     }
 
     private async Task OpenPastMeetingAsync(BridgeSettings settings, string sessionId,
-        MeetingForm form, SynchronizationContext ui, CancellationToken cancellationToken,
-        Action release)
+        MeetingForm form, SynchronizationContext ui, CancellationToken cancellationToken)
     {
-        try
-        {
-            using var control = new ControlClient(
-                settings.Host, settings.Port, settings.Tls, settings.Token,
-                allowSelfSignedCert: settings.AllowSelfSignedCert);
-            var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
-            // The render-marshaling + ride-to-summary lives in the cross-platform-tested Core
-            // MeetingViewDriver (the form is the IMeetingView); this shell just supplies the
-            // ControlClient, the WinForms SynchronizationContext, and the window.
-            await MeetingViewDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            // Done with the token — hand the source back on the UI thread, where the
-            // window's own release runs, so the two can't race to dispose it.
-            ui.Post(_ => release(), null);
-        }
+        using var control = new ControlClient(
+            settings.Host, settings.Port, settings.Tls, settings.Token,
+            allowSelfSignedCert: settings.AllowSelfSignedCert);
+        var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
+        // The render-marshaling + ride-to-summary lives in the cross-platform-tested Core
+        // MeetingViewDriver (the form is the IMeetingView); this shell just supplies the
+        // ControlClient, the WinForms SynchronizationContext, and the window.
+        await MeetingViewDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
     }
 
     private void FailPipeline(string reason, string? stage = null)
@@ -713,9 +697,7 @@ internal sealed class TrayContext : ApplicationContext
     {
         // Stop an in-flight End/Resume flow first: ExitThread below kills the message loop
         // it renders into, so an uncancelled poll loop would keep talking to the Recorder
-        // and posting into a dead context for as long as the process lingers. Taking it out
-        // of the field makes this the owner; the flow then leaves it alone (and we don't
-        // dispose it — the process is on its way out).
+        // and posting into a dead context for as long as the process lingers.
         CancellationTokenSource? flow;
         Task? start;
         lock (_gate)
