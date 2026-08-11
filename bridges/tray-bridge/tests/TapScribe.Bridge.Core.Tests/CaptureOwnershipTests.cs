@@ -18,6 +18,40 @@ namespace TapScribe.Bridge.Core.Tests;
 public class CaptureOwnershipTests
 {
     [Fact]
+    public void StartAll_WhenAnUnfilteredThrowEscapes_ReleasesEveryCaptureAndSession()
+    {
+        // The path the "releases on all its throw paths" claim was false for. TapSession's
+        // ctor validates the capture format and the gate tuning BEFORE it starts the device,
+        // so an out-of-range gate raises an ArgumentOutOfRangeException — which the
+        // per-device filter deliberately does not catch, because it is not a skippable
+        // device failure. Everything opened by then had no owner left: an endpoint held
+        // "in use" for the process lifetime, and a session already begun still streaming
+        // with nothing able to stop it.
+        var transport = new FakeTapTransport();
+        var begun = new FakeAudioCapture(RecorderFormat);
+        var doomed = new FakeAudioCapture(RecorderFormat);
+        var untouched = new FakeAudioCapture(RecorderFormat);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => CaptureOrchestrator.StartAll(
+            [
+                Spec(begun, "mic"),
+                Spec(doomed, "system", gate: new GateOptions { OpenThreshold = -1 }),
+                Spec(untouched, "line-in"),
+            ],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            FastGate(), FastStream(), transport.Create));
+
+        // The first pipeline really did begin, so the unwind below is a statement about a
+        // path that was taken.
+        Assert.True(begun.Started, "no session ever began, so this proves nothing");
+
+        Assert.True(begun.Stopped, "a session that had begun was left running");
+        Assert.True(begun.Disposed, "a session that had begun was never released");
+        Assert.True(doomed.Disposed, "the capture whose pipeline threw was stranded");
+        Assert.True(untouched.Disposed, "a capture the loop never reached was stranded");
+    }
+
+    [Fact]
     public void StartAll_WhenItRejectsDuplicateIdentities_ReleasesEveryCapture()
     {
         var transport = new FakeTapTransport();

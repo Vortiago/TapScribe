@@ -250,10 +250,10 @@ internal sealed class TrayContext : ApplicationContext
             // a balloon while the header kept claiming a full house. Touched on the UI
             // thread only (both callbacks marshal first), which is the tally's contract.
             var tally = new DeviceTally(specs.Count);
-            // Ownership transfers AT THE CALL, not on its return: StartAll releases every
-            // capture on each of its own throw paths (a duplicate identity, or no device
-            // starting at all), so clearing this afterwards would leave the finally below
-            // disposing them a second time on exactly those paths.
+            // Ownership transfers AT THE CALL, not on its return: StartAll releases
+            // everything it was given on every exit that isn't a handed-back orchestrator —
+            // as one total rule, not a list of paths — so clearing this afterwards would
+            // leave the finally below disposing them a second time whenever it throws.
             unowned = null;
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 specs,

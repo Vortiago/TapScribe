@@ -31,6 +31,11 @@ public sealed record PipelineSpec(IAudioCapture Capture, TapConnectionOptions Op
 /// </summary>
 public sealed class CaptureOrchestrator : IAsyncDisposable
 {
+    /// <summary>Backstop on unwinding a failed <see cref="StartAll"/>. Nothing is draining on
+    /// that path, so this is a guard against a device hanging in teardown, not a wait the
+    /// abandon expects to pay.</summary>
+    private static readonly TimeSpan AbandonTeardownCap = TimeSpan.FromSeconds(5);
+
     // Running sessions keyed by their pipeline identity — the per-identity channel a
     // runtime re-tune fans out over (and that the later per-device-tuning slice keys
     // its updates by). Identities are unique here: StartAll rejects collisions up front.
@@ -59,68 +64,96 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(onConnected);
         ArgumentNullException.ThrowIfNull(onFailed);
 
-        // Reject colliding identities before opening any device. The Recorder buckets
-        // WAVs and attribution by the sanitised identity (safe_name(identity)[:10]),
-        // so two pipelines under one identity cross-attribute into one speaker. The
-        // core can't dedupe meaningfully, so it fails loudly here rather than record a
-        // muddled session. (Raw equality only; a collision that survives only after the
-        // Recorder's 10-char truncation is a caller responsibility — see README.)
-        var duplicate = specs
-            .GroupBy(s => s.Options.Identity, StringComparer.Ordinal)
-            .FirstOrDefault(g => g.Count() > 1);
-        if (duplicate is not null)
-        {
-            // Release the captures we are refusing. The caller opened them and handed
-            // ownership over with the specs (see PipelineSpec); it has no handle left to
-            // dispose them by, so a bare throw here strands every one of them for the
-            // process lifetime. Dispose is contract-bound not to throw, so no guard.
-            foreach (PipelineSpec spec in specs)
-                spec.Capture.Dispose();
-            throw new ArgumentException(
-                $"Duplicate pipeline identity '{duplicate.Key}'. Each device must stream " +
-                "under a distinct identity.", nameof(specs));
-        }
-
         var sessions = new Dictionary<string, TapSession>(specs.Count, StringComparer.Ordinal);
-        foreach (PipelineSpec spec in specs)
+        int considered = 0;   // specs whose capture now has an owner: a session, or the catch below
+        bool handedOver = false;
+        try
         {
-            string identity = spec.Options.Identity;
-            try
+            // Reject colliding identities before opening any device. The Recorder buckets
+            // WAVs and attribution by the sanitised identity (safe_name(identity)[:10]),
+            // so two pipelines under one identity cross-attribute into one speaker. The
+            // core can't dedupe meaningfully, so it fails loudly here rather than record a
+            // muddled session. (Raw equality only; a collision that survives only after the
+            // Recorder's 10-char truncation is a caller responsibility — see README.)
+            var duplicate = specs
+                .GroupBy(s => s.Options.Identity, StringComparer.Ordinal)
+                .FirstOrDefault(g => g.Count() > 1);
+            if (duplicate is not null)
+                throw new ArgumentException(
+                    $"Duplicate pipeline identity '{duplicate.Key}'. Each device must stream " +
+                    "under a distinct identity.", nameof(specs));
+
+            foreach (PipelineSpec spec in specs)
             {
-                sessions[identity] = TapSession.Begin(
-                    spec.Capture, spec.Options,
-                    onConnected: () => onConnected(identity),
-                    onFailed: ex => onFailed(identity, ex),
-                    spec.Gate ?? gate, stream, connectionFactory);
+                string identity = spec.Options.Identity;
+                try
+                {
+                    sessions[identity] = TapSession.Begin(
+                        spec.Capture, spec.Options,
+                        onConnected: () => onConnected(identity),
+                        onFailed: ex => onFailed(identity, ex),
+                        spec.Gate ?? gate, stream, connectionFactory);
+                }
+                catch (Exception ex) when (ex is COMException or InvalidOperationException)
+                {
+                    // A device that failed to OPEN is skipped, not fatal: the remaining ones
+                    // still start, so one dead device doesn't sink the whole meeting.
+                    // TapSession.Begin rethrows WITHOUT disposing the capture — it only
+                    // unsubscribes — so release it here and surface the failure tagged by
+                    // identity. The filter is what capture.Start throws (WASAPI's
+                    // COMException, or InvalidOperationException for an already-started or
+                    // closed device); anything else is NOT a skippable device failure and
+                    // goes to the unwind below. Dispose is contract-bound not to throw.
+                    spec.Capture.Dispose();
+                    onFailed(identity, ex);
+                }
+                considered++;
             }
-            catch (Exception ex) when (ex is COMException or InvalidOperationException)
-            {
-                // TapSession.Begin opens the device in its ctor (capture.Start) and
-                // rethrows WITHOUT disposing the capture — it only unsubscribes. Dispose
-                // it here so a device that fails to open can't leak, then surface the
-                // failure tagged by identity. Best-effort: the remaining devices still
-                // start, so one dead device doesn't sink the whole meeting. The filter is
-                // what capture.Start throws — WASAPI's COMException, or
-                // InvalidOperationException for an already-started/closed device — so an
-                // unexpected exception still propagates rather than being swallowed.
-                // Dispose is contract-bound not to throw (the WASAPI backend swallows COM
-                // teardown errors internally), so it needs no guard of its own.
-                spec.Capture.Dispose();
-                onFailed(identity, ex);
-            }
+
+            // Zero pipelines is not a meeting. The per-device catch above is best-effort so
+            // one dead device can't sink the others — but when EVERY device dies, handing
+            // back an empty orchestrator lets the caller publish it as a live meeting:
+            // "End meeting" goes live and the status line claims 0/N devices are streaming
+            // while nothing is recorded. Refuse instead, the symmetric half of the caller's
+            // own refusal when no device could be OPENED.
+            if (sessions.Count == 0)
+                throw new InvalidOperationException("No selected device could be started.");
+
+            handedOver = true;
+            return new CaptureOrchestrator(sessions);
         }
+        finally
+        {
+            // ONE total rule: unless the orchestrator was handed back, nothing this method
+            // was given survives it. Stated as "every exit that isn't the success" rather
+            // than as a list of the throws that exist today, because that list is not
+            // knowable from here — TapSession's ctor validates the capture format and the
+            // gate tuning BEFORE it starts the device, so an out-of-range gate raises an
+            // ArgumentOutOfRangeException that the per-device filter above deliberately does
+            // not catch. The caller handed ownership over with the specs (see PipelineSpec)
+            // and has no handle left to release them by, so anything left here is leaked for
+            // the process lifetime: an endpoint held "in use", and any session already begun
+            // still streaming PCM with nothing able to stop it.
+            if (!handedOver)
+                Abandon(specs, considered, sessions);
+        }
+    }
 
-        // Zero pipelines is not a meeting. The per-device catch above is best-effort so
-        // one dead device can't sink the others — but when EVERY device dies, handing
-        // back an empty orchestrator lets the caller publish it as a live meeting:
-        // "End meeting" goes live and the status line claims 0/N devices are streaming
-        // while nothing is recorded. Refuse instead, the symmetric half of the caller's
-        // own refusal when no device could be OPENED. (Every capture was already
-        // released by the catch, so nothing leaks past this throw.)
-        if (sessions.Count == 0)
-            throw new InvalidOperationException("No selected device could be started.");
+    // Release everything a failed StartAll is still holding: the captures of specs it never
+    // got to (the one it threw on, and every one after it), then the sessions that did begin.
+    private static void Abandon(
+        IReadOnlyList<PipelineSpec> specs, int considered, Dictionary<string, TapSession> sessions)
+    {
+        for (int i = considered; i < specs.Count; i++)
+            specs[i].Capture.Dispose();
 
-        return new CaptureOrchestrator(sessions);
+        // Bounded, and in practice synchronous: no audio has reached these sessions yet, so
+        // none has a draining utterance to await — the cap is a backstop against a device
+        // that hangs in teardown, not a wait this path expects to pay. DisposeAsync stops
+        // and releases each capture, which is the whole point: a begun session owns its
+        // capture, so disposing the capture directly here would leave the session live.
+        if (sessions.Count > 0)
+            new CaptureOrchestrator(sessions).DisposeAsync().AsTask().Wait(AbandonTeardownCap);
     }
 
     /// <summary>How many pipelines are currently running.</summary>
