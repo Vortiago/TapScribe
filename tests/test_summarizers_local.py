@@ -403,16 +403,29 @@ def test_mlx_lm_upstream_contract():
     pytest.importorskip("mlx_lm")
     import inspect
 
-    from mlx_lm import generate, load
+    from mlx_lm import generate, load, stream_generate
 
     assert callable(load), "mlx_lm.load is the model loader the adapter calls"
     assert callable(generate), "mlx_lm.generate is the text-gen entry point the adapter calls"
-    params = set(inspect.signature(generate).parameters)
+    signature = inspect.signature(generate)
+    params = set(signature.parameters)
     assert {"model", "tokenizer"} <= params, (
         f"mlx_lm.generate(model, tokenizer, …) signature changed; saw {sorted(params)}"
     )
     assert "prompt" in params, f"mlx_lm.generate lost the prompt kwarg; saw {sorted(params)}"
-    assert "max_tokens" in params, f"mlx_lm.generate lost the max_tokens kwarg; saw {sorted(params)}"
+
+    # `max_tokens` is declared on stream_generate, and reaches it through
+    # generate's **kwargs. Both halves are load-bearing for the adapter's
+    # `generate(..., max_tokens=N)` call: drop the forwarding and the cap is
+    # silently ignored, leaving every summary truncated at stream_generate's
+    # 256-token default.
+    assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()), (
+        f"mlx_lm.generate stopped forwarding **kwargs to stream_generate; saw {sorted(params)}"
+    )
+    stream_params = set(inspect.signature(stream_generate).parameters)
+    assert "max_tokens" in stream_params, (
+        f"mlx_lm.stream_generate lost the max_tokens kwarg; saw {sorted(stream_params)}"
+    )
 
 
 def test_llama_cpp_upstream_contract():
