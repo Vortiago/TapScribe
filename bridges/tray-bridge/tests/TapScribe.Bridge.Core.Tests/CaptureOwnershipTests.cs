@@ -17,9 +17,6 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 public class CaptureOwnershipTests
 {
-    private static PipelineSpec Spec(IAudioCapture capture, string identity) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = identity });
-
     [Fact]
     public void StartAll_WhenItRejectsDuplicateIdentities_ReleasesEveryCapture()
     {

@@ -43,9 +43,10 @@ namespace TapScribe.TrayBridge.Tests;
 /// </summary>
 internal sealed class StaShell : IDisposable
 {
-    /// <summary>Bound on any single marshalled call. Generous — it is a backstop against a
-    /// hang, not a timing assertion.</summary>
-    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>Bound on anything this harness or a test using it waits for. Generous — it is
+    /// a backstop against a hang, not a timing assertion, and one value so a test cannot wait
+    /// longer for the shell than the harness will wait for the thread.</summary>
+    public static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(30);
 
     private readonly BlockingCollection<Action> _work = new();
     private readonly QueueingContext _context = new();
@@ -178,9 +179,10 @@ internal sealed class StaShell : IDisposable
     /// <summary>How many callbacks the shell has posted and not yet had drained.</summary>
     public int Pending => _context.Pending;
 
-    /// <summary>Make the Nth (1-based) <c>Post</c> from here on throw, once — the injection
-    /// point for "something after the meeting was published failed".</summary>
-    public void ThrowOnPost(int ordinal) => _context.ThrowOnPost = ordinal;
+    /// <summary>Make the next <c>Post</c> throw, once — the injection point for "something
+    /// after the meeting was published failed". Once only: the shell has to survive one
+    /// failure, not be crippled by every subsequent post failing too.</summary>
+    public void ThrowOnNextPost() => _context.ThrowOnNextPost = true;
 
     /// <summary>Spin until <paramref name="predicate"/> holds. Bounded, and it polls a real
     /// state change rather than sleeping for an interval — the same shape as the core
@@ -238,9 +240,8 @@ internal sealed class StaShell : IDisposable
     {
         private readonly object _lock = new();
         private readonly List<(SendOrPostCallback Callback, object? State)> _posted = [];
-        private int _posts;
 
-        public int ThrowOnPost { get; set; }
+        public bool ThrowOnNextPost { get; set; }
 
         public int Pending
         {
@@ -251,10 +252,10 @@ internal sealed class StaShell : IDisposable
         {
             lock (_lock)
             {
-                if (++_posts == ThrowOnPost)
+                if (ThrowOnNextPost)
                 {
-                    ThrowOnPost = 0; // once only — the shell must survive one failure, not be crippled
-                    throw new InvalidOperationException($"post #{_posts} failed");
+                    ThrowOnNextPost = false;
+                    throw new InvalidOperationException("the post failed");
                 }
                 _posted.Add((d, state));
             }

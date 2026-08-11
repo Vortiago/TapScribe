@@ -42,13 +42,14 @@ internal sealed class NotifyIconIndicator : ITrayIndicator
     private readonly TrayIcons _icons = new();
     private readonly NotifyIcon _icon;
 
-    public NotifyIconIndicator() =>
-        _icon = new NotifyIcon
-        {
-            Icon = _icons[TrayIcon.Idle],
-            Text = "TapScribe — idle",
-            Visible = true,
-        };
+    public NotifyIconIndicator()
+    {
+        _icon = new NotifyIcon { Visible = true };
+        // The idle icon and tooltip come from the same StatusView every later change does,
+        // rather than a hand-copy of its output that could drift from it (and that bypassed
+        // the tooltip cap below).
+        Show(StatusView.For(new TrayStatus.Idle()));
+    }
 
     public void Attach(ContextMenuStrip menu) => _icon.ContextMenuStrip = menu;
 

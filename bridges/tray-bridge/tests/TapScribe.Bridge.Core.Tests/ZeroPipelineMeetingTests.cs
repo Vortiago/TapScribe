@@ -17,9 +17,6 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 public class ZeroPipelineMeetingTests
 {
-    private static PipelineSpec Spec(IAudioCapture capture, string identity) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = identity });
-
     [Fact]
     public void StartAll_WhenEveryDeviceFailsToStart_ThrowsInsteadOfReturningADeadMeeting()
     {

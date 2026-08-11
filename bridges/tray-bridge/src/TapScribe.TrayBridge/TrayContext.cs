@@ -64,6 +64,7 @@ internal sealed class TrayContext : ApplicationContext
     // instead of publishing it into a shell whose message loop is gone.
     private bool _quitting;
     private DateTimeOffset _startedAt; // wall-clock start of the running meeting, for Past-meetings history (#168)
+    private bool _uiReleased; // Quit disposes, and then so does whoever owns the context
 
     public TrayContext()
         : this(BridgeSettingsStore.Load(), TrayDependencies.Production)
@@ -715,19 +716,12 @@ internal sealed class TrayContext : ApplicationContext
         // Recorder, all the way until the process died. Bounded: the mint has its own 20 s
         // timeout, and Quit must not hang behind a Recorder that accepted the connection
         // and went quiet. Past the bound the start is abandoned exactly as it was before.
+        // Waited through the AsyncWaitHandle rather than Task.Wait: this only needs the start
+        // to have SETTLED, and how it settled is not Quit's business — a start that faulted
+        // never published a meeting, so there is nothing here to tear down either way. The
+        // handle never observes the fault, so there is no AggregateException to discard.
         if (start is { IsCompleted: false })
-        {
-            try
-            {
-                start.Wait(StartSettleTimeout);
-            }
-            catch (AggregateException)
-            {
-                // StartAsync faulted with something outside its own catch filter. The
-                // meeting was never published, so there is nothing here left to tear down;
-                // what is lost is the failure's detail, on a path that is exiting anyway.
-            }
-        }
+            ((IAsyncResult)start).AsyncWaitHandle.WaitOne(StartSettleTimeout);
 
         (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator, _, _) = TakeMeeting();
 
@@ -750,13 +744,11 @@ internal sealed class TrayContext : ApplicationContext
     /// entire menu when disposed is the bug this branch fixed, and leaving the release only
     /// in Quit would leave the same hole one level up.
     /// </summary>
-    private bool _uiReleased;
-
     protected override void Dispose(bool disposing)
     {
         if (disposing && !_uiReleased)
         {
-            _uiReleased = true; // Quit disposes, and then so does whoever owns the context
+            _uiReleased = true;
             // NotifyIcon.Dispose does NOT dispose the ContextMenuStrip it renders, so the
             // whole menu outlived the tray. A ToolStrip disposes the items it owns, so take
             // the Past-meetings drop-down (itself a ToolStrip) explicitly first — its LAST

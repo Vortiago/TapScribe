@@ -19,8 +19,6 @@ namespace TapScribe.TrayBridge.Tests;
 /// </summary>
 public class TrayStartTests
 {
-    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(30);
-
     [Fact]
     public void Start_WhenOpeningADeviceThrowsUnexpectedly_ReleasesTheCapturesAlreadyOpened()
     {
@@ -36,7 +34,7 @@ public class TrayStartTests
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
         Task start = tray.StartTask!;
-        var failure = Assert.Throws<AggregateException>(() => start.Wait(Settle));
+        var failure = Assert.Throws<AggregateException>(() => start.Wait(StaShell.CallTimeout));
 
         // It really did escape the shell's own classification — that is what leaves the
         // finally as the captures' only owner.
@@ -92,7 +90,7 @@ public class TrayStartTests
 
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(Settle), "the start never settled");
+        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
         _ = sta.Drain();
 
         // The guard: both devices really were opened and handed over, so StartAll was
@@ -120,12 +118,12 @@ public class TrayStartTests
         // meeting. That balloon is the first thing it posts, and it is exactly the window
         // B6 lives in.
         TrayContext tray = sta.Build(harness);
-        sta.ThrowOnPost(1);
+        sta.ThrowOnNextPost();
 
         sta.Run(tray.Start);
         try
         {
-            tray.StartTask!.Wait(Settle);
+            tray.StartTask!.Wait(StaShell.CallTimeout);
         }
         catch (AggregateException)
         {
@@ -160,7 +158,7 @@ public class TrayStartTests
 
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(Settle), "the start never settled");
+        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
         _ = sta.Drain();
 
         Assert.True(tray.StartItem.Enabled, "Start stayed greyed out after a failed start");

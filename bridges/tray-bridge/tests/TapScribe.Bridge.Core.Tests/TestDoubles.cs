@@ -77,6 +77,14 @@ internal static class Fixtures
 
     public static byte[] Loud(int frames) => Pcm(8000, frames);
     public static byte[] Silence(int frames) => Pcm(0, frames);
+
+    /// <summary>One pipeline to start: a capture under an identity, with the display name
+    /// defaulting to that identity and no per-device gate. Every orchestrator test needs this
+    /// and each had grown its own copy; the two that need more (a distinct display name, a
+    /// per-device gate) pass them.</summary>
+    public static PipelineSpec Spec(
+        IAudioCapture capture, string identity, string? name = null, GateOptions? gate = null) =>
+        new(capture, new TapConnectionOptions { Identity = identity, Name = name ?? identity }, gate);
 }
 
 /// <summary>A scripted capture: raises <see cref="DataAvailable"/> on demand via

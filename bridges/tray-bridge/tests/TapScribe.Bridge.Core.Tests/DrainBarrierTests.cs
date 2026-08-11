@@ -31,9 +31,6 @@ public class DrainBarrierTests
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
     private static Task Immediate(CancellationToken _) => Task.CompletedTask;
 
-    private static PipelineSpec Spec(IAudioCapture capture, string identity) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = identity });
-
     // A stream tuning whose DrainBudget is far longer than any test runs: the drain can
     // only be completed by the test's ReleaseDrain(), never by its own budget timing out,
     // so every assertion below is causal (a released TCS), not a duration.

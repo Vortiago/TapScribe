@@ -20,7 +20,7 @@ public class DeviceTallyTests
         tally.Connected("mic");
         tally.Connected("system");
 
-        TrayStatus status = tally.Dropped("system"); // the loopback endpoint goes away
+        TrayStatus? status = tally.Dropped("system"); // the loopback endpoint goes away
 
         var error = Assert.IsType<TrayStatus.Error>(status);
         Assert.Contains("system", error.Reason, StringComparison.Ordinal); // which device stopped
@@ -62,7 +62,7 @@ public class DeviceTallyTests
         tally.Connected("system");
         tally.Dropped("system");
 
-        TrayStatus status = tally.Connected("system");
+        TrayStatus? status = tally.Connected("system");
 
         var streaming = Assert.IsType<TrayStatus.Streaming>(status);
         Assert.Equal(2, streaming.Connected);

@@ -276,10 +276,14 @@ internal sealed class TrayHarness
 
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
 
-    /// <summary>Connection settings pointing at a port nothing listens on: a loopback
-    /// connect there is refused immediately, so any request the shell DOES make fails fast
-    /// and deterministically — no server, no timeout, no wall-clock in any assertion.</summary>
-    public BridgeSettings Settings { get; init; } = new()
+    public BridgeSettings Settings { get; init; } = DefaultSettings();
+
+    /// <summary>The settings every tray test starts from, in ONE spelling so a variant can
+    /// change the one field it cares about instead of re-typing the rest. They point at a port
+    /// nothing listens on: a loopback connect there is refused immediately, so any request the
+    /// shell DOES make fails fast and deterministically — no server, no timeout, no wall-clock
+    /// in any assertion.</summary>
+    public static BridgeSettings DefaultSettings() => new()
     {
         Host = "127.0.0.1",
         Port = 9, // discard/unassigned: connection refused, instantly

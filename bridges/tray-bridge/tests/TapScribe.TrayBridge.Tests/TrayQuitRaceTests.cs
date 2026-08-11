@@ -18,8 +18,6 @@ namespace TapScribe.TrayBridge.Tests;
 /// </summary>
 public class TrayQuitRaceTests
 {
-    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(30);
-
     [Fact]
     public void Quit_WhileAStartIsInFlight_TearsThatMeetingDown_InsteadOfPublishingIt()
     {
@@ -30,7 +28,7 @@ public class TrayQuitRaceTests
 
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
-        Assert.True(harness.MintReached.Wait(Settle), "the start never reached the session mint");
+        Assert.True(harness.MintReached.Wait(StaShell.CallTimeout), "the start never reached the session mint");
 
         // Quit occupies the shell thread while it waits for the start to settle, so drive it
         // from here and let the mint answer only once Quit has claimed the shell.
@@ -38,8 +36,8 @@ public class TrayQuitRaceTests
         StaShell.SpinUntil(() => tray.IsQuitting, "Quit to claim the shell");
         harness.CompleteMint();
 
-        Assert.True(quitting.Wait(Settle), "Quit never returned");
-        Assert.True(tray.StartTask!.Wait(Settle), "the start never settled");
+        Assert.True(quitting.Wait(StaShell.CallTimeout), "Quit never returned");
+        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
 
         // The start built a real meeting (both devices opened and started) and then, seeing
         // the shell claimed, tore it down itself rather than handing it to nobody.
@@ -65,14 +63,14 @@ public class TrayQuitRaceTests
 
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
-        Assert.True(harness.MintReached.Wait(Settle), "the start never reached the session mint");
+        Assert.True(harness.MintReached.Wait(StaShell.CallTimeout), "the start never reached the session mint");
         Task first = tray.StartTask!;
 
         sta.Run(tray.Start); // a second click, mid-mint
 
         Assert.Same(first, tray.StartTask); // no second start was ever launched
         harness.CompleteMint();
-        Assert.True(first.Wait(Settle), "the start never settled");
+        Assert.True(first.Wait(StaShell.CallTimeout), "the start never settled");
 
         sta.Run(tray.Quit);
     }

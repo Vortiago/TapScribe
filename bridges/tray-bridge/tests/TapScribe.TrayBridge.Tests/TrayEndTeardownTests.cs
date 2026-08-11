@@ -18,24 +18,20 @@ namespace TapScribe.TrayBridge.Tests;
 /// </summary>
 public class TrayEndTeardownTests
 {
-    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(30);
-
-    // Record-only (ProcessOnEnd == false): End drains and closes the taps but fires no
-    // pipeline, so these tests exercise the teardown with no Recorder in the picture at all.
-    private static BridgeSettings RecordOnly() => new()
+    // Record-only: End drains and closes the taps but fires no pipeline, so these tests
+    // exercise the teardown with no Recorder in the picture at all.
+    private static BridgeSettings RecordOnly()
     {
-        Host = "127.0.0.1",
-        Port = 9,
-        Identity = "alice",
-        Name = "Alice",
-        ProcessOnEnd = false,
-    };
+        BridgeSettings settings = TrayHarness.DefaultSettings();
+        settings.ProcessOnEnd = false;
+        return settings;
+    }
 
     private static TrayContext StartMeeting(StaShell sta, TrayHarness harness)
     {
         TrayContext tray = sta.Build(harness);
         sta.Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(Settle), "the meeting never started");
+        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the meeting never started");
         _ = sta.Drain();
         Assert.True(tray.EndItem.Enabled, "the meeting was never published as running");
         return tray;
@@ -113,7 +109,7 @@ public class TrayEndTeardownTests
 
         TrayContext tray = StartMeeting(sta, harness);
         sta.Run(tray.End);
-        Assert.True(slowMic.DisposeReached.Wait(Settle), "the End drain never reached the device teardown");
+        Assert.True(slowMic.DisposeReached.Wait(StaShell.CallTimeout), "the End drain never reached the device teardown");
         _ = sta.Drain(); // the "ending" render, while the tray is still alive
 
         sta.Run(tray.Quit);       // cancelling the in-flight flow is Quit's first act

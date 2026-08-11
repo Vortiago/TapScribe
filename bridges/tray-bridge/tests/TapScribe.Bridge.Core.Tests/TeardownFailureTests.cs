@@ -22,9 +22,6 @@ public class TeardownFailureTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
 
-    private static PipelineSpec Spec(IAudioCapture capture, string identity) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = identity });
-
     [Fact]
     public async Task EndMeetingAsync_WhenStoppingAnInvalidatedDeviceThrows_StillReleasesEveryDevice()
     {

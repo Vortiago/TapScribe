@@ -17,10 +17,6 @@ public class CaptureOrchestratorTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
 
-    private static PipelineSpec Spec(
-        IAudioCapture capture, string identity, string name = "", GateOptions? gate = null) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = name }, gate);
-
     [Fact]
     public async Task StartAll_WithOneSpec_StreamsUnderItsIdentity()
     {

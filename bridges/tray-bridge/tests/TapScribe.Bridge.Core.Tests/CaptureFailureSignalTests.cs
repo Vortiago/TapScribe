@@ -19,9 +19,6 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 public class CaptureFailureSignalTests
 {
-    private static PipelineSpec Spec(IAudioCapture capture, string identity) =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = "" }, null);
-
     [Fact]
     public async Task CaptureFailingMidStream_SurfacesThroughOnFailed_TaggedByIdentity()
     {
