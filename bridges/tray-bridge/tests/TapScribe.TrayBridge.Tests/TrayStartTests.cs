@@ -1,4 +1,5 @@
 using TapScribe.Bridge.Core;
+using TapScribe.Bridge.Windows;
 
 namespace TapScribe.TrayBridge.Tests;
 
@@ -59,6 +60,53 @@ public class TrayStartTests
         // And released in the right order: the enumerator handed its endpoint to the capture,
         // so it has to outlive it.
         Assert.Equal(["capture", "enumerator"], harness.Enumerator.TeardownOrder);
+    }
+
+    [Fact]
+    public void Start_WhenTheOrchestratorRefusesTheSpecs_ReleasesEachCaptureExactlyOnce()
+    {
+        // The real B2 trigger, end to end. Resolve dedupes the RAW identity, so a blank one
+        // and one equal to the base identity look distinct and pass; ToTapOptions then
+        // substitutes the base identity for the blank one and they collide in StartAll, which
+        // refuses the whole set. Two owners would both release here — the core (which
+        // releases what it refuses) and the shell's finally — on a backend that is
+        // contract-bound to be throw-free but nowhere promised to be idempotent.
+        using var sta = new StaShell();
+        var harness = new TrayHarness
+        {
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = 9,
+                Identity = "alice",
+                Name = "Alice",
+                Devices =
+                [
+                    new DeviceSelection.FollowDefault(DeviceFlow.Capture, "", ""),
+                    new DeviceSelection.FollowDefault(DeviceFlow.Render, "alice", "alice"),
+                ],
+            },
+        };
+        harness.Enumerator.Add("mic", DeviceFlow.Capture);
+        harness.Enumerator.Add("system", DeviceFlow.Render);
+
+        TrayContext tray = sta.Build(harness);
+        sta.Run(tray.Start);
+        Assert.True(tray.StartTask!.Wait(Settle), "the start never settled");
+        _ = sta.Drain();
+
+        // The guard: both devices really were opened and handed over, so StartAll was
+        // genuinely reached and refused them — otherwise the release count below is a
+        // statement about a path nobody took.
+        Assert.Equal(2, harness.Enumerator.Opened.Count);
+
+        Assert.All(harness.Enumerator.Opened, capture =>
+            Assert.Equal(1, capture.Disposals)); // released once, by the core — not again by the shell
+        Assert.True(harness.Enumerator.Disposed);
+
+        // ...and the operator gets the failure, not a half-started meeting.
+        Assert.True(tray.StartItem.Enabled);
+        Assert.False(tray.EndItem.Enabled);
     }
 
     [Fact]
