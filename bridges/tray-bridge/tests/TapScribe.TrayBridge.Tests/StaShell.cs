@@ -102,6 +102,12 @@ internal sealed class StaShell : IDisposable
             }
             catch (Exception ex)
             {
+                // Deliberately unfiltered, and it swallows NOTHING: the exception is captured
+                // here and rethrown on the caller's thread below with its original stack. It
+                // has to be unfiltered because it stands between a test's arbitrary code and a
+                // background thread whose escapes kill the whole test host with no assertion
+                // and no stack (rule 2) — a filter would be a list of the failures allowed to
+                // be reported, which is exactly backwards.
                 failure = ExceptionDispatchInfo.Capture(ex);
             }
             finally
@@ -167,6 +173,12 @@ internal sealed class StaShell : IDisposable
                     }
                     catch (Exception ex)
                     {
+                        // Also unfiltered, also swallows nothing: these are the SHELL's posted
+                        // callbacks, arbitrary by definition, and they are handed back to the
+                        // caller in the returned list. A callback running after Quit touches
+                        // components Quit disposed — which in production never happens, since
+                        // the message loop is gone by then — so it must not fail the test, but
+                        // it must still be visible to one that cares.
                         errors.Add(ex);
                     }
                 }
@@ -218,7 +230,6 @@ internal sealed class StaShell : IDisposable
                 // What is lost is this teardown error; the objects go unreleased, which the
                 // process exit resolves anyway. Nothing else can reach here: Run rethrows only
                 // what the disposal itself threw, and TrayContext.Dispose is idempotent.
-                _ = ex;
             }
         }
 

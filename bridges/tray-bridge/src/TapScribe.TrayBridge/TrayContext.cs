@@ -239,6 +239,10 @@ internal sealed class TrayContext : ApplicationContext
             }
             if (specs.Count == 0)
                 // Every resolved device failed to OPEN (in use, format unsupported, …).
+                // StartAll would refuse an empty set anyway, so this is kept for its VERB:
+                // opening is the shell's own stage and the core cannot name it, and
+                // "opened" vs "started" is the operator's only clue which of the two
+                // stages their devices died at.
                 throw new InvalidOperationException("No selected device could be opened.");
 
             // Which devices are actually streaming, and what that means for the status line,
