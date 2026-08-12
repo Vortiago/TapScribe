@@ -23,4 +23,21 @@ public class MacOSVersionFloorTests
         Assert.NotNull(refusal);
         Assert.Contains("14.4", refusal);
     }
+
+    // The two-component case is the one that bites: System.Version leaves an unstated
+    // component at -1, so Version(14, 4) sorts BELOW Version(14, 4, 0). A floor compared
+    // naively against a three-component reading of the same release would refuse it.
+    [Theory]
+    [InlineData(14, 4, -1)]  // the floor itself, as macOS spells a .0 release
+    [InlineData(14, 4, 0)]
+    [InlineData(14, 4, 1)]
+    [InlineData(14, 7, 2)]
+    [InlineData(15, 0, 0)]
+    [InlineData(26, 2, 0)]
+    public void Refusal_AtTheFloorAndAbove_IsNone(int major, int minor, int build)
+    {
+        var running = build < 0 ? new Version(major, minor) : new Version(major, minor, build);
+
+        Assert.Null(MacOSVersionFloor.Refusal(running));
+    }
 }

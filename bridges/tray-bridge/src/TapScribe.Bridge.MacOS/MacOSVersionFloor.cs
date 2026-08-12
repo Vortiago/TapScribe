@@ -15,5 +15,14 @@ public static class MacOSVersionFloor
     /// Why <paramref name="running"/> cannot run this Bridge, or <c>null</c> when it can.
     /// </summary>
     public static string? Refusal(Version running) =>
-        $"TapScribe needs macOS {Minimum} or newer (this Mac runs macOS {running}).";
+        MajorMinor(running) >= MajorMinor(Minimum)
+            ? null
+            : $"TapScribe needs macOS {Minimum} or newer (this Mac runs macOS {running}).";
+
+    // Both sides are cut to major.minor before comparing, because the floor is a
+    // major.minor release and System.Version leaves an unstated component at -1: an
+    // uncut Version(14, 4) sorts BELOW Version(14, 4, 0), so a Mac on 14.4.0 would be
+    // refused by a floor spelled with three components. Cutting both makes the answer
+    // independent of how either side happens to be written.
+    private static Version MajorMinor(Version version) => new(version.Major, version.Minor);
 }
