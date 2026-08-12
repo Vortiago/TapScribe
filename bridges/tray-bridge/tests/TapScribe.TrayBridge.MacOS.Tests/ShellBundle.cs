@@ -21,7 +21,7 @@ internal static class ShellBundle
 
     /// <summary>The manifest as committed, for the few claims that are about the tree rather
     /// than about the product.</summary>
-    internal static string SourceManifestPath => Path.Combine(ProjectDirectory, "Info.plist");
+    internal static string SourceManifestPath => Path.Join(ProjectDirectory, "Info.plist");
 
     // Both projects build under bin/<configuration>/..., and this assembly is running out of
     // its own. Deriving the configuration from that path rather than from a compile-time
@@ -46,8 +46,8 @@ internal static class ShellBundle
         {
             for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
             {
-                string candidate = Path.Combine(dir.FullName, "src", ProjectName);
-                if (File.Exists(Path.Combine(candidate, $"{ProjectName}.csproj")))
+                string candidate = Path.Join(dir.FullName, "src", ProjectName);
+                if (File.Exists(Path.Join(candidate, $"{ProjectName}.csproj")))
                     return candidate;
             }
 
@@ -63,8 +63,8 @@ internal static class ShellBundle
     // bundle, which is the same failure wearing a nicer hat.
     private static string Locate()
     {
-        string root = Path.Combine(ProjectDirectory, "bin", Configuration);
-        string tail = Path.Combine($"{ProjectName}.app", "Contents", "Info.plist");
+        string root = Path.Join(ProjectDirectory, "bin", Configuration);
+        string tail = Path.Join($"{ProjectName}.app", "Contents", "Info.plist");
         string[] found = Directory.Exists(root)
             ? [.. Directory.GetFiles(root, "Info.plist", SearchOption.AllDirectories)
                 .Where(p => p.EndsWith(tail, StringComparison.Ordinal))]
@@ -73,7 +73,7 @@ internal static class ShellBundle
         return found.Length == 1
             ? found[0]
             : throw new FileNotFoundException(
-                $"expected exactly one built bundle manifest at {Path.Combine(root, "<rid>", tail)}, found {found.Length}. "
+                $"expected exactly one built bundle manifest at {Path.Join(root, "<rid>", tail)}, found {found.Length}. "
                 + $"The shell is a ProjectReference of this test project, so it should already be built.");
     }
 }
