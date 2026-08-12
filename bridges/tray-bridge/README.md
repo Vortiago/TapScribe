@@ -30,16 +30,19 @@ Recorder, Utterance, Session).
   event-driven status (idle / streaming / processing / error), Start meeting /
   End meeting / Past meetings / Settings… / Quit, the 4-tab Settings dialog,
   and the per-meeting summary window with Copy.
-- **`src/TapScribe.Bridge.MacOS`** (net10.0-macos): the Mac platform layer.
-  Today just the macOS 14.4 floor and the sysctl that reads this Mac's
-  version; Core Audio process-tap capture, device enumeration and Keychain
-  storage land here next. Everything it asks the OS goes through P/Invoke,
-  never the managed ObjC bindings (`MacOSProductVersion` states that rule and
-  why).
+- **`src/TapScribe.Bridge.MacOS`** (net10.0): the Mac platform layer. Today
+  just the macOS 14.4 floor and the sysctl that reads this Mac's version;
+  Core Audio process-tap capture, device enumeration and Keychain storage
+  land here next. Everything it asks the OS goes through P/Invoke, never the
+  managed ObjC bindings (`MacOSProductVersion` states that rule and why),
+  which is why the plain TFM is enough and why its tests run on every CI lane
+  rather than only on a Mac.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
   menu-bar shell. Today the bundle, its `Info.plist` (menu-bar only, mic +
   audio-capture permissions, and deliberately no Screen Recording key) and
-  the launch-time floor check.
+  the launch-time floor check. Its tests reference it, so they assert against
+  the `Info.plist` inside the `.app` a build just produced rather than the
+  source file the SDK is free to rewrite.
 
 **The cross-platform invariant:** `TapScribe.Bridge.Core` references **no
 NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
@@ -51,16 +54,19 @@ tests the core on Linux and fails the moment it takes a Windows dependency.
   report 10.0.x). Get it from <https://dotnet.microsoft.com/download>.
 - Windows 10/11 to run the Windows tray app. The core and its tests build and
   run on any OS.
-- macOS 14.4 or newer, on Apple silicon, plus Xcode and `dotnet workload
-  install macos`, for the Mac projects. Building the **shell** additionally
-  needs the Xcode whose SDK matches that workload (see below).
+- macOS 14.4 or newer, on Apple silicon, plus `dotnet workload install macos`
+  and the Xcode whose SDK matches that workload, to build the **Mac shell**
+  (see below). The Mac platform layer needs neither.
 
 ## Build, test, run
 
 **No single OS builds the solution whole.** `TapScribe.TrayBridge.slnx` is the
 union view for an editor; a net10.0-windows project needs Windows and a
 net10.0-macos one needs Xcode, so each OS names its own projects. That is what
-CI does too: a `(windows)` job, a `(macos)` job, and the ubuntu core job.
+CI does too: a `(windows)` job, a `(macos)` job, and the ubuntu job.
+
+Only the two Mac SHELL projects are net10.0-macos. Everything else, including
+the Mac platform layer and its tests, is plain net10.0 and builds anywhere.
 
 On Windows:
 
@@ -77,24 +83,27 @@ On macOS:
 
 ```bash
 # from this directory (bridges/tray-bridge/)
-dotnet test  tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
+dotnet test  tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj -c Release
 dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
 ```
 
-**The second line needs Xcode matching the installed `macos` workload** (Xcode
-26.4 or newer for workload 26.4; `dotnet workload list` prints the version).
-The shell targets a deployment version older than that SDK, so the build has
-to read from the matching SDK's headers which symbols existed in macOS 14.4;
-an older Xcode fails with `MM0179`, and no build setting works around it.
-The platform library and its tests target no older deployment version and
-build on any Xcode, so the first line is unaffected.
+**Both lines need Xcode matching the installed `macos` workload** (Xcode 26.4
+or newer for workload 26.4; `dotnet workload list` prints the version), plus
+`dotnet workload install macos`. The shell targets a deployment version older
+than that SDK, so the build has to read from the matching SDK's headers which
+symbols existed in macOS 14.4; an older Xcode fails with `MM0179`, and no
+build setting works around it.
 
-Cross-platform core only (what the ubuntu CI job runs, works on Linux/macOS
-and on Windows):
+Anywhere (Linux, macOS, Windows), which is what the ubuntu CI job runs:
 
 ```bash
 dotnet test tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+dotnet test tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 ```
+
+The Mac policy tests take the running macOS version as a parameter, so they
+mean the same thing on any host. The handful that ask THIS host its version
+carry `[RequiresMacOS]` and skip at discovery off a Mac.
 
 `TapClientWebSocketTests` covers `/tap` negotiation + binary framing (tokened
 and `--no-auth`) against an in-process Kestrel server, and

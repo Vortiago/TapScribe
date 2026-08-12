@@ -407,8 +407,8 @@ jobs:
   #
   # Each OS names its own projects rather than the .slnx: a net10.0-macos target
   # needs Xcode, which this runner has not got, and a net10.0-windows one needs
-  # Windows. The .slnx is the union view for an editor; the macos job below
-  # covers the Mac projects.
+  # Windows. The .slnx is the union view for an editor; the macos job covers the
+  # app-bundle projects and the ubuntu job the two net10.0 ones.
   #
   # One project per step, deliberately: a pwsh `run:` block reports only the
   # LAST command's exit code, so several `dotnet test` calls batched into one
@@ -440,10 +440,14 @@ jobs:
       - name: Build the Windows tray shell
         run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
 
-  # The Mac half of the same solution, and the compile gate for everything macOS
-  # (ADR-0020): a net10.0-macos target needs Xcode, so nothing here compiles on
-  # the windows or ubuntu runners and a Mac regression is invisible without this
-  # job. The macos workload is not on the runner image by default.
+  # The compile gate for the two net10.0-macos projects, the shell and its tests
+  # (ADR-0020): an app bundle needs Xcode and the macos workload, neither of
+  # which the windows or ubuntu runners have, so a break in it is invisible
+  # without this job. The workload is not on the runner image by default.
+  #
+  # The Mac PLATFORM LAYER is net10.0 and deliberately not confined here: it
+  # runs on ubuntu too, and again here, where the tests that ask the running OS
+  # a question stop skipping.
   dotnet-build-macos:
     name: dotnet build + test (macos)
     runs-on: macos-latest
@@ -465,8 +469,16 @@ jobs:
       - name: Install the macos workload
         run: dotnet workload install macos
 
+      # Also on ubuntu, where [RequiresMacOS] skips. Here it runs.
       - name: Test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
+
+      # References the shell, so this builds the .app and then asserts against the
+      # bundle it produced. It covers the "Build the macOS tray shell" step, which
+      # stays anyway: a compile break should read as a build failure, not as a
+      # test project that could not restore.
+      - name: Test the macOS tray shell
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj -c Release
 
       - name: Build the macOS tray shell
         run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
@@ -477,6 +489,9 @@ jobs:
   # never the WASAPI/WinForms projects — on Linux fails the moment the core
   # takes a Windows dependency, since the net*-windows projects can't build
   # here. The in-process /tap test server uses Kestrel, so it runs on Linux too.
+  #
+  # The Mac platform layer rides the same lane for the same reason: it is
+  # net10.0, so its policy is gated on every PR rather than only on the Mac.
   dotnet-core-crossplatform:
     name: dotnet core cross-platform (ubuntu)
     runs-on: ubuntu-latest
@@ -490,6 +505,14 @@ jobs:
 
       - name: Build + test bridge-core only
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
+      # The Mac platform layer is net10.0: the floor is Version arithmetic and the
+      # version read is a libc P/Invoke, so it needs neither Xcode nor the macos
+      # workload. Running it here gates Mac policy on the lane every PR crosses.
+      # The one test that asks THIS host its version carries [RequiresMacOS] and
+      # skips at discovery; the macos job is where it runs.
+      - name: Build + test the macOS platform layer
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 
   # The Windows Bundle's Launcher (packaging/windows/, ADR-0015) uses the same
   # Core/Windows split as the tray Bridge above and for the same reason: the
