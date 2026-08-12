@@ -34,7 +34,7 @@ public class MacOSProductVersionTests
         Assert.Null(MacOSProductVersion.Parse(reading));
     }
 
-    [Fact]
+    [RequiresMacOS]
     public void Current_ReadsARealMacOSVersionFromThisHost()
     {
         // Deliberately not compared against the floor: that would assert about whatever

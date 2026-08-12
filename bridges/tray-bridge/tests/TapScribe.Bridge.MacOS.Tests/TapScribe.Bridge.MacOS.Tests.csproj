@@ -1,30 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- macOS-only tests for the Mac platform layer, the sibling of
-       TapScribe.Bridge.Windows.Tests. net10.0-macos, so it runs under the macos
-       `dotnet-build` CI job only; the windows and ubuntu jobs name their test
-       projects explicitly and never see this one (a Mac target needs Xcode).
-
-       This is the host in which the managed ObjC bindings do not work, which is why
-       MacOSProductVersion's rule (reach the OS through P/Invoke, never bindings) exists. -->
+  <!-- Tests for the Mac platform layer. net10.0 like the library, so they run on
+       every CI lane including ubuntu: the macOS floor is pure policy and deserves
+       to be gated on the cheap job every PR crosses, not only on the Xcode
+       runner. The one test that reads THIS host's version carries
+       [RequiresMacOS] and skips at discovery elsewhere. -->
   <PropertyGroup>
-    <TargetFramework>net10.0-macos</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-
-    <!-- Microsoft.NET.Test.Sdk forces OutputType=Exe and overrides an explicit
-         Library, which turns on the macOS app-bundle pipeline; these five are
-         what that pipeline then demands, each a hard build error when absent.
-         ValidateXcodeVersion is off UNCONDITIONALLY rather than per CI job
-         because the underlying check is exact major.minor equality against the
-         installed Xcode, not a floor, so it breaks the moment the macos-latest
-         image bumps Xcode. -->
-    <ValidateXcodeVersion>false</ValidateXcodeVersion>
-    <ApplicationId>net.havso.tapscribe.bridge.macos.tests</ApplicationId>
-    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
-    <LinkMode>None</LinkMode>
   </PropertyGroup>
 
   <ItemGroup>
