@@ -56,4 +56,19 @@ public class InfoPlistTests
         Assert.True(InfoPlist.Entries.ContainsKey(key), $"{key} is not declared");
         Assert.False(string.IsNullOrWhiteSpace(InfoPlist.Entries[key].Value), $"{key} is blank");
     }
+
+    [Fact]
+    public void InfoPlist_AsksForNoScreenRecordingPermission()
+    {
+        // An absence, asserted rather than merely left out, because it is the promise
+        // ADR-0020 makes: process taps capture system audio with no Screen Recording grant,
+        // which is exactly why they were chosen over ScreenCaptureKit. A contributor
+        // reaching for a screen API would quietly cost every operator that prompt and
+        // Sequoia's recurring re-approval nag. Matched on the word rather than on today's
+        // key names, since a future spelling would slip past a list.
+        string[] screenKeys =
+            [.. InfoPlist.Entries.Keys.Where(k => k.Contains("Screen", StringComparison.OrdinalIgnoreCase))];
+
+        Assert.True(screenKeys.Length == 0, $"the bundle must ask for no Screen Recording: {string.Join(", ", screenKeys)}");
+    }
 }
