@@ -4,8 +4,9 @@ Home of the **tray Bridge** family (CONTEXT.md → Tray Bridge). Its one shell
 today is the Windows one: it captures the default microphone **and the system
 audio output (WASAPI loopback)** and streams each to the Recorder over the
 standard `/tap` wire contract as its own speaker, so both sides of a meeting
-land as separately-attributed WAVs in one **detached session**. The macOS
-shell is planned (ADR-0020). See `../README.md` for the wire contract every
+land as separately-attributed WAVs in one **detached session**. A macOS shell
+is being built alongside it (ADR-0020, #419); today it is the bundle and the
+version floor, no UI yet. See `../README.md` for the wire contract every
 Bridge speaks and `../../CONTEXT.md` for the vocabulary (Bridge, Tap,
 Recorder, Utterance, Session).
 
@@ -29,6 +30,16 @@ Recorder, Utterance, Session).
   event-driven status (idle / streaming / processing / error), Start meeting /
   End meeting / Past meetings / Settings… / Quit, the 4-tab Settings dialog,
   and the per-meeting summary window with Copy.
+- **`src/TapScribe.Bridge.MacOS`** (net10.0-macos): the Mac platform layer.
+  Today just the macOS 14.4 floor and the sysctl that reads this Mac's
+  version; Core Audio process-tap capture, device enumeration and Keychain
+  storage land here next. Anything it needs from the OS goes through
+  P/Invoke, never the managed ObjC bindings, because the bindings cannot be
+  constructed under `dotnet test`.
+- **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
+  menu-bar shell. Today the bundle, its `Info.plist` (menu-bar only, mic +
+  audio-capture permissions, and deliberately no Screen Recording key) and
+  the launch-time floor check.
 
 **The cross-platform invariant:** `TapScribe.Bridge.Core` references **no
 NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
@@ -38,19 +49,39 @@ tests the core on Linux and fails the moment it takes a Windows dependency.
 
 - **.NET 10 SDK** (`global.json` pins the band; `dotnet --version` should
   report 10.0.x). Get it from <https://dotnet.microsoft.com/download>.
-- Windows 10/11 to run the tray app. The core and its tests build and run on
-  any OS.
+- Windows 10/11 to run the Windows tray app. The core and its tests build and
+  run on any OS.
+- macOS 14.4 or newer, on Apple silicon, plus Xcode and `dotnet workload
+  install macos`, for the Mac projects.
 
 ## Build, test, run
 
+**No single OS builds the solution whole.** `TapScribe.TrayBridge.slnx` is the
+union view for an editor; a net10.0-windows project needs Windows and a
+net10.0-macos one needs Xcode, so each OS names its own projects. That is what
+CI does too: a `(windows)` job, a `(macos)` job, and the ubuntu core job.
+
+On Windows:
+
 ```powershell
 # from this directory (bridges/tray-bridge/)
-dotnet build TapScribe.TrayBridge.slnx -c Release       # whole solution
-dotnet test  TapScribe.TrayBridge.slnx -c Release       # runs all tests (core + Windows)
-dotnet run   --project src/TapScribe.TrayBridge                # launch the tray app
+dotnet test  tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+dotnet test  tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj -c Release
+dotnet test  tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
+dotnet build src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
+dotnet run   --project src/TapScribe.TrayBridge                 # launch the tray app
 ```
 
-Cross-platform core only (what the ubuntu CI job runs — works on Linux/macOS):
+On macOS:
+
+```bash
+# from this directory (bridges/tray-bridge/)
+dotnet test  tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
+dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
+```
+
+Cross-platform core only (what the ubuntu CI job runs, works on Linux/macOS
+and on Windows):
 
 ```bash
 dotnet test tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release

@@ -399,12 +399,20 @@ jobs:
       - name: Run the ${{ matrix.lane }} upstream-contract smoke tests
         run: pytest ${{ matrix.tests }} -q
 
-  # The tray Bridge (bridges/tray-bridge/) is a .NET solution:
-  # a cross-platform bridge-core class library, a Windows WASAPI capture
-  # backend, and a WinForms tray runner. This job builds the whole solution on
-  # its native OS (so the net*-windows WASAPI/WinForms projects compile too) and
-  # runs the core unit tests. Standalone job — same rationale as bridge-js /
-  # frontend-typecheck: a C# regression surfaces as its own red check.
+  # The tray Bridge (bridges/tray-bridge/) is a .NET solution: a cross-platform
+  # bridge-core class library, one platform layer per OS (WASAPI on Windows,
+  # Core Audio on macOS) and one tray shell each. Standalone job, same rationale
+  # as bridge-js / frontend-typecheck: a C# regression surfaces as its own red
+  # check.
+  #
+  # It names the Windows-buildable projects one by one rather than the .slnx,
+  # because no single OS can build the solution whole any more: a net10.0-macos
+  # target needs Xcode, which this runner has not got. The .slnx stays the union
+  # view; the macos job below covers the other half.
+  #
+  # One project per step, deliberately: a pwsh `run:` block reports only the
+  # LAST command's exit code, so several `dotnet test` calls batched into one
+  # step would go green on a failure in any but the last.
   dotnet-build:
     name: dotnet build + test (windows)
     runs-on: windows-latest
@@ -416,8 +424,45 @@ jobs:
         with:
           global-json-file: bridges/tray-bridge/global.json
 
-      - name: Build + test the whole solution
-        run: dotnet test bridges/tray-bridge/TapScribe.TrayBridge.slnx -c Release
+      # dotnet-core-crossplatform runs these on ubuntu for the portability
+      # invariant; running them HERE is a different guarantee, and the only
+      # automated Windows-regression signal left for the meeting/pipeline logic
+      # that was hoisted out of the Windows layer into the core.
+      - name: Test bridge-core
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
+      - name: Test the Windows platform layer
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj -c Release
+
+      - name: Test the Windows tray shell
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
+
+      - name: Build the Windows tray shell
+        run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
+
+  # The Mac half of the same solution, and the compile gate for everything macOS
+  # (ADR-0020): a net10.0-macos target needs Xcode, so nothing here compiles on
+  # the windows or ubuntu runners and a Mac regression is invisible without this
+  # job. The macos workload is not on the runner image by default.
+  dotnet-build-macos:
+    name: dotnet build + test (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: bridges/tray-bridge/global.json
+
+      - name: Install the macos workload
+        run: dotnet workload install macos
+
+      - name: Test the macOS platform layer
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
+
+      - name: Build the macOS tray shell
+        run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
 
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
