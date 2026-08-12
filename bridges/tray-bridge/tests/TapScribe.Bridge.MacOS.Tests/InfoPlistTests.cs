@@ -1,3 +1,5 @@
+using TapScribe.Bridge.MacOS;
+
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
@@ -14,5 +16,17 @@ public class InfoPlistTests
         // LSUIElement is what keeps the Bridge out of the Dock and out of Cmd-Tab. It is a
         // menu-bar app; a Dock icon would be a second, meaningless way to reach it.
         Assert.True(InfoPlist.Flag("LSUIElement"));
+    }
+
+    [Fact]
+    public void InfoPlist_DeclaresTheSameMinimumSystemVersionAsTheFloor()
+    {
+        // Two gates for one rule, and they have to agree or one of them is decoration:
+        // Launch Services refuses to open the bundle on an older Mac, and the floor catches
+        // what it does not (a build run straight from the shell, or a bundle whose plist
+        // was edited without the code following).
+        Assert.Equal(
+            MacOSVersionFloor.Minimum,
+            Version.Parse(InfoPlist.Entries["LSMinimumSystemVersion"].Value));
     }
 }
