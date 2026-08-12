@@ -8,8 +8,9 @@ namespace TapScribe.Bridge.Core;
 /// tray app can resume showing the end-of-meeting pipeline's progress / summary —
 /// the Recorder keeps polling working across its own restart, and this is the tray's
 /// matching memory. Just the session id: the live state is re-read from the poll
-/// endpoint, not cached here. The model + (de)serialization live in Core
-/// (Linux-tested); the %APPDATA% file IO is the Windows store's job.
+/// endpoint, not cached here. The model, its (de)serialization and the file IO
+/// (<see cref="MeetingStateStore"/>) all live in Core; a platform contributes only the
+/// directory the store writes into.
 /// </summary>
 public sealed record MeetingState
 {

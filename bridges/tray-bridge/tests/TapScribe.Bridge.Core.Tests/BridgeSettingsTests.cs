@@ -1,55 +1,30 @@
 using System.Text.Json;
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.Bridge.Windows.Tests;
+namespace TapScribe.Bridge.Core.Tests;
 
+/// <summary>
+/// The settings MODEL, with no file and no platform in sight: what the JSON shape is, how
+/// an old file's single global gate tuning migrates into per-device gates (ADR-0007), what
+/// the default device pair is, and what a tap's connection options come out as. Persistence
+/// — including everything about the token at rest — belongs to
+/// <see cref="BridgeSettingsStoreTests"/>, since the model itself no longer knows how a
+/// token is protected.
+/// </summary>
 public class BridgeSettingsTests
 {
     [Fact]
-    public void Token_IsNeverSerializedInCleartext()
+    public void Token_IsNeverSerialized()
     {
-        // This is the test behind the README's security claim: a future change
-        // that dropped [JsonIgnore] or serialised the plaintext would fail here.
+        // The plaintext token is in-memory only: the store decides what (if anything) goes
+        // on disk in its place. A change that dropped [JsonIgnore] would fail here, and the
+        // README's security claim with it.
         const string secret = "super-secret-tap-token-abc123";
-        var settings = new BridgeSettings { Host = "rec.example", Token = secret };
 
-        string json = JsonSerializer.Serialize(settings);
+        string json = JsonSerializer.Serialize(new BridgeSettings { Host = "rec.example", Token = secret });
 
-        Assert.DoesNotContain(secret, json);       // plaintext token never on disk
-        Assert.DoesNotContain("\"Token\"", json);  // the plaintext property is [JsonIgnore]
-        Assert.Contains("ProtectedToken", json);    // only the DPAPI blob is persisted
-    }
-
-    [Fact]
-    public void Token_SurvivesProtectSerializeDeserializeUnprotect()
-    {
-        var original = new BridgeSettings { Token = "round-trip-token-xyz" };
-
-        string json = JsonSerializer.Serialize(original);
-        BridgeSettings restored = JsonSerializer.Deserialize<BridgeSettings>(json)!;
-
-        Assert.Equal("round-trip-token-xyz", restored.Token);
-    }
-
-    [Fact]
-    public void Token_ReadsAsEmptyWhenBlobIsCorrupt()
-    {
-        // A blob written by another user/machine, or a hand-edited file, must not
-        // crash the app — it reads back as "no token" so the user re-enters it.
-        var settings = new BridgeSettings { ProtectedToken = "@@ not valid base64 or DPAPI @@" };
-
-        Assert.Equal("", settings.Token);
-    }
-
-    [Fact]
-    public void EmptyToken_RoundTripsAsNoToken()
-    {
-        var settings = new BridgeSettings { Token = "" };
-
-        string json = JsonSerializer.Serialize(settings);
-        BridgeSettings restored = JsonSerializer.Deserialize<BridgeSettings>(json)!;
-
-        Assert.Equal("", restored.Token); // empty => --no-auth (no subprotocol offered)
+        Assert.DoesNotContain(secret, json);
+        Assert.DoesNotContain("\"Token\"", json);
     }
 
     [Fact]

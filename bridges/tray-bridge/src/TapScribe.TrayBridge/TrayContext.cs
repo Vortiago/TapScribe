@@ -68,7 +68,7 @@ internal sealed class TrayContext : ApplicationContext
     private TrayStatus? _lastStatus; // what the header and icon are currently showing
 
     public TrayContext()
-        : this(BridgeSettingsStore.Load(), TrayDependencies.Production)
+        : this(TrayStores.Settings.Load(), TrayDependencies.Production)
     {
     }
 
@@ -837,7 +837,7 @@ internal sealed class TrayContext : ApplicationContext
             _settings = updated;
         try
         {
-            BridgeSettingsStore.Save(updated);
+            TrayStores.Settings.Save(updated);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

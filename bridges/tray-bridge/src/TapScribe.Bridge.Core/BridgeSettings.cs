@@ -1,22 +1,16 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.Text.Json.Serialization;
-using TapScribe.Bridge.Core;
 
-namespace TapScribe.Bridge.Windows;
+namespace TapScribe.Bridge.Core;
 
 /// <summary>
-/// User-editable connection settings for the tray Bridge, persisted to
-/// %APPDATA%\TapScribe so they survive restarts (PRD #99 stories 8 + 11). The
-/// Settings dialog reads/writes these; environment variables only seed the
-/// first-run defaults, so an operator never has to set env vars.
+/// User-editable connection settings for the tray Bridge, persisted by
+/// <see cref="BridgeSettingsStore"/> so they survive restarts (PRD #99 stories 8 + 11).
+/// The Settings dialog reads/writes these; environment variables only seed the first-run
+/// defaults, so an operator never has to set env vars.
 ///
-/// The tap token is a credential, so it is NEVER written to disk in cleartext:
-/// it is protected at rest with Windows DPAPI (CurrentUser scope) and only the
-/// opaque blob is serialised (<see cref="ProtectedToken"/>). <see cref="Token"/>
-/// is the in-memory plaintext, computed on demand and marked [JsonIgnore] so it
-/// can never reach the file.
+/// Portable: nothing here knows which OS it runs on. The tap token is a credential and
+/// the platform decides how it is kept at rest — that decision lives behind
+/// <see cref="ITapTokenStore"/>, applied by the store on Load/Save.
 /// </summary>
 public sealed class BridgeSettings
 {
@@ -69,16 +63,18 @@ public sealed class BridgeSettings
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? GatePreRollMs { get; set; }
 
-    /// <summary>The tap token at rest: a base64 DPAPI blob, or null for --no-auth.</summary>
+    /// <summary>
+    /// The tap token at rest, as the platform's <see cref="ITapTokenStore"/> spells it —
+    /// a base64 DPAPI blob on Windows, null when the secret lives out-of-band. Written and
+    /// read only by <see cref="BridgeSettingsStore"/>. Omitted when null, so a platform
+    /// that keeps the secret out-of-band leaves no token key in the file at all.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ProtectedToken { get; set; }
 
     /// <summary>The tap token in plaintext (not serialised). Empty = offer no subprotocol.</summary>
     [JsonIgnore]
-    public string Token
-    {
-        get => TokenProtection.Unprotect(ProtectedToken);
-        set => ProtectedToken = TokenProtection.Protect(value);
-    }
+    public string Token { get; set; } = "";
 
     /// <summary>
     /// The selections to actually resolve at Start: the saved <see cref="Devices"/> if
@@ -191,7 +187,7 @@ public sealed class BridgeSettings
 
     // The base identity a tap streams under when no per-device identity is set — never
     // blank. Shared by ToConnectionOptions and the gate-by-identity map so the live re-tune
-    // keys line up with the tap identities, without decrypting the token to read it.
+    // keys line up with the tap identities.
     private string EffectiveIdentity =>
         string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
 
@@ -228,113 +224,5 @@ public sealed class BridgeSettings
         // under, so changing it re-attributes the tray as a brand-new speaker
         // (see TapConnectionOptions.Identity).
         return string.IsNullOrEmpty(user) ? "windows-tray" : user;
-    }
-}
-
-/// <summary>
-/// The one spelling of the tray's per-user data folder (%APPDATA%\TapScribe),
-/// shared by the three on-disk stores (settings / meeting state / meeting
-/// history) so the folder name cannot drift per store.
-/// </summary>
-internal static class BridgeAppData
-{
-    public static string PathFor(string fileName) => Path.Join(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "TapScribe", fileName);
-}
-
-/// <summary>Loads/saves <see cref="BridgeSettings"/> as JSON under %APPDATA%.</summary>
-public static class BridgeSettingsStore
-{
-    /// <summary>
-    /// The on-disk settings filename — an operator-facing contract predating
-    /// the bridges/tray-bridge/ directory rename. Renaming it orphans every
-    /// operator's saved settings (including the DPAPI-protected token); a
-    /// change here needs a migration, not a rename.
-    /// </summary>
-    public const string SettingsFileName = "windows-tray-bridge.json";
-
-    private static string DefaultPath => BridgeAppData.PathFor(SettingsFileName);
-
-    /// <summary>Load from the default %APPDATA% path.</summary>
-    public static BridgeSettings Load() => Load(DefaultPath);
-
-    /// <summary>Save to the default %APPDATA% path.</summary>
-    public static void Save(BridgeSettings settings) => Save(settings, DefaultPath);
-
-    /// <summary>
-    /// Load settings from <paramref name="path"/>. A missing, corrupt, or
-    /// unreadable file falls back to environment-seeded defaults rather than
-    /// throwing, so the app always launches. (The path overload exists so the
-    /// round-trip is testable without touching the user's real %APPDATA%.)
-    /// </summary>
-    public static BridgeSettings Load(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                using FileStream stream = File.OpenRead(path);
-                BridgeSettings? loaded = JsonSerializer.Deserialize<BridgeSettings>(stream);
-                if (loaded is not null)
-                    return loaded;
-            }
-        }
-        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
-        {
-            // Missing/corrupt/unreadable settings file: fall back to seeded
-            // defaults rather than failing to launch. The user can re-save from
-            // the dialog, which overwrites the bad file.
-        }
-        return BridgeSettings.SeedFromEnvironment();
-    }
-
-    /// <summary>Save settings to <paramref name="path"/>, creating parent dirs.</summary>
-    public static void Save(BridgeSettings settings, string path)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using FileStream stream = File.Create(path);
-        JsonSerializer.Serialize(stream, settings, new JsonSerializerOptions { WriteIndented = true });
-    }
-}
-
-/// <summary>
-/// DPAPI (Windows Data Protection API) helpers for the tap token at rest. The
-/// blob is tied to the current Windows user, so another user on the same box
-/// can't read it, and it is never written in cleartext.
-/// </summary>
-internal static class TokenProtection
-{
-    public static string? Protect(string token)
-    {
-        if (string.IsNullOrEmpty(token))
-            return null;
-        byte[] cipher = ProtectedData.Protect(
-            Encoding.UTF8.GetBytes(token), optionalEntropy: null, DataProtectionScope.CurrentUser);
-        return Convert.ToBase64String(cipher);
-    }
-
-    public static string Unprotect(string? protectedToken)
-    {
-        if (string.IsNullOrEmpty(protectedToken))
-            return "";
-        try
-        {
-            byte[] plain = ProtectedData.Unprotect(
-                Convert.FromBase64String(protectedToken), optionalEntropy: null, DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(plain);
-        }
-        catch (CryptographicException)
-        {
-            // Blob was written under a different user/machine or is corrupt:
-            // treat as "no saved token" so the app still launches; the user
-            // re-enters it in the dialog.
-            return "";
-        }
-        catch (FormatException)
-        {
-            // ProtectedToken isn't valid base64 (hand-edited file): same handling.
-            return "";
-        }
     }
 }

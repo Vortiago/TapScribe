@@ -7,6 +7,9 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Compile (not run) the Windows-targeted projects on a non-Windows dev box,
+         so a macOS contributor still has a compile gate for this side. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <ItemGroup>

@@ -5,15 +5,16 @@ namespace TapScribe.Bridge.Core;
 
 /// <summary>
 /// The tray's local Past-meetings history (#168): a bounded, most-recent-first list of
-/// the meetings the tray itself ran, persisted to %APPDATA% so the user can re-open any
-/// past meeting's summary without the dashboard, even days later. Keeping the history
+/// the meetings the tray itself ran, persisted to the tray's per-user data folder so the
+/// user can re-open any past meeting's summary without the dashboard, even days later
+/// (%APPDATA%\TapScribe on Windows). Keeping the history
 /// LOCAL to the tray (only the sessions it created) preserves the tap token's low
 /// privilege — no "list every session" endpoint is needed; browsing all sessions stays
 /// the dashboard's job.
 ///
-/// Immutable: <see cref="Append"/> returns a new history. The model + (de)serialization
-/// live in Core (Linux-tested); the %APPDATA% file IO is the Windows store's job
-/// (<c>MeetingHistoryStore</c>) — the sibling shape of <see cref="MeetingState"/>.
+/// Immutable: <see cref="Append"/> returns a new history. The model, its
+/// (de)serialization and the file IO (<see cref="MeetingHistoryStore"/>) all live in
+/// Core — the sibling shape of <see cref="MeetingState"/>.
 /// </summary>
 public sealed record MeetingHistory
 {

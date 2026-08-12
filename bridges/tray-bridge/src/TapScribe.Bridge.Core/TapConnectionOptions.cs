@@ -33,7 +33,7 @@ public sealed record TapConnectionOptions
     /// pre-rename "windows-tray" spelling (the bridges/tray-bridge/ directory
     /// rename left it alone): changing it re-attributes the tray as a brand-new
     /// speaker, so it needs a migration, not a rename — same contract class as
-    /// <c>BridgeSettingsStore.SettingsFileName</c>.
+    /// <c>TrayStores.SettingsFileName</c>.
     /// </summary>
     public string Identity { get; init; } = "windows-tray";
 
