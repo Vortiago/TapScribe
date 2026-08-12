@@ -26,6 +26,12 @@
 
     <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
+
+    <!-- The floor, and NOT a duplicate of the Info.plist entry beside it: the SDK stamps
+         LSMinimumSystemVersion into the built bundle from this property, overwriting the
+         source plist. Unset, it stamps the workload's own newest macOS and the .app opens
+         on nothing. A test pins the two together. -->
+    <SupportedOSPlatformVersion>14.4</SupportedOSPlatformVersion>
     <ValidateXcodeVersion>false</ValidateXcodeVersion>
     <Registrar>dynamic</Registrar>
   </PropertyGroup>

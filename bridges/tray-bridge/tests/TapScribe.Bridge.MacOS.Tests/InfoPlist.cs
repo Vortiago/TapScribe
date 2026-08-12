@@ -26,7 +26,7 @@ internal static class InfoPlist
         // resolving it would mean an outbound fetch and an XXE surface to read a file whose
         // grammar we do not need.
         var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore };
-        using XmlReader reader = XmlReader.Create(Locate(), settings);
+        using XmlReader reader = XmlReader.Create(ShellProject.InfoPlistPath, settings);
 
         XElement dict = XDocument.Load(reader).Root!.Element("dict")!;
         XElement[] children = [.. dict.Elements()];
@@ -35,22 +35,5 @@ internal static class InfoPlist
         for (int i = 0; i + 1 < children.Length; i += 2)
             entries[children[i].Value] = children[i + 1];
         return entries;
-    }
-
-    // The test assembly runs from bin/<config>/<tfm>/<rid>/ inside the tests project, so
-    // the shell project is a fixed walk up and back down. Anchoring on the plist itself
-    // rather than on a marker file means a moved project fails here, loudly, instead of
-    // silently gating nothing.
-    private static string Locate()
-    {
-        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "TapScribe.TrayBridge.MacOS", "Info.plist");
-            if (File.Exists(candidate))
-                return candidate;
-        }
-
-        throw new FileNotFoundException(
-            $"no src/TapScribe.TrayBridge.MacOS/Info.plist above {AppContext.BaseDirectory}");
     }
 }

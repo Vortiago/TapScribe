@@ -29,4 +29,18 @@ public class InfoPlistTests
             MacOSVersionFloor.Minimum,
             Version.Parse(InfoPlist.Entries["LSMinimumSystemVersion"].Value));
     }
+
+    [Fact]
+    public void ShellProject_StampsTheBundleWithTheMinimumSystemVersionItDeclares()
+    {
+        // The plist entry above is the readable declaration, but it is not what ships: the
+        // SDK writes LSMinimumSystemVersion into the built bundle from
+        // SupportedOSPlatformVersion, overwriting the source. Unset, it stamps the macos
+        // workload's own newest release, so the .app would refuse to open on every Mac this
+        // Bridge targets. Pinning them to each other is what stops the plist becoming a
+        // comment.
+        Assert.Equal(
+            InfoPlist.Entries["LSMinimumSystemVersion"].Value,
+            ShellProject.Property("SupportedOSPlatformVersion"));
+    }
 }
