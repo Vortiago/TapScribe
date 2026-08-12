@@ -52,7 +52,8 @@ tests the core on Linux and fails the moment it takes a Windows dependency.
 - Windows 10/11 to run the Windows tray app. The core and its tests build and
   run on any OS.
 - macOS 14.4 or newer, on Apple silicon, plus Xcode and `dotnet workload
-  install macos`, for the Mac projects.
+  install macos`, for the Mac projects. Building the **shell** additionally
+  needs the Xcode whose SDK matches that workload (see below).
 
 ## Build, test, run
 
@@ -79,6 +80,14 @@ On macOS:
 dotnet test  tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
 ```
+
+**The second line needs Xcode matching the installed `macos` workload** (Xcode
+26.4 or newer for workload 26.4; `dotnet workload list` prints the version).
+The shell targets a deployment version older than that SDK, so the build has
+to read from the matching SDK's headers which symbols existed in macOS 14.4;
+an older Xcode fails with `MM0179`, and no build setting works around it.
+The platform library and its tests target no older deployment version and
+build on any Xcode, so the first line is unaffected.
 
 Cross-platform core only (what the ubuntu CI job runs, works on Linux/macOS
 and on Windows):

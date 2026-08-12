@@ -8,15 +8,17 @@
        An Exe on this TFM is an app bundle. osx-arm64 and self-contained are ADR-0020's
        packaging decision (arm64-only, a zipped .app that needs no installed runtime).
 
-       ValidateXcodeVersion and Registrar are both about not coupling the build to whatever
-       Xcode happens to be installed, and both are UNCONDITIONAL rather than per CI job:
-       ValidateXcodeVersion's check is exact major.minor equality against the installed
-       Xcode, not a floor, and the static registrar compiles generated bindings against
-       Xcode's SDK headers, so it fails whenever the workload is newer than the SDK on the
-       box (MM0179 / MM4162). A conditional escape would break on the next runner-image
-       bump instead of never. The dynamic registrar costs some startup time and resolves
-       ObjC types reflectively; for a menu-bar app launched once per session that is the
-       cheaper end of the trade. -->
+       Building this project needs the macOS SDK that matches the installed macos workload
+       (Xcode 26.4 or newer for workload 26.4). That is a hard requirement, not a nicety,
+       because SupportedOSPlatformVersion below targets a deployment version OLDER than the
+       SDK: the build then has to know which symbols existed in 14.4, which it can only read
+       from the matching SDK's headers, and an older Xcode fails with MM0179. There is no
+       build setting that buys a working bundle without it. The platform library and its
+       tests do not target an older deployment version and build on any Xcode.
+
+       ValidateXcodeVersion is off UNCONDITIONALLY rather than per CI job for a separate
+       reason: its check is exact major.minor equality against the installed Xcode, not a
+       floor, so it rejects a NEWER Xcode too and would break on every runner-image bump. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-macos</TargetFramework>
@@ -33,7 +35,6 @@
          on nothing. A test pins the two together. -->
     <SupportedOSPlatformVersion>14.4</SupportedOSPlatformVersion>
     <ValidateXcodeVersion>false</ValidateXcodeVersion>
-    <Registrar>dynamic</Registrar>
   </PropertyGroup>
 
   <ItemGroup>
