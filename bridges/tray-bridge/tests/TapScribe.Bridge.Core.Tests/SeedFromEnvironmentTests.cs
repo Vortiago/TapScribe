@@ -1,10 +1,27 @@
-// These tests mutate process environment variables, and the BridgeSettingsStore
-// fallback tests also read them (via SeedFromEnvironment), so run this small
-// assembly's tests sequentially to avoid cross-test env races.
-[assembly: Xunit.CollectionBehavior(DisableTestParallelization = true)]
+using TapScribe.Bridge.Core;
 
-namespace TapScribe.Bridge.Windows.Tests;
+namespace TapScribe.Bridge.Core.Tests;
 
+/// <summary>
+/// The classes that read or MUTATE the TAPSCRIBE_* environment variables, serialised
+/// against each other. In the Windows assembly this was an assembly-wide
+/// <c>DisableTestParallelization</c>, which is the wrong instrument here: it would
+/// serialise the whole Core suite (including the slower async pipeline tests) to protect
+/// two classes. xunit runs the classes WITHIN a collection sequentially while other
+/// collections still run in parallel, so the fix is scoped to the classes that race.
+/// </summary>
+[CollectionDefinition(Name)]
+public sealed class EnvironmentSeedCollection
+{
+    public const string Name = "tapscribe-environment-seed";
+}
+
+/// <summary>
+/// First-run seeding: with no settings file yet, the connection fields come from the legacy
+/// TAPSCRIBE_* environment variables when they are set, so an existing env-based setup
+/// keeps working, and from sensible defaults when they are not.
+/// </summary>
+[Collection(EnvironmentSeedCollection.Name)]
 public class SeedFromEnvironmentTests
 {
     private static readonly string[] Keys =

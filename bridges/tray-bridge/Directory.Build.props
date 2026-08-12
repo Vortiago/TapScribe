@@ -1,9 +1,10 @@
 <Project>
 
-  <!-- What every project in bridges/tray-bridge/ shares. Anything that differs per platform
-       or per project (TargetFramework, UseWindowsForms, EnableWindowsTargeting, the app
-       -bundle properties, SupportedOSPlatformVersion, ValidateXcodeVersion, NoWarn) stays in
-       its own csproj, where the reason for it is. -->
+  <!-- What every project in bridges/tray-bridge/ shares, whatever it targets. Anything that
+       differs per platform or per project (TargetFramework, UseWindowsForms, the app-bundle
+       properties, SupportedOSPlatformVersion, ValidateXcodeVersion, NoWarn) stays in its own
+       csproj, where the reason for it is. What every project of ONE target framework shares
+       is in Directory.Build.targets, which is imported late enough to see the TFM. -->
   <PropertyGroup>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

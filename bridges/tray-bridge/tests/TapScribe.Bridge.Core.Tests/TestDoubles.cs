@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -178,6 +179,69 @@ internal sealed class FakeAudioDeviceEnumerator : IAudioDeviceEnumerator
         _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
             ? capture
             : throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+}
+
+/// <summary>
+/// A portable stand-in for a platform's at-rest token translation (DPAPI on Windows, the
+/// Keychain on macOS): "protects" by base64-ing, which is enough for a test to prove the
+/// plaintext never reaches the file without needing a real secret store. Models the two
+/// contract points every real implementation shares — an empty token has no at-rest value,
+/// and a value the platform can't read degrades to "" rather than throwing.
+/// </summary>
+internal sealed class FakeTapTokenStore : ITapTokenStore
+{
+    public string? Write(string token) =>
+        string.IsNullOrEmpty(token) ? null : Convert.ToBase64String(Encoding.UTF8.GetBytes(token));
+
+    public string Read(string? atRest)
+    {
+        if (string.IsNullOrEmpty(atRest))
+            return "";
+        try
+        {
+            return Encoding.UTF8.GetString(Convert.FromBase64String(atRest));
+        }
+        catch (FormatException)
+        {
+            // Hand-edited / foreign at-rest value, the stand-in for a blob DPAPI or the
+            // Keychain can't decrypt: read as "no saved token" so the app still launches.
+            // What's lost is the operator's saved token — they re-enter it in the dialog.
+            return "";
+        }
+    }
+}
+
+/// <summary>
+/// The other shape of <see cref="ITapTokenStore"/>: the secret lives OUT-OF-BAND (the
+/// macOS Keychain), so <see cref="Write"/> keeps it here and returns null — the settings
+/// file gets no at-rest value at all, and <see cref="Read"/> ignores what the file says.
+/// <see cref="Held"/> is what the platform secret store would be holding.
+/// </summary>
+internal sealed class OutOfBandTapTokenStore : ITapTokenStore
+{
+    public string? Held { get; private set; }
+
+    public string? Write(string token)
+    {
+        Held = string.IsNullOrEmpty(token) ? null : token;
+        return null;
+    }
+
+    public string Read(string? atRest) => Held ?? "";
+}
+
+/// <summary>
+/// A token store the platform refuses: every <see cref="Read"/> throws, the stand-in for a
+/// Keychain the operator declined to unlock or a secrets daemon that isn't up. The
+/// interface asks an implementation to degrade rather than throw, but the store this is
+/// handed to can't verify that of a platform it doesn't own — so the portable half is
+/// pinned to survive one that misbehaves.
+/// </summary>
+internal sealed class DeniedTapTokenStore : ITapTokenStore
+{
+    public string? Write(string token) => throw new UnauthorizedAccessException("denied by the platform");
+
+    public string Read(string? atRest) => throw new UnauthorizedAccessException("denied by the platform");
 }
 
 /// <summary>

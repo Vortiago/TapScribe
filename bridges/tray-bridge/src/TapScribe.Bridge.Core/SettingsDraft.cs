@@ -1,6 +1,4 @@
-using TapScribe.Bridge.Core;
-
-namespace TapScribe.Bridge.Windows;
+namespace TapScribe.Bridge.Core;
 
 /// <summary>
 /// The editable state behind the tray Settings dialog, as plain data — seeded from a

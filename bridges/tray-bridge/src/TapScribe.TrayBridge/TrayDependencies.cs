@@ -7,7 +7,7 @@ namespace TapScribe.TrayBridge;
 /// The tray's two %APPDATA% stores behind one seam. The shell reads and writes them from
 /// the meeting lifecycle, so a test that drives End or the Past-meetings menu would
 /// otherwise touch the operator's REAL resume state and meeting history — the same reason
-/// every store already carries a path overload.
+/// the stores themselves take their directory by injection.
 /// </summary>
 internal interface IMeetingStores
 {
@@ -18,18 +18,19 @@ internal interface IMeetingStores
     void AppendHistory(MeetingRecord record);
 }
 
-/// <summary>The production stores: the %APPDATA%\TapScribe files the operator's tray uses.</summary>
+/// <summary>The production stores: the <see cref="TrayStores"/> instances, which is where
+/// %APPDATA%\TapScribe is spelled.</summary>
 internal sealed class AppDataMeetingStores : IMeetingStores
 {
-    public MeetingState? LoadState() => MeetingStateStore.Load();
+    public MeetingState? LoadState() => TrayStores.MeetingState.Load();
 
-    public void SaveState(MeetingState state) => MeetingStateStore.Save(state);
+    public void SaveState(MeetingState state) => TrayStores.MeetingState.Save(state);
 
-    public void ClearState() => MeetingStateStore.Clear();
+    public void ClearState() => TrayStores.MeetingState.Clear();
 
-    public MeetingHistory LoadHistory() => MeetingHistoryStore.Load();
+    public MeetingHistory LoadHistory() => TrayStores.MeetingHistory.Load();
 
-    public void AppendHistory(MeetingRecord record) => MeetingHistoryStore.Append(record);
+    public void AppendHistory(MeetingRecord record) => TrayStores.MeetingHistory.Append(record);
 }
 
 /// <summary>
