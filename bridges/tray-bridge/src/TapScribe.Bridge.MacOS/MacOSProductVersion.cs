@@ -41,7 +41,7 @@ public static partial class MacOSProductVersion
     // Unreadable is null rather than a sentinel version: the floor spells the two refusals
     // differently, and a sentinel would report a Mac whose version could not be read as a
     // Mac running an ancient one.
-    public static Version? Parse(string reading) =>
+    internal static Version? Parse(string reading) =>
         Version.TryParse(reading.Trim().Trim('\0'), out Version? version) ? version : null;
 
     [LibraryImport("libc", EntryPoint = "sysctlbyname", StringMarshalling = StringMarshalling.Utf8)]

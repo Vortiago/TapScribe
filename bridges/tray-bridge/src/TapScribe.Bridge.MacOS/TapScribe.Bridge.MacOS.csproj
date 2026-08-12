@@ -22,4 +22,10 @@
     <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
   </ItemGroup>
 
+  <!-- The version-string parse is internal (the shell only ever asks for the ambient
+       reading), and it is exactly what the tests drive. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="TapScribe.Bridge.MacOS.Tests" />
+  </ItemGroup>
+
 </Project>
