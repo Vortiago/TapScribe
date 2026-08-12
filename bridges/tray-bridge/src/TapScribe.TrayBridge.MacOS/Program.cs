@@ -11,13 +11,19 @@ namespace TapScribe.TrayBridge.MacOS;
 /// </summary>
 internal static class Program
 {
-    private static int Main()
+    private static int Main() => Run(MacOSProductVersion.Current(), Console.Error);
+
+    /// <summary>The launch decision, with the ambient read and the output stream passed in
+    /// so it can be driven for a macOS this box is not running. Returns the process exit
+    /// code: non-zero refuses the launch, and the reason goes to
+    /// <paramref name="complaints"/>.</summary>
+    internal static int Run(Version? running, TextWriter complaints)
     {
-        string? refusal = MacOSVersionFloor.Refusal(MacOSProductVersion.Current());
+        string? refusal = MacOSVersionFloor.Refusal(running);
         if (refusal is null)
             return 0;
 
-        Console.Error.WriteLine(refusal);
+        complaints.WriteLine(refusal);
         return 1;
     }
 }

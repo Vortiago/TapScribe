@@ -46,4 +46,10 @@
     <ProjectReference Include="..\TapScribe.Bridge.MacOS\TapScribe.Bridge.MacOS.csproj" />
   </ItemGroup>
 
+  <!-- Program is internal (it is the app's own entry point, not an API), and its launch
+       decision is exactly what the shell tests drive. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="TapScribe.TrayBridge.MacOS.Tests" />
+  </ItemGroup>
+
 </Project>
