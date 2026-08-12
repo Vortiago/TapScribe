@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The macOS menu-bar shell, the Mac sibling of TapScribe.TrayBridge. It holds no
+       meeting logic: everything but the UI and the platform calls lives in
+       TapScribe.Bridge.Core / TapScribe.Bridge.MacOS (ADR-0020). The UI itself lands in a
+       later slice of #419; today this is the bundle, its Info.plist and the version floor.
+
+       An Exe on this TFM is an app bundle. osx-arm64 and self-contained are ADR-0020's
+       packaging decision (arm64-only, a zipped .app that needs no installed runtime).
+
+       The other two are both about not coupling the build to whatever Xcode happens to be
+       installed, and both are UNCONDITIONAL rather than per CI job for the same reason:
+       ValidateXcodeVersion's check is exact major.minor equality against the installed
+       Xcode, not a floor, and the static registrar compiles generated bindings against
+       Xcode's SDK headers, so it fails whenever the workload is newer than the SDK on the
+       box (MM0179 / MM4162). A conditional escape would break on the next runner-image
+       bump instead of never. The dynamic registrar costs some startup time and resolves
+       ObjC types reflectively; for a menu-bar app launched once per session that is the
+       cheaper end of the trade. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-macos</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TapScribe.TrayBridge.MacOS</RootNamespace>
+
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <ValidateXcodeVersion>false</ValidateXcodeVersion>
+    <Registrar>dynamic</Registrar>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
+    <ProjectReference Include="..\TapScribe.Bridge.MacOS\TapScribe.Bridge.MacOS.csproj" />
+  </ItemGroup>
+
+</Project>
