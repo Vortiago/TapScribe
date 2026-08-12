@@ -31,9 +31,22 @@ internal static class InfoPlist
         XElement dict = XDocument.Load(reader).Root!.Element("dict")!;
         XElement[] children = [.. dict.Elements()];
 
+        // The pairing is checked rather than assumed. A <key> whose value element is missing
+        // shifts every pair after it, so a deleted permission string would surface as some
+        // OTHER key holding a confusing wrong value instead of as the missing key these
+        // tests exist to catch.
+        if (children.Length % 2 != 0)
+            throw new InvalidDataException($"malformed plist: {children.Length} elements in the dict, expected pairs");
+
         var entries = new Dictionary<string, XElement>(StringComparer.Ordinal);
-        for (int i = 0; i + 1 < children.Length; i += 2)
+        for (int i = 0; i < children.Length; i += 2)
+        {
+            if (children[i].Name.LocalName != "key")
+                throw new InvalidDataException($"malformed plist: expected <key> at position {i}, found <{children[i].Name.LocalName}>");
+
             entries[children[i].Value] = children[i + 1];
+        }
+
         return entries;
     }
 }
