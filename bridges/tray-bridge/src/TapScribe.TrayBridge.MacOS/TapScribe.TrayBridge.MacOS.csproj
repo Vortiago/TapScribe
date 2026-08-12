@@ -35,6 +35,14 @@
          on nothing. A test pins the two together. -->
     <SupportedOSPlatformVersion>14.4</SupportedOSPlatformVersion>
     <ValidateXcodeVersion>false</ValidateXcodeVersion>
+
+    <!-- The bundle's two version keys, derived rather than declared, so the release job's
+         single -p:Version= from the git tag reaches the .app the way it already reaches the
+         Windows exe. Info.plist carries no version literal precisely so there is nothing to
+         go stale between releases; without this the SDK would stamp its own 1.0 default and
+         -p:Version= would be silently ignored. -->
+    <ApplicationDisplayVersion>$(Version)</ApplicationDisplayVersion>
+    <ApplicationVersion>$(Version)</ApplicationVersion>
   </PropertyGroup>
 
   <ItemGroup>

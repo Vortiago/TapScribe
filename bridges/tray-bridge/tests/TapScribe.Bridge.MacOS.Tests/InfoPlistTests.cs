@@ -1,5 +1,3 @@
-using TapScribe.Bridge.MacOS;
-
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
@@ -27,6 +25,20 @@ public class InfoPlistTests
         // override is half of what is being pinned.
         Assert.Equal("net.havso.tapscribe.traybridge", InfoPlist.Entries["CFBundleIdentifier"].Value);
         Assert.Null(ShellProject.Property("ApplicationId"));
+    }
+
+    // Neither key is declared here, for the same reason the Windows tray has no static
+    // version string: a literal in the tree is a hand-maintained copy that goes stale
+    // between releases. tools/bump_version.py owns every statically declared version, and
+    // this bundle deliberately is not one. The csproj derives ApplicationDisplayVersion /
+    // ApplicationVersion from $(Version) instead, so the release job's -p:Version= from the
+    // git tag stamps the .app the way it already stamps the Windows exe.
+    [Theory]
+    [InlineData("CFBundleShortVersionString")]
+    [InlineData("CFBundleVersion")]
+    public void InfoPlist_DeclaresNoVersionOfItsOwn(string key)
+    {
+        Assert.DoesNotContain(key, InfoPlist.Entries.Keys);
     }
 
     [Fact]
