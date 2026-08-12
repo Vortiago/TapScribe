@@ -1,5 +1,3 @@
-using TapScribe.Bridge.MacOS;
-
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
@@ -24,16 +22,16 @@ public class MacOSProductVersionTests
         Assert.Equal(Version.Parse(expected), MacOSProductVersion.Parse(reading));
     }
 
-    // A Mac that will not say what it runs is not one this Bridge supports, and the honest
-    // place to say so is the floor's refusal - not an exception out of the launch path,
-    // which would read as a crash rather than as "your macOS is too old".
+    // Null rather than a throw, so nothing on the launch path has to handle an exception,
+    // and rather than a sentinel version, so the floor can tell "could not read it" apart
+    // from "too old" when it words the refusal.
     [Theory]
     [InlineData("")]
     [InlineData("\0")]
     [InlineData("Sonoma")]
-    public void Parse_AReadingItCannotUnderstand_YieldsAVersionTheFloorRefuses(string reading)
+    public void Parse_AReadingItCannotUnderstand_IsNull(string reading)
     {
-        Assert.NotNull(MacOSVersionFloor.Refusal(MacOSProductVersion.Parse(reading)));
+        Assert.Null(MacOSProductVersion.Parse(reading));
     }
 
     [Fact]
@@ -44,8 +42,9 @@ public class MacOSProductVersionTests
         // major 10 or above, so this is the weakest claim that still proves the OS
         // answered - and, with it, that a P/Invoke works in the VSTest host at all, which
         // is what rules out doing this through the managed ObjC bindings.
-        Version current = MacOSProductVersion.Current();
+        Version? current = MacOSProductVersion.Current();
 
+        Assert.NotNull(current);
         Assert.True(current.Major >= 10, $"expected a real macOS version, read {current}");
     }
 }

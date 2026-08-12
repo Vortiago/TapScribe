@@ -1,5 +1,3 @@
-using TapScribe.Bridge.MacOS;
-
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
@@ -39,5 +37,17 @@ public class MacOSVersionFloorTests
         var running = build < 0 ? new Version(major, minor) : new Version(major, minor, build);
 
         Assert.Null(MacOSVersionFloor.Refusal(running));
+    }
+
+    [Fact]
+    public void Refusal_ForAVersionItCouldNotRead_SaysSoInsteadOfNamingAnAncientMac()
+    {
+        // Both cases refuse, but they are different faults and send the operator to
+        // different places. Reporting an unreadable version as "this Mac runs macOS 0.0"
+        // sends someone who is on a perfectly current Mac off to upgrade it.
+        string? refusal = MacOSVersionFloor.Refusal(null);
+
+        Assert.NotNull(refusal);
+        Assert.DoesNotContain("0.0", refusal);
     }
 }
