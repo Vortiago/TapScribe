@@ -7,7 +7,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>TapScribe Bridge</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.vortiago.tapscribe.traybridge</string>
+	<string>net.havso.tapscribe.traybridge</string>
 	<key>CFBundleExecutable</key>
 	<string>TapScribe.TrayBridge.MacOS</string>
 	<key>CFBundlePackageType</key>

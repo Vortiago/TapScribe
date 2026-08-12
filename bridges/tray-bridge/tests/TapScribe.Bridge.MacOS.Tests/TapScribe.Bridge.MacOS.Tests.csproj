@@ -23,7 +23,7 @@
          installed Xcode, not a floor, so it breaks the moment the macos-latest
          image bumps Xcode. -->
     <ValidateXcodeVersion>false</ValidateXcodeVersion>
-    <ApplicationId>io.github.vortiago.tapscribe.bridge.macos.tests</ApplicationId>
+    <ApplicationId>net.havso.tapscribe.bridge.macos.tests</ApplicationId>
     <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <LinkMode>None</LinkMode>

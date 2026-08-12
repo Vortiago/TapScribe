@@ -11,6 +11,25 @@ namespace TapScribe.Bridge.MacOS.Tests;
 public class InfoPlistTests
 {
     [Fact]
+    public void CFBundleIdentifier_StaysTheKeychainAndLaunchServicesContract()
+    {
+        // Load-bearing far beyond naming. macOS scopes Keychain items to the bundle
+        // identifier, so the operator's saved tap token is reachable under this string and
+        // no other: changing it orphans every stored token exactly as renaming
+        // windows-tray-bridge.json would orphan every saved Windows setting. LaunchServices
+        // also dedupes by it, so a collision lets the OS launch the wrong app. A change here
+        // needs a migration, not an edit.
+        //
+        // Read from the SOURCE plist rather than the built bundle, because the shell cannot
+        // be built on a box whose Xcode trails the macos workload. That is sound for THIS
+        // key: unlike LSMinimumSystemVersion, the SDK copies CFBundleIdentifier through
+        // untouched, unless the csproj sets ApplicationId, which is why the absence of that
+        // override is half of what is being pinned.
+        Assert.Equal("net.havso.tapscribe.traybridge", InfoPlist.Entries["CFBundleIdentifier"].Value);
+        Assert.Null(ShellProject.Property("ApplicationId"));
+    }
+
+    [Fact]
     public void InfoPlist_DeclaresTheAppMenuBarOnly()
     {
         // LSUIElement is what keeps the Bridge out of the Dock and out of Cmd-Tab. It is a
