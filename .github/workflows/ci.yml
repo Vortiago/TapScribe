@@ -405,10 +405,10 @@ jobs:
   # as bridge-js / frontend-typecheck: a C# regression surfaces as its own red
   # check.
   #
-  # It names the Windows-buildable projects one by one rather than the .slnx,
-  # because no single OS can build the solution whole any more: a net10.0-macos
-  # target needs Xcode, which this runner has not got. The .slnx stays the union
-  # view; the macos job below covers the other half.
+  # Each OS names its own projects rather than the .slnx: a net10.0-macos target
+  # needs Xcode, which this runner has not got, and a net10.0-windows one needs
+  # Windows. The .slnx is the union view for an editor; the macos job below
+  # covers the Mac projects.
   #
   # One project per step, deliberately: a pwsh `run:` block reports only the
   # LAST command's exit code, so several `dotnet test` calls batched into one
@@ -425,9 +425,9 @@ jobs:
           global-json-file: bridges/tray-bridge/global.json
 
       # dotnet-core-crossplatform runs these on ubuntu for the portability
-      # invariant; running them HERE is a different guarantee, and the only
-      # automated Windows-regression signal left for the meeting/pipeline logic
-      # that was hoisted out of the Windows layer into the core.
+      # invariant. Running them HERE is a different guarantee: Core holds the
+      # meeting and pipeline logic both shells drive, so this is where a Windows
+      # regression in it is caught.
       - name: Test bridge-core
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 

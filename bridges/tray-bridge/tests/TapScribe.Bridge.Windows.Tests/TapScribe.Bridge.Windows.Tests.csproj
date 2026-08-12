@@ -2,9 +2,10 @@
 
   <!-- Windows-only tests for the WASAPI-side bridge library: the DPAPI token
        protection and settings persistence. net10.0-windows, so it builds and
-       runs under the windows `dotnet-build` CI job (dotnet test on the .slnx),
-       NOT the ubuntu core-only job (which targets the core test csproj directly
-       and never sees this project — DPAPI is Windows-only). -->
+       runs under the windows `dotnet-build` CI job, which names this csproj as
+       one of its steps, NOT the ubuntu core-only job (which targets the core
+       test csproj directly and never sees this project; DPAPI is
+       Windows-only). -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

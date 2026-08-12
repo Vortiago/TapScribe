@@ -4,8 +4,8 @@
        lifecycle decisions — ownership, publish ordering, teardown, cancellation — that
        cannot be moved into the cross-platform core because they ARE the shell. Mirrors
        TapScribe.Bridge.Windows.Tests: net10.0-windows, so it builds and runs under the
-       windows `dotnet-build` CI job (dotnet test on the .slnx) and is never seen by the
-       ubuntu core-only job, which targets the core test csproj directly.
+       windows `dotnet-build` CI job, which names this csproj as one of its steps, and is
+       never seen by the ubuntu core-only job, which targets the core test csproj directly.
 
        UseWindowsForms is the one addition over the sibling project: the subject under test
        is a WinForms ApplicationContext, so the tests reference ContextMenuStrip and
