@@ -9,6 +9,14 @@ namespace TapScribe.Bridge.MacOS;
 public static class MacOSProductVersion
 {
     /// <summary>The <paramref name="reading"/> the OS handed back, as a version. Tolerates
-    /// the NUL terminator and padding a C string arrives with.</summary>
-    public static Version Parse(string reading) => Version.Parse(reading.Trim().Trim('\0'));
+    /// the NUL terminator and padding a C string arrives with, and answers
+    /// <see cref="Unreadable"/> for anything it cannot make sense of.</summary>
+    public static Version Parse(string reading) =>
+        Version.TryParse(reading.Trim().Trim('\0'), out Version? version) ? version : Unreadable;
+
+    // A Mac that will not say what it runs is not one this Bridge supports, so the
+    // unreadable case is spelled as a version below every real macOS: the floor then
+    // refuses it through the same path as a genuinely old Mac, and nothing on the launch
+    // path has to handle an exception.
+    private static Version Unreadable { get; } = new(0, 0);
 }

@@ -23,4 +23,16 @@ public class MacOSProductVersionTests
     {
         Assert.Equal(Version.Parse(expected), MacOSProductVersion.Parse(reading));
     }
+
+    // A Mac that will not say what it runs is not one this Bridge supports, and the honest
+    // place to say so is the floor's refusal - not an exception out of the launch path,
+    // which would read as a crash rather than as "your macOS is too old".
+    [Theory]
+    [InlineData("")]
+    [InlineData("\0")]
+    [InlineData("Sonoma")]
+    public void Parse_AReadingItCannotUnderstand_YieldsAVersionTheFloorRefuses(string reading)
+    {
+        Assert.NotNull(MacOSVersionFloor.Refusal(MacOSProductVersion.Parse(reading)));
+    }
 }
