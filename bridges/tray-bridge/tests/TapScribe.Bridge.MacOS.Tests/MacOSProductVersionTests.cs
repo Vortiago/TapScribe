@@ -3,7 +3,7 @@ using TapScribe.Bridge.MacOS;
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
-/// Tests for <see cref="MacOSProductVersion"/> — the thin ambient edge that tells
+/// Tests for <see cref="MacOSProductVersion"/>, the thin ambient edge that tells
 /// <see cref="MacOSVersionFloor"/> what this Mac actually runs (#419). Split in two so the
 /// interesting half is pure: <see cref="MacOSProductVersion.Parse"/> turns the string the
 /// OS hands back into a <see cref="Version"/> and is tested exhaustively here, while

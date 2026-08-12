@@ -3,7 +3,7 @@ using TapScribe.Bridge.MacOS;
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
-/// Tests for <see cref="MacOSVersionFloor"/> — the macOS 14.4 floor the Mac tray Bridge
+/// Tests for <see cref="MacOSVersionFloor"/>, the macOS 14.4 floor the Mac tray Bridge
 /// refuses to launch below (#419). 14.4 is where Core Audio process taps became usable by
 /// an ordinary app, so below it there is no system-audio capture at all and no degraded
 /// mode worth offering (ADR-0020).
