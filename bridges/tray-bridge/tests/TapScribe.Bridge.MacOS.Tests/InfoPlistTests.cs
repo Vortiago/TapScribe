@@ -43,4 +43,17 @@ public class InfoPlistTests
             InfoPlist.Entries["LSMinimumSystemVersion"].Value,
             ShellProject.Property("SupportedOSPlatformVersion"));
     }
+
+    // The two grants a meeting needs: the mic for this side of it, and Core Audio process
+    // taps for what the other apps play (ADR-0020). TCC shows these strings verbatim in the
+    // prompt and refuses to prompt at all without them, so a missing or blank one is both a
+    // dead capture path and an operator reading an empty dialog.
+    [Theory]
+    [InlineData("NSMicrophoneUsageDescription")]
+    [InlineData("NSAudioCaptureUsageDescription")]
+    public void InfoPlist_ExplainsEveryAudioPermissionItAsksFor(string key)
+    {
+        Assert.True(InfoPlist.Entries.ContainsKey(key), $"{key} is not declared");
+        Assert.False(string.IsNullOrWhiteSpace(InfoPlist.Entries[key].Value), $"{key} is blank");
+    }
 }

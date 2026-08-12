@@ -16,6 +16,10 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TapScribe records your microphone while a meeting you started is running, so your side of it can be transcribed.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>TapScribe records the audio other apps play while a meeting you started is running, so the other participants can be transcribed.</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.4</string>
 	<key>LSUIElement</key>
