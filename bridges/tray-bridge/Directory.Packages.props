@@ -1,0 +1,23 @@
+<Project>
+
+  <!-- One version per package for the whole tray-bridge solution. The four test packages
+       were copied verbatim into every test csproj, which is a set of numbers that drift
+       apart one PR at a time; with central management a csproj names a package and this file
+       names its version. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+</Project>

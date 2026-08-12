@@ -13,8 +13,6 @@
        runner. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
 
     <!-- LibraryImport is the source-generated P/Invoke shape, and the marshalling stubs it
          emits use pointers, so the generator refuses to run without this (SYSLIB1062). No

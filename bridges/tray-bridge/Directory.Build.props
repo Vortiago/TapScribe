@@ -1,0 +1,18 @@
+<Project>
+
+  <!-- What every project in bridges/tray-bridge/ shares. Anything that differs per platform
+       or per project (TargetFramework, UseWindowsForms, EnableWindowsTargeting, the app
+       -bundle properties, SupportedOSPlatformVersion, ValidateXcodeVersion, NoWarn) stays in
+       its own csproj, where the reason for it is. -->
+  <PropertyGroup>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Nothing under tests/ is ever a package. Scoped by directory rather than restated in
+       four csprojs, so a new test project inherits it by being in the right place. -->
+  <PropertyGroup Condition="$(MSBuildProjectDirectory.StartsWith('$(MSBuildThisFileDirectory)tests'))">
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>
