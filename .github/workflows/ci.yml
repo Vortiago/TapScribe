@@ -455,6 +455,13 @@ jobs:
         with:
           global-json-file: bridges/tray-bridge/global.json
 
+      # Core owns the settings / state / history stores, and ADR-0020 puts Mac
+      # state under ~/Library/Application Support/TapScribe/, so a path or
+      # filesystem regression that only shows on macOS is caught here. Needs no
+      # workload, hence ahead of the install.
+      - name: Test bridge-core
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
       - name: Install the macos workload
         run: dotnet workload install macos
 
