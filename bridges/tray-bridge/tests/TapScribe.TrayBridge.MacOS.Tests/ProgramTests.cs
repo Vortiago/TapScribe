@@ -12,7 +12,7 @@ public class ProgramTests
     [Fact]
     public void Run_BelowTheFloor_RefusesAndSaysWhy()
     {
-        var complaints = new StringWriter();
+        using var complaints = new StringWriter();
 
         int exit = Program.Run(new Version(14, 3), complaints);
 
@@ -23,7 +23,7 @@ public class ProgramTests
     [Fact]
     public void Run_WithAVersionItCouldNotRead_AlsoRefuses()
     {
-        var complaints = new StringWriter();
+        using var complaints = new StringWriter();
 
         int exit = Program.Run(null, complaints);
 
@@ -36,7 +36,7 @@ public class ProgramTests
     {
         // Silence matters as much as the exit code: a menu-bar app has no console, so
         // anything written here on a healthy launch is noise nobody will ever read.
-        var complaints = new StringWriter();
+        using var complaints = new StringWriter();
 
         int exit = Program.Run(new Version(14, 4), complaints);
 
