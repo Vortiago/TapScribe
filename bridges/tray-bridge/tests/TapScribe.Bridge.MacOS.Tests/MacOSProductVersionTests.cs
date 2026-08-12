@@ -35,4 +35,17 @@ public class MacOSProductVersionTests
     {
         Assert.NotNull(MacOSVersionFloor.Refusal(MacOSProductVersion.Parse(reading)));
     }
+
+    [Fact]
+    public void Current_ReadsARealMacOSVersionFromThisHost()
+    {
+        // Deliberately not compared against the floor: that would assert about whatever
+        // this box happens to run rather than about the reader. Every macOS since 2001 is
+        // major 10 or above, so this is the weakest claim that still proves the OS
+        // answered - and, with it, that a P/Invoke works in the VSTest host at all, which
+        // is what rules out doing this through the managed ObjC bindings.
+        Version current = MacOSProductVersion.Current();
+
+        Assert.True(current.Major >= 10, $"expected a real macOS version, read {current}");
+    }
 }
