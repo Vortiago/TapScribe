@@ -33,9 +33,9 @@ Recorder, Utterance, Session).
 - **`src/TapScribe.Bridge.MacOS`** (net10.0-macos): the Mac platform layer.
   Today just the macOS 14.4 floor and the sysctl that reads this Mac's
   version; Core Audio process-tap capture, device enumeration and Keychain
-  storage land here next. Anything it needs from the OS goes through
-  P/Invoke, never the managed ObjC bindings, because the bindings cannot be
-  constructed under `dotnet test`.
+  storage land here next. Everything it asks the OS goes through P/Invoke,
+  never the managed ObjC bindings (`MacOSProductVersion` states that rule and
+  why).
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
   menu-bar shell. Today the bundle, its `Info.plist` (menu-bar only, mic +
   audio-capture permissions, and deliberately no Screen Recording key) and

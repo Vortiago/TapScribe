@@ -52,10 +52,10 @@ public class InfoPlistTests
     [Fact]
     public void InfoPlist_DeclaresTheSameMinimumSystemVersionAsTheFloor()
     {
-        // Two gates for one rule, and they have to agree or one of them is decoration:
-        // Launch Services refuses to open the bundle on an older Mac, and the floor catches
-        // what it does not (a build run straight from the shell, or a bundle whose plist
-        // was edited without the code following).
+        // The plist key is the readable declaration of the floor, not the value that ships:
+        // the SDK overwrites it from SupportedOSPlatformVersion, which the next test pins to
+        // this one. Asserted against MacOSVersionFloor.Minimum rather than a retyped 14.4 so
+        // the declaration cannot drift from the check the code performs.
         Assert.Equal(
             MacOSVersionFloor.Minimum,
             Version.Parse(InfoPlist.Entries["LSMinimumSystemVersion"].Value));

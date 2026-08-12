@@ -9,10 +9,12 @@ namespace TapScribe.Bridge.MacOS;
 /// <see cref="MacOSVersionFloor"/>: the policy takes a version as a parameter so it can be
 /// tested against releases nobody here runs, and only this class touches the OS.
 ///
-/// The read is a libc P/Invoke rather than NSProcessInfo on purpose. The managed ObjC
-/// bindings are unusable under `dotnet test` - constructing any NSObject-derived type
-/// throws inside ObjCRuntime.Runtime, because the VSTest host never initialises the ObjC
-/// bridge - so a bindings-based reader could not be covered by a test at all.
+/// THE RULE FOR EVERY MAC CALL IN THIS PROJECT, stated here because this is the first code
+/// that obeys it: reach the OS through P/Invoke, never through the managed ObjC bindings.
+/// Constructing any NSObject-derived type under `dotnet test` throws inside
+/// ObjCRuntime.Runtime, because the VSTest host never initialises the ObjC bridge, so a
+/// bindings-based reader could carry no test at all. P/Invoke works in that same host,
+/// which is why this asks sysctl rather than NSProcessInfo.
 /// </summary>
 public static partial class MacOSProductVersion
 {

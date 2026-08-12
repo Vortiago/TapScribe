@@ -12,9 +12,8 @@
 
     <!-- LibraryImport is the source-generated P/Invoke shape, and the marshalling stubs it
          emits use pointers, so the generator refuses to run without this (SYSLIB1062). No
-         hand-written unsafe code lives here. P/Invoke rather than the managed ObjC
-         bindings because the bindings cannot be exercised under `dotnet test`; see
-         MacOSProductVersion. -->
+         hand-written unsafe code lives here. MacOSProductVersion states the rule about
+         reaching the OS through P/Invoke at all. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 

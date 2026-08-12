@@ -5,10 +5,8 @@
        `dotnet-build` CI job only; the windows and ubuntu jobs name their test
        projects explicitly and never see this one (a Mac target needs Xcode).
 
-       Managed ObjC bindings are unusable in this host: constructing any
-       NSObject-derived type throws inside ObjCRuntime.Runtime because the VSTest
-       host never initialises the ObjC bridge. P/Invoke works. So anything Mac
-       that wants a test here reaches the OS through P/Invoke, never bindings. -->
+       This is the host in which the managed ObjC bindings do not work, which is why
+       MacOSProductVersion's rule (reach the OS through P/Invoke, never bindings) exists. -->
   <PropertyGroup>
     <TargetFramework>net10.0-macos</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
