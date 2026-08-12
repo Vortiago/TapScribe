@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- macOS-only platform layer, the sibling of TapScribe.Bridge.Windows: the
+       cross-platform core (TapScribe.Bridge.Core) references neither, so a Mac
+       API can only ever enter through here. A plain net10.0-macos LIBRARY needs
+       none of the app-bundle properties the test project carries; only an Exe
+       switches that pipeline on. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-macos</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- macOS-only tests for the Mac platform layer, the sibling of
+       TapScribe.Bridge.Windows.Tests. net10.0-macos, so it runs under the macos
+       `dotnet-build` CI job only; the windows and ubuntu jobs name their test
+       projects explicitly and never see this one (a Mac target needs Xcode).
+
+       Managed ObjC bindings are unusable in this host: constructing any
+       NSObject-derived type throws inside ObjCRuntime.Runtime because the VSTest
+       host never initialises the ObjC bridge. P/Invoke works. So anything Mac
+       that wants a test here reaches the OS through P/Invoke, never bindings. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-macos</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+
+    <!-- Microsoft.NET.Test.Sdk forces OutputType=Exe and overrides an explicit
+         Library, which turns on the macOS app-bundle pipeline; these five are
+         what that pipeline then demands, each a hard build error when absent.
+         ValidateXcodeVersion is off UNCONDITIONALLY rather than per CI job
+         because the underlying check is exact major.minor equality against the
+         installed Xcode, not a floor, so it breaks the moment the macos-latest
+         image bumps Xcode. -->
+    <ValidateXcodeVersion>false</ValidateXcodeVersion>
+    <ApplicationId>io.github.vortiago.tapscribe.bridge.macos.tests</ApplicationId>
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <LinkMode>None</LinkMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TapScribe.Bridge.MacOS\TapScribe.Bridge.MacOS.csproj" />
+  </ItemGroup>
+
+</Project>
