@@ -198,6 +198,13 @@ internal sealed class FakeAudioDeviceEnumerator : IAudioDeviceEnumerator
         _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
             ? capture
             : throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+
+    /// <summary>Records the release. There are no handles behind this fake, but the seam
+    /// declares one, so the double answers it rather than leaving a real backend's obligation
+    /// invisible to the tests.</summary>
+    public bool Disposed { get; private set; }
+
+    public void Dispose() => Disposed = true;
 }
 
 /// <summary>

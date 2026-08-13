@@ -100,10 +100,11 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
 /// <summary>
 /// A scripted device enumerator: hands out <see cref="FakeCapture"/>s for a fixed device
 /// list, records whether the shell released it, and can fail an <see cref="Open"/> the way a
-/// device that is busy or gone does. Disposable, like every real backend — the core seam
-/// doesn't declare it, so this is also what proves the shell releases it through the seam.
+/// device that is busy or gone does. The release is the seam's own
+/// <see cref="IDisposable"/>, which is what makes "did the shell release it, and after the
+/// captures" assertable.
 /// </summary>
-internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
+internal sealed class FakeEnumerator : IAudioDeviceEnumerator
 {
     private readonly List<CaptureDevice> _devices = [];
     private readonly Dictionary<string, FakeCapture> _captures = new(StringComparer.Ordinal);

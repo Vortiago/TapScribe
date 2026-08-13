@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace TapScribe.Bridge.Core;
 
 /// <summary>Carries a chunk of raw, device-format PCM from a capture device.</summary>
@@ -62,8 +64,19 @@ public interface IAudioCapture : IDisposable
     event EventHandler<Exception?>? Failed;
 
     /// <summary>Begin capturing. <see cref="DataAvailable"/> fires until <see cref="Stop"/>.</summary>
+    /// <exception cref="ExternalException">The platform refused to start the endpoint. This is
+    /// the seam's declared failure type for a native/driver error (Windows' <c>COMException</c>
+    /// derives from it), and a backend must not leak a platform-specific exception type above
+    /// the seam: <see cref="CaptureOrchestrator.StartAll"/> filters on this one to skip a dead
+    /// device without sinking the meeting.</exception>
+    /// <exception cref="InvalidOperationException">The device is already started, or
+    /// closed.</exception>
     void Start();
 
     /// <summary>Stop capturing. Safe to call when not started.</summary>
+    /// <exception cref="ExternalException">The endpoint was invalidated while capture ran
+    /// (unplugged / disabled / default-device switch), so there is nothing left to stop. Same
+    /// declared type as <see cref="Start"/>: teardown swallows it and releases the device
+    /// anyway, so a backend that raises anything else strands the endpoint.</exception>
     void Stop();
 }

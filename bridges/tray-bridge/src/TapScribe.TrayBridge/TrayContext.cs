@@ -116,12 +116,6 @@ internal sealed class TrayContext : ApplicationContext
         _deps.ScheduleOnLoopStart(ResumeIfNeeded);
     }
 
-    // Release a device enumerator. The core's IAudioDeviceEnumerator seam doesn't declare
-    // IDisposable — listing endpoints needs no lifetime — but every real backend holds COM
-    // handles and does, so the shell that opened one releases it here.
-    private static void Release(IAudioDeviceEnumerator? enumerator) =>
-        (enumerator as IDisposable)?.Dispose();
-
     // ---- Test-visible state (read-only) -------------------------------------------------
     // The tray's observable surface, so TapScribe.TrayBridge.Tests can assert on what the
     // operator would see without a message loop or a visible window. Nothing here mutates.
@@ -310,7 +304,7 @@ internal sealed class TrayContext : ApplicationContext
                 or OperationCanceledException
                 or JsonException
                 or InvalidOperationException
-                or COMException
+                or ExternalException
                 or NotSupportedException
                 or ArgumentException)
         {
@@ -339,7 +333,7 @@ internal sealed class TrayContext : ApplicationContext
             // List()/Resolve() (whether or not the catch filter matches it), or normal
             // completion. Once the orchestrator owns the enumerator (line above), this is
             // null and the release is a no-op, so the running meeting keeps its devices.
-            Release(enumerator);
+            enumerator?.Dispose();
         }
 
         if (started is null)
@@ -371,9 +365,10 @@ internal sealed class TrayContext : ApplicationContext
 
     // Open one resolved device behind the capture seam and add a pipeline for it.
     // Best-effort: a device that fails to OPEN is surfaced and skipped, so a dead loopback
-    // doesn't stop the mic from recording. (Opening a device is Windows-side, so the
+    // doesn't stop the mic from recording. (Opening a device is the shell's own stage, so the
     // cross-platform CaptureOrchestrator can't own it; it owns the symmetric START-failure
-    // half — capture.Start throwing inside TapSession.Begin.)
+    // half — capture.Start throwing inside TapSession.Begin. The filter names the enumerator
+    // seam's declared failure, ExternalException, which Windows' COMException derives from.)
     private void TryAddSpec(List<PipelineSpec> into, IAudioDeviceEnumerator enumerator,
                             CaptureDevice device, TapConnectionOptions options, GateOptions gate,
                             SynchronizationContext ui)
@@ -383,7 +378,7 @@ internal sealed class TrayContext : ApplicationContext
             into.Add(new PipelineSpec(enumerator.Open(device), options, gate));
         }
         catch (Exception ex) when (
-            ex is COMException or NotSupportedException or ArgumentException or InvalidOperationException)
+            ex is ExternalException or NotSupportedException or ArgumentException or InvalidOperationException)
         {
             ui.Post(_ => ShowBalloon($"Could not open {device.Name}", ex.Message), null);
         }
@@ -459,7 +454,7 @@ internal sealed class TrayContext : ApplicationContext
                     // after the await it was skipped on a throw, and nothing else holds
                     // this enumerator once End has detached the meeting — so the devices
                     // stayed open until the process exited.
-                    Release(enumerator);
+                    enumerator?.Dispose();
                 }
             });
     }
@@ -757,7 +752,7 @@ internal sealed class TrayContext : ApplicationContext
         // AggregateException. The timeout is a backstop; a sub-second tail may drop on a
         // hard quit.
         orchestrator?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
-        Release(enumerator);
+        enumerator?.Dispose();
 
         Dispose();
         ExitThread();
