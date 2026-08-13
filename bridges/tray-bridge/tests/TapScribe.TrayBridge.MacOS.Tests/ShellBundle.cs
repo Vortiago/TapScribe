@@ -65,9 +65,15 @@ internal static class ShellBundle
     {
         string root = Path.Join(ProjectDirectory, "bin", Configuration);
         string tail = Path.Join($"{ProjectName}.app", "Contents", "Info.plist");
+        // Only the BUILD output counts, so anything under publish/ is skipped. A publish
+        // artifact is a second bundle this search has no way to rank against the first, and
+        // two matches fail the exactly-one rule below and take every test in this project
+        // with them. The build output is the one the ProjectReference guarantees is current.
+        string published = $"{Path.DirectorySeparatorChar}publish{Path.DirectorySeparatorChar}";
         string[] found = Directory.Exists(root)
             ? [.. Directory.GetFiles(root, "Info.plist", SearchOption.AllDirectories)
-                .Where(p => p.EndsWith(tail, StringComparison.Ordinal))]
+                .Where(p => p.EndsWith(tail, StringComparison.Ordinal))
+                .Where(p => !p.Contains(published, StringComparison.Ordinal))]
             : [];
 
         return found.Length == 1

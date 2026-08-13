@@ -39,6 +39,23 @@ public class InfoPlistTests
         Assert.False(InfoPlist.Source.Declares(key));
     }
 
+    // The other half of the same decision, and the half that is actually about what ships:
+    // removing ApplicationDisplayVersion / ApplicationVersion from the csproj does not error,
+    // it makes the SDK stamp its own default and silently ignore the release job's
+    // -p:Version=. The absence test above stays green through exactly that regression.
+    //
+    // Presence is all this level can honestly claim. A build that was not given -p:Version=
+    // legitimately reads the SDK's "1.0", and the macOS CI job is such a build, so asserting
+    // any particular value here would fail on every run that is not a tagged release. The
+    // value is checked against the tag at release time.
+    [Theory]
+    [InlineData("CFBundleShortVersionString")]
+    [InlineData("CFBundleVersion")]
+    public void BuiltInfoPlist_CarriesAVersion(string key)
+    {
+        Assert.True(InfoPlist.Built.Declares(key), $"{key} is not stamped into the bundle");
+    }
+
     [Fact]
     public void InfoPlist_DeclaresTheAppMenuBarOnly()
     {
