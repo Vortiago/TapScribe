@@ -105,7 +105,7 @@ public sealed class BridgeSettings
         string micLabel =
             !string.IsNullOrWhiteSpace(Name) ? Name.Trim()
             : !string.IsNullOrWhiteSpace(Identity) ? Identity.Trim()
-            : FallbackIdentity();
+            : FallbackIdentity(WindowsFallbackIdentity);
         return
         [
             new DeviceSelection.FollowDefault(DeviceFlow.Capture, micLabel, micLabel),
@@ -189,14 +189,30 @@ public sealed class BridgeSettings
     // blank. Shared by ToConnectionOptions and the gate-by-identity map so the live re-tune
     // keys line up with the tap identities.
     private string EffectiveIdentity =>
-        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
+        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity(WindowsFallbackIdentity) : Identity.Trim();
+
+    /// <summary>
+    /// The identity the Windows tray streams under when the OS offers no username. Frozen,
+    /// and deliberately keeping its pre-rename spelling: the identity is the WAV filename slug
+    /// and the key the Recorder attributes recordings under, so changing it re-attributes the
+    /// tray as a brand-new speaker (see <see cref="TapConnectionOptions.Identity"/>). A shell
+    /// on another platform passes its own to <see cref="SeedFromEnvironment"/>.
+    /// </summary>
+    private const string WindowsFallbackIdentity = "windows-tray";
 
     /// <summary>
     /// Defaults for a first run with no saved file: seed from the legacy
     /// environment variables when present (so an existing env-based setup keeps
     /// working), otherwise sensible defaults.
+    ///
+    /// <paramref name="fallbackIdentity"/> is what to seed when neither
+    /// <c>TAPSCRIBE_IDENTITY</c> nor the OS has a name to offer. It is a per-platform value
+    /// (see <see cref="WindowsFallbackIdentity"/>), so the shell supplies it and the core only
+    /// holds the Windows default. <paramref name="osUserName"/> reads the OS username;
+    /// injected so the no-username path is exercisable without an OS-level fixture.
     /// </summary>
-    public static BridgeSettings SeedFromEnvironment()
+    public static BridgeSettings SeedFromEnvironment(
+        string fallbackIdentity = WindowsFallbackIdentity, Func<string>? osUserName = null)
     {
         return new BridgeSettings
         {
@@ -204,7 +220,7 @@ public sealed class BridgeSettings
             Port = int.TryParse(Env("TAPSCRIBE_PORT"), out int port) ? port : 8001,
             Tls = Env("TAPSCRIBE_TLS") is "1" or "true",
             AllowSelfSignedCert = Env("TAPSCRIBE_TLS_ALLOW_SELF_SIGNED") is "1" or "true",
-            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(),
+            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(fallbackIdentity, osUserName),
             Name = Env("TAPSCRIBE_NAME") ?? "",
             Token = Env("TAPSCRIBE_TAP_TOKEN") ?? "",
         };
@@ -216,13 +232,9 @@ public sealed class BridgeSettings
         }
     }
 
-    private static string FallbackIdentity()
+    private static string FallbackIdentity(string fallback, Func<string>? osUserName = null)
     {
-        string user = Environment.UserName;
-        // "windows-tray" deliberately keeps its pre-rename spelling: the identity
-        // is the WAV filename slug and the key the Recorder attributes recordings
-        // under, so changing it re-attributes the tray as a brand-new speaker
-        // (see TapConnectionOptions.Identity).
-        return string.IsNullOrEmpty(user) ? "windows-tray" : user;
+        string user = (osUserName ?? (static () => Environment.UserName))();
+        return string.IsNullOrEmpty(user) ? fallback : user;
     }
 }

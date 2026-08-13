@@ -80,6 +80,28 @@ public class SeedFromEnvironmentTests
             });
     }
 
+    [Fact]
+    public void SeedFromEnvironment_WhenTheOsOffersNoUserName_UsesTheCallersFallbackIdentity()
+    {
+        WithEnv(
+            new() { ["TAPSCRIBE_IDENTITY"] = null },
+            () =>
+            {
+                // The identity is the WAV filename slug and the key the Recorder attributes
+                // recordings under, so it belongs to the SHELL, not to the core: a shell that
+                // is not the Windows tray must not seed itself as one.
+                BridgeSettings elsewhere = BridgeSettings.SeedFromEnvironment(
+                    "mac-tray", osUserName: static () => "");
+                Assert.Equal("mac-tray", elsewhere.Identity);
+
+                // ...and the Windows slug is frozen: changing it re-attributes the tray as a
+                // brand-new speaker, so a caller that names no fallback still gets it verbatim.
+                BridgeSettings unqualified = BridgeSettings.SeedFromEnvironment(
+                    osUserName: static () => "");
+                Assert.Equal("windows-tray", unqualified.Identity);
+            });
+    }
+
     /// <summary>Set the given env vars, run the body, then restore every key to its prior value.</summary>
     private static void WithEnv(Dictionary<string, string?> values, Action body)
     {
