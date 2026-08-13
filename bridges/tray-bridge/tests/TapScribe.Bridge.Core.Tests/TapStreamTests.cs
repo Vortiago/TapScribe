@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.Core.Tests;
@@ -101,6 +102,36 @@ public class TapStreamTests
         // frames are flushed on reconnect.
         var received = transport.Connections.SelectMany(c => c.Sent).ToHashSet();
         Assert.True(received.IsSupersetOf(Enumerable.Range(0, 50)), "every frame delivered across the blip");
+        Assert.Equal(50, stream.FramesSent);
+    }
+
+    [Fact]
+    public async Task MidUtteranceNativeFailure_IsTreatedAsTransport_AndTheUtteranceSurvives()
+    {
+        // A transport whose native stack reports failures as ExternalException rather than a
+        // managed WebSocketException. That is a blip like any other, so the utterance must
+        // reconnect under the same utterance_id; treating it as terminal kills the pump and
+        // silently ends the tap mid-speech.
+        var transport = new FakeTapTransport
+        {
+            Failure = static () => new ExternalException("the native transport stack failed"),
+        };
+        var options = new TapConnectionOptions { Identity = "mic", UtteranceId = "utt-native" };
+        var stream = TapStream.Begin(options, FastOptions(), connectionFactory: transport.Create);
+
+        EnqueueRange(stream, 0, 20);
+        await Poll.UntilAsync(() => transport.SentCount(0) >= 20, Wait, "conn0 to receive 20 frames");
+
+        transport.Up = false;
+        EnqueueRange(stream, 20, 30); // gap frames, buffered while the native failures repeat
+        await Poll.UntilAsync(() => transport.Connections.Count >= 2, Wait, "a reconnect attempt");
+
+        transport.Up = true;
+        await stream.DrainAndDisposeAsync().WaitAsync(Wait);
+
+        Assert.All(transport.Connections, c => Assert.Equal("utt-native", c.UtteranceId));
+        var received = transport.Connections.SelectMany(c => c.Sent).ToHashSet();
+        Assert.True(received.IsSupersetOf(Enumerable.Range(0, 50)), "every frame delivered across the failure");
         Assert.Equal(50, stream.FramesSent);
     }
 

@@ -277,6 +277,15 @@ internal sealed class FakeTapTransport
 
     public volatile bool Up = true;
 
+    /// <summary>What a connection raises while the transport is down, when the default
+    /// <see cref="WebSocketException"/> is not the shape under test. A native transport stack
+    /// reports its failures as an <see cref="ExternalException"/>, and only a caller-chosen
+    /// exception can drive that through the pump.</summary>
+    public Func<Exception>? Failure { get; init; }
+
+    internal Exception FailureFor(WebSocketError error, string message) =>
+        Failure?.Invoke() ?? new WebSocketException(error, message);
+
     // Per-identity outage: a connection whose options.Identity is listed here
     // fails to connect/send while the others stay up, so a multi-pipeline test can
     // knock out exactly one device. Snapshot array (like Up) so pump threads read
@@ -346,7 +355,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!transport.IsUpFor(Options.Identity))
-            throw new WebSocketException(WebSocketError.Faulted, "transport down");
+            throw transport.FailureFor(WebSocketError.Faulted, "transport down");
         return Task.CompletedTask;
     }
 
@@ -354,7 +363,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!transport.IsUpFor(Options.Identity))
-            throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely, "blip");
+            throw transport.FailureFor(WebSocketError.ConnectionClosedPrematurely, "blip");
         int index = BinaryPrimitives.ReadInt32LittleEndian(frame.Span);
         lock (_lock)
             Sent.Add(index);

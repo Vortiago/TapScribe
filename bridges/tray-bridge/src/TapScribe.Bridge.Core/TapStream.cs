@@ -342,13 +342,17 @@ public sealed class TapStream : IAsyncDisposable
         }
     }
 
+    // A failure of the LINK, not of the utterance: retry it under the same utterance_id.
+    // ExternalException covers a native transport stack (Windows' COMException derives from
+    // it), so a backend outside COM reconnects on the same terms instead of having its pump
+    // killed mid-speech.
     private static bool IsTransport(Exception ex) =>
         ex is WebSocketException
             or IOException
             or SocketException
             or InvalidOperationException
             or FormatException
-            or COMException;
+            or ExternalException;
 
     public async ValueTask DisposeAsync()
     {
