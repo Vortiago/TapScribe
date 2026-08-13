@@ -114,7 +114,7 @@ public class TapStreamTests
         // silently ends the tap mid-speech.
         var transport = new FakeTapTransport
         {
-            Failure = static () => new ExternalException("the native transport stack failed"),
+            Failure = static (_, _) => new ExternalException("the native transport stack failed"),
         };
         var options = new TapConnectionOptions { Identity = "mic", UtteranceId = "utt-native" };
         var stream = TapStream.Begin(options, FastOptions(), connectionFactory: transport.Create);

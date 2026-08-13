@@ -275,9 +275,8 @@ public sealed class TapSession : IAsyncDisposable
                 // on DisposeAsync and is documented to rely on it being throw-free). What is
                 // lost is the stop error's detail; the device loss itself already reached the
                 // operator through IAudioCapture.Failed -> onFailed. The filter is what the
-                // capture seam lets Stop raise: a native failure (ExternalException, which
-                // COMException derives from) or InvalidOperationException. An unexpected
-                // exception still escapes.
+                // capture seam lets Stop raise: its declared native failure, or
+                // InvalidOperationException. An unexpected exception still escapes.
             }
         }
 

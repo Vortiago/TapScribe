@@ -430,8 +430,7 @@ internal sealed class SettingsForm : Form
         {
             // Enumeration failed (no audio service, a native error): the two follow-default
             // checkboxes still work (they resolve at Start), so just show no pin rows. The
-            // filter names the enumerator seam's declared failure, ExternalException, which
-            // Windows' COMException derives from.
+            // filter names the enumerator seam's declared failure.
             available = [];
             _deviceStatus.Text = $"Could not list devices: {ex.Message}";
         }

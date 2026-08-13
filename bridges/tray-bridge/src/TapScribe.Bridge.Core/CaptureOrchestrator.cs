@@ -101,12 +101,10 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                     // TapSession.Begin rethrows WITHOUT disposing the capture — it only
                     // unsubscribes — so release it here and surface the failure tagged by
                     // identity. The filter is what capture.Start throws: the seam's declared
-                    // native failure (ExternalException, which Windows' COMException derives
-                    // from), or InvalidOperationException for an already-started or closed
-                    // device. Anything else is NOT a skippable device failure and goes to the
-                    // unwind below, notably the ArgumentOutOfRangeException a TapSession
-                    // raises for out-of-range gate tuning, which is a caller bug and must
-                    // propagate. Dispose is contract-bound not to throw.
+                    // native failure, or InvalidOperationException for an already-started or
+                    // closed device. Anything else is NOT a skippable device failure and goes
+                    // to the unwind below, which owns that rule. Dispose is contract-bound not
+                    // to throw.
                     spec.Capture.Dispose();
                     onFailed(identity, ex);
                 }

@@ -21,8 +21,14 @@ public class ZeroPipelineMeetingTests
     public void StartAll_WhenEveryDeviceFailsToStart_ThrowsInsteadOfReturningADeadMeeting()
     {
         var transport = new FakeTapTransport();
-        var mic = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true };
-        var system = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true };
+        var mic = new FakeAudioCapture(RecorderFormat)
+        {
+            StartError = new InvalidOperationException("device open failed"),
+        };
+        var system = new FakeAudioCapture(RecorderFormat)
+        {
+            StartError = new InvalidOperationException("device open failed"),
+        };
         var failures = new List<string>();
 
         Assert.Throws<InvalidOperationException>(() => CaptureOrchestrator.StartAll(

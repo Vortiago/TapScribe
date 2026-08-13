@@ -368,7 +368,7 @@ internal sealed class TrayContext : ApplicationContext
     // doesn't stop the mic from recording. (Opening a device is the shell's own stage, so the
     // cross-platform CaptureOrchestrator can't own it; it owns the symmetric START-failure
     // half, capture.Start throwing inside TapSession.Begin. The filter names the enumerator
-    // seam's declared failure, ExternalException, which Windows' COMException derives from.)
+    // seam's declared failure.)
     private void TryAddSpec(List<PipelineSpec> into, IAudioDeviceEnumerator enumerator,
                             CaptureDevice device, TapConnectionOptions options, GateOptions gate,
                             SynchronizationContext ui)

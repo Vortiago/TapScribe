@@ -327,7 +327,11 @@ public class CaptureOrchestratorTests
     {
         var transport = new FakeTapTransport();
         var mic = new FakeAudioCapture(RecorderFormat);
-        var badSystem = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true }; // device fails to open
+        // A device that fails to open the managed way: already started, or closed.
+        var badSystem = new FakeAudioCapture(RecorderFormat)
+        {
+            StartError = new InvalidOperationException("device open failed"),
+        };
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
@@ -358,7 +362,6 @@ public class CaptureOrchestratorTests
         var transport = new FakeTapTransport();
         var badMic = new FakeAudioCapture(RecorderFormat)
         {
-            ThrowOnStart = true,
             StartError = new ExternalException("the driver refused the endpoint"),
         };
         var system = new FakeAudioCapture(RecorderFormat);

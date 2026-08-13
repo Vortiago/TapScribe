@@ -105,30 +105,22 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     /// throw-free, never to be idempotent.</summary>
     public int Disposals => Volatile.Read(ref _disposals);
 
-    /// <summary>When set, <see cref="Start"/> throws <see cref="StartError"/>: a device that
-    /// fails to open (in use, invalidated, unsupported format). Records disposal (via
-    /// <see cref="Disposed"/>) and still supports real <see cref="Failed"/> subscription, so a
-    /// test can drive both the orchestrator's failed-capture cleanup and TapSession's
-    /// ctor-catch unwind, then assert a late Failed reaches nobody.</summary>
-    public bool ThrowOnStart { get; init; }
+    /// <summary>When set, <see cref="Start"/> throws it: a device that fails to open (in use,
+    /// invalidated, unsupported format). Records disposal (via <see cref="Disposed"/>) and
+    /// still supports real <see cref="Failed"/> subscription, so a test can drive both the
+    /// orchestrator's failed-capture cleanup and TapSession's ctor-catch unwind, then assert a
+    /// late Failed reaches nobody. Each caller names the failure it models: an
+    /// <see cref="InvalidOperationException"/> for the already-started / closed-device case, an
+    /// <see cref="ExternalException"/> for a backend whose NATIVE layer refused the
+    /// endpoint.</summary>
+    public Exception? StartError { get; init; }
 
-    /// <summary>What <see cref="Start"/> throws when <see cref="ThrowOnStart"/> is set: by
-    /// default the already-started / closed-device case. A backend whose NATIVE layer refuses
-    /// the endpoint raises an <see cref="ExternalException"/> instead (the failure type the
-    /// capture seam declares), so a test drives that shape by naming it here.</summary>
-    public Exception StartError { get; init; } = new InvalidOperationException("device open failed");
-
-    /// <summary>When set, <see cref="Stop"/> throws <see cref="StopError"/>: the endpoint was
-    /// invalidated while the meeting ran (unplugged / disabled / default-device switch), which
-    /// is what AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does
-    /// not promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is
-    /// contract-bound), so the core must survive a backend that doesn't swallow it.</summary>
-    public bool ThrowOnStop { get; init; }
-
-    /// <summary>What <see cref="Stop"/> throws when <see cref="ThrowOnStop"/> is set. Same
-    /// choice as <see cref="StartError"/>: the default is the managed shape, and a native
-    /// teardown failure is spelled as an <see cref="ExternalException"/>.</summary>
-    public Exception StopError { get; init; } = new InvalidOperationException("endpoint invalidated");
+    /// <summary>When set, <see cref="Stop"/> throws it: the endpoint was invalidated while the
+    /// meeting ran (unplugged / disabled / default-device switch), which is what
+    /// AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does not
+    /// promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is contract-bound),
+    /// so the core must survive a backend that doesn't swallow it.</summary>
+    public Exception? StopError { get; init; }
 
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
@@ -139,7 +131,7 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 
     public void Start()
     {
-        if (ThrowOnStart)
+        if (StartError is not null)
             throw StartError;
         Started = true;
     }
@@ -147,7 +139,7 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     public void Stop()
     {
         Stopped = true;
-        if (ThrowOnStop)
+        if (StopError is not null)
             throw StopError;
     }
     public void Dispose() => Interlocked.Increment(ref _disposals);
@@ -284,14 +276,12 @@ internal sealed class FakeTapTransport
 
     public volatile bool Up = true;
 
-    /// <summary>What a connection raises while the transport is down, when the default
-    /// <see cref="WebSocketException"/> is not the shape under test. A native transport stack
-    /// reports its failures as an <see cref="ExternalException"/>, and only a caller-chosen
-    /// exception can drive that through the pump.</summary>
-    public Func<Exception>? Failure { get; init; }
-
-    internal Exception FailureFor(WebSocketError error, string message) =>
-        Failure?.Invoke() ?? new WebSocketException(error, message);
+    /// <summary>What a connection raises while the transport is down. The default is the
+    /// managed shape; a native transport stack reports its failures as an
+    /// <see cref="ExternalException"/> instead, and only a caller-chosen exception can drive
+    /// that through the pump.</summary>
+    public Func<WebSocketError, string, Exception> Failure { get; init; } =
+        static (error, message) => new WebSocketException(error, message);
 
     // Per-identity outage: a connection whose options.Identity is listed here
     // fails to connect/send while the others stay up, so a multi-pipeline test can
@@ -362,7 +352,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!transport.IsUpFor(Options.Identity))
-            throw transport.FailureFor(WebSocketError.Faulted, "transport down");
+            throw transport.Failure(WebSocketError.Faulted, "transport down");
         return Task.CompletedTask;
     }
 
@@ -370,7 +360,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!transport.IsUpFor(Options.Identity))
-            throw transport.FailureFor(WebSocketError.ConnectionClosedPrematurely, "blip");
+            throw transport.Failure(WebSocketError.ConnectionClosedPrematurely, "blip");
         int index = BinaryPrimitives.ReadInt32LittleEndian(frame.Span);
         lock (_lock)
             Sent.Add(index);

@@ -27,7 +27,11 @@ public class TeardownFailureTests
     public async Task EndMeetingAsync_WhenStoppingAnInvalidatedDeviceThrows_StillReleasesEveryDevice()
     {
         var transport = new FakeTapTransport();
-        var mic = new FakeAudioCapture(RecorderFormat) { ThrowOnStop = true }; // invalidated mid-meeting
+        // Invalidated mid-meeting, reported the managed way.
+        var mic = new FakeAudioCapture(RecorderFormat)
+        {
+            StopError = new InvalidOperationException("endpoint invalidated"),
+        };
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
             [Spec(mic, "mic"), Spec(system, "system")],
@@ -59,7 +63,6 @@ public class TeardownFailureTests
         var transport = new FakeTapTransport();
         var mic = new FakeAudioCapture(RecorderFormat)
         {
-            ThrowOnStop = true,
             StopError = new ExternalException("the endpoint went away"),
         };
         var session = TapSession.Begin(
