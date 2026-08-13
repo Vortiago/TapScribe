@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>TapScribe</string>
+	<key>CFBundleDisplayName</key>
+	<string>TapScribe Bridge</string>
+	<key>CFBundleIdentifier</key>
+	<string>net.havso.tapscribe.traybridge</string>
+	<key>CFBundleExecutable</key>
+	<string>TapScribe.TrayBridge.MacOS</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TapScribe records your microphone while a meeting you started is running, so your side of it can be transcribed.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>TapScribe records the audio other apps play while a meeting you started is running, so the other participants can be transcribed.</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

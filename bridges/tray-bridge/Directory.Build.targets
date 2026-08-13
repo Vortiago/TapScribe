@@ -1,0 +1,15 @@
+<Project>
+
+  <!-- Compile (not run) the Windows-targeted projects on a non-Windows dev box, so a macOS
+       contributor still has a compile gate for that side. Four projects want it and the
+       reason is the same for all four, so it is stated once.
+
+       In .targets rather than in Directory.Build.props next door: props is imported above
+       the project body, where $(TargetFramework) is still empty, so the condition could not
+       be written there. Targets is imported below it, which is still well before the
+       framework-reference resolution that raises NETSDK1100. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+</Project>

@@ -2,24 +2,19 @@
 
   <!-- Windows-only tests for the WASAPI-side bridge library: the DPAPI token
        protection and settings persistence. net10.0-windows, so it builds and
-       runs under the windows `dotnet-build` CI job (dotnet test on the .slnx),
-       NOT the ubuntu core-only job (which targets the core test csproj directly
-       and never sees this project — DPAPI is Windows-only). -->
+       runs under the windows `dotnet-build` CI job, which names this csproj as
+       one of its steps, NOT the ubuntu core-only job (which targets the core
+       test csproj directly and never sees this project; DPAPI is
+       Windows-only). -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
-    <!-- Compile (not run) these on a non-Windows dev box: DPAPI can't execute
-         here, but a macOS contributor still gets the compile gate. -->
-    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.4" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
 
   <ItemGroup>

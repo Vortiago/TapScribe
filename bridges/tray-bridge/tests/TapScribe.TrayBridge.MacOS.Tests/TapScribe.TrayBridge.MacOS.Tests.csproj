@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Tests for the macOS shell itself: the bundle it produces and its launch decision.
+       Mirrors TapScribe.TrayBridge.Tests. net10.0-macos, because it references the shell,
+       and the ProjectReference is what guarantees the .app exists by the time these run.
+       That is the point: the assertions read the BUILT bundle's Info.plist, so what is
+       gated is what ships rather than a source file the SDK is free to rewrite.
+
+       Microsoft.NET.Test.Sdk forces OutputType=Exe and overrides an explicit Library, which
+       turns on the macOS app-bundle pipeline; these five are what that pipeline then
+       demands, each a hard build error when absent. ValidateXcodeVersion is off
+       UNCONDITIONALLY rather than per CI job because the underlying check is exact
+       major.minor equality against the installed Xcode, not a floor, so it breaks the
+       moment the macos-latest image bumps Xcode. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-macos</TargetFramework>
+
+    <!-- Spelled out even though Microsoft.NET.Test.Sdk forces it anyway, because it does so
+         from a targets file, too late for the platform-version inference in the props: an
+         app resolves net10.0-macos to the INSTALLED SDK version, a library to an older
+         default, so without this the reference to the shell fails NU1201 on a platform
+         version mismatch. Saying it here also stops the app-bundle pipeline below reading
+         as unexplained. -->
+    <OutputType>Exe</OutputType>
+
+    <ValidateXcodeVersion>false</ValidateXcodeVersion>
+    <ApplicationId>net.havso.tapscribe.traybridge.tests</ApplicationId>
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <LinkMode>None</LinkMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!-- Referencing an app from an app makes the bundle pipeline warn that the shell's
+       runtimeconfig.json has no PublishFolderType and will not be copied into THIS bundle.
+       Correct and wanted: the test host runs the shell's code in-process and never launches
+       its bundle. The warning has no code, so it cannot be NoWarn'd. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TapScribe.TrayBridge.MacOS\TapScribe.TrayBridge.MacOS.csproj" />
+  </ItemGroup>
+
+</Project>

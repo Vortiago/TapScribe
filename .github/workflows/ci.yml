@@ -399,12 +399,20 @@ jobs:
       - name: Run the ${{ matrix.lane }} upstream-contract smoke tests
         run: pytest ${{ matrix.tests }} -q
 
-  # The tray Bridge (bridges/tray-bridge/) is a .NET solution:
-  # a cross-platform bridge-core class library, a Windows WASAPI capture
-  # backend, and a WinForms tray runner. This job builds the whole solution on
-  # its native OS (so the net*-windows WASAPI/WinForms projects compile too) and
-  # runs the core unit tests. Standalone job — same rationale as bridge-js /
-  # frontend-typecheck: a C# regression surfaces as its own red check.
+  # The tray Bridge (bridges/tray-bridge/) is a .NET solution: a cross-platform
+  # bridge-core class library, one platform layer per OS (WASAPI on Windows,
+  # Core Audio on macOS) and one tray shell each. Standalone job, same rationale
+  # as bridge-js / frontend-typecheck: a C# regression surfaces as its own red
+  # check.
+  #
+  # Each OS names its own projects rather than the .slnx: a net10.0-macos target
+  # needs Xcode, which this runner has not got, and a net10.0-windows one needs
+  # Windows. The .slnx is the union view for an editor; the macos job covers the
+  # app-bundle projects and the ubuntu job the two net10.0 ones.
+  #
+  # One project per step, deliberately: a pwsh `run:` block reports only the
+  # LAST command's exit code, so several `dotnet test` calls batched into one
+  # step would go green on a failure in any but the last.
   dotnet-build:
     name: dotnet build + test (windows)
     runs-on: windows-latest
@@ -416,8 +424,64 @@ jobs:
         with:
           global-json-file: bridges/tray-bridge/global.json
 
-      - name: Build + test the whole solution
-        run: dotnet test bridges/tray-bridge/TapScribe.TrayBridge.slnx -c Release
+      # dotnet-core-crossplatform runs these on ubuntu for the portability
+      # invariant. Running them HERE is a different guarantee: Core holds the
+      # meeting and pipeline logic both shells drive, so this is where a Windows
+      # regression in it is caught.
+      - name: Test bridge-core
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
+      - name: Test the Windows platform layer
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj -c Release
+
+      - name: Test the Windows tray shell
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
+
+      - name: Build the Windows tray shell
+        run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
+
+  # The compile gate for the two net10.0-macos projects, the shell and its tests
+  # (ADR-0020): an app bundle needs Xcode and the macos workload, neither of
+  # which the windows or ubuntu runners have, so a break in it is invisible
+  # without this job. The workload is not on the runner image by default.
+  #
+  # The Mac PLATFORM LAYER is net10.0 and deliberately not confined here: it
+  # runs on ubuntu too, and again here, where the tests that ask the running OS
+  # a question stop skipping.
+  dotnet-build-macos:
+    name: dotnet build + test (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: bridges/tray-bridge/global.json
+
+      # Core owns the settings / state / history stores, and ADR-0020 puts Mac
+      # state under ~/Library/Application Support/TapScribe/, so a path or
+      # filesystem regression that only shows on macOS is caught here. Needs no
+      # workload, hence ahead of the install.
+      - name: Test bridge-core
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
+      - name: Install the macos workload
+        run: dotnet workload install macos
+
+      # Also on ubuntu, where [RequiresMacOS] skips. Here it runs.
+      - name: Test the macOS platform layer
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
+
+      # References the shell, so this builds the .app and then asserts against the
+      # bundle it produced. It covers the "Build the macOS tray shell" step, which
+      # stays anyway: a compile break should read as a build failure, not as a
+      # test project that could not restore.
+      - name: Test the macOS tray shell
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj -c Release
+
+      - name: Build the macOS tray shell
+        run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
 
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
@@ -425,6 +489,9 @@ jobs:
   # never the WASAPI/WinForms projects — on Linux fails the moment the core
   # takes a Windows dependency, since the net*-windows projects can't build
   # here. The in-process /tap test server uses Kestrel, so it runs on Linux too.
+  #
+  # The Mac platform layer rides the same lane for the same reason: it is
+  # net10.0, so its policy is gated on every PR rather than only on the Mac.
   dotnet-core-crossplatform:
     name: dotnet core cross-platform (ubuntu)
     runs-on: ubuntu-latest
@@ -438,6 +505,14 @@ jobs:
 
       - name: Build + test bridge-core only
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
+      # The Mac platform layer is net10.0: the floor is Version arithmetic and the
+      # version read is a libc P/Invoke, so it needs neither Xcode nor the macos
+      # workload. Running it here gates Mac policy on the lane every PR crosses.
+      # The one test that asks THIS host its version carries [RequiresMacOS] and
+      # skips at discovery; the macos job is where it runs.
+      - name: Build + test the macOS platform layer
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 
   # The Windows Bundle's Launcher (packaging/windows/, ADR-0015) uses the same
   # Core/Windows split as the tray Bridge above and for the same reason: the

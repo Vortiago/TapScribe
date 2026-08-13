@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The macOS menu-bar shell, the Mac sibling of TapScribe.TrayBridge. It holds no
+       meeting logic: everything but the UI and the platform calls lives in
+       TapScribe.Bridge.Core / TapScribe.Bridge.MacOS (ADR-0020). The UI itself lands in a
+       later slice of #419; today this is the bundle, its Info.plist and the version floor.
+
+       An Exe on this TFM is an app bundle. osx-arm64 and self-contained are ADR-0020's
+       packaging decision (arm64-only, a zipped .app that needs no installed runtime).
+
+       Building this project needs the Xcode whose SDK matches the installed macos workload;
+       ../../README.md has the requirement and why SupportedOSPlatformVersion below makes it
+       hard rather than a nicety.
+
+       ValidateXcodeVersion is off UNCONDITIONALLY rather than per CI job for a separate
+       reason: its check is exact major.minor equality against the installed Xcode, not a
+       floor, so it rejects a NEWER Xcode too and would break on every runner-image bump. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-macos</TargetFramework>
+    <RootNamespace>TapScribe.TrayBridge.MacOS</RootNamespace>
+
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+
+    <!-- The floor, and NOT a duplicate of the Info.plist entry beside it: the SDK stamps
+         LSMinimumSystemVersion into the built bundle from this property, overwriting the
+         source plist. Unset, it stamps the workload's own newest macOS and the .app opens
+         on nothing. A test pins the two together. -->
+    <SupportedOSPlatformVersion>14.4</SupportedOSPlatformVersion>
+    <ValidateXcodeVersion>false</ValidateXcodeVersion>
+
+    <!-- The bundle's two version keys, derived rather than declared, so the release job's
+         single -p:Version= from the git tag reaches the .app the way it already reaches the
+         Windows exe. Info.plist carries no version literal precisely so there is nothing to
+         go stale between releases; without this the SDK would stamp its own 1.0 default and
+         -p:Version= would be silently ignored. -->
+    <ApplicationDisplayVersion>$(Version)</ApplicationDisplayVersion>
+    <ApplicationVersion>$(Version)</ApplicationVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
+    <ProjectReference Include="..\TapScribe.Bridge.MacOS\TapScribe.Bridge.MacOS.csproj" />
+  </ItemGroup>
+
+  <!-- Program is internal (it is the app's own entry point, not an API), and its launch
+       decision is exactly what the shell tests drive. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="TapScribe.TrayBridge.MacOS.Tests" />
+  </ItemGroup>
+
+</Project>

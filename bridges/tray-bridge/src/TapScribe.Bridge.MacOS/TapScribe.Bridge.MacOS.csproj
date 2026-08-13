@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- macOS-only platform layer, the sibling of TapScribe.Bridge.Windows: the
+       cross-platform core (TapScribe.Bridge.Core) references neither, so a Mac
+       API can only ever enter through here.
+
+       net10.0, NOT net10.0-macos. MacOS-specific is about which OS this code
+       talks to, not which TFM binds it: everything here is either pure arithmetic
+       or a libc P/Invoke, both of which compile anywhere. Keeping the plain TFM
+       makes MacOSProductVersion's P/Invoke rule structural rather than
+       remembered, since no NSObject type is even in scope to reach for, and it
+       lets the tests run on the cheap ubuntu lane instead of needing an Xcode
+       runner. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- LibraryImport is the source-generated P/Invoke shape, and the marshalling stubs it
+         emits use pointers, so the generator refuses to run without this (SYSLIB1062). No
+         hand-written unsafe code lives here. MacOSProductVersion states the rule about
+         reaching the OS through P/Invoke at all. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The version-string parse is internal (the shell only ever asks for the ambient
+       reading), and it is exactly what the tests drive. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="TapScribe.Bridge.MacOS.Tests" />
+  </ItemGroup>
+
+</Project>

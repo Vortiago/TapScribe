@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Tests for the Mac platform layer. net10.0 like the library, so they run on
+       every CI lane including ubuntu: the macOS floor is pure policy and deserves
+       to be gated on the cheap job every PR crosses, not only on the Xcode
+       runner. The one test that reads THIS host's version carries
+       [RequiresMacOS] and skips at discovery elsewhere. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TapScribe.Bridge.MacOS\TapScribe.Bridge.MacOS.csproj" />
+  </ItemGroup>
+
+</Project>

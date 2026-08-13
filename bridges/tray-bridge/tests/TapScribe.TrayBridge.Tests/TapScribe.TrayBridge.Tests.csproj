@@ -4,8 +4,8 @@
        lifecycle decisions — ownership, publish ordering, teardown, cancellation — that
        cannot be moved into the cross-platform core because they ARE the shell. Mirrors
        TapScribe.Bridge.Windows.Tests: net10.0-windows, so it builds and runs under the
-       windows `dotnet-build` CI job (dotnet test on the .slnx) and is never seen by the
-       ubuntu core-only job, which targets the core test csproj directly.
+       windows `dotnet-build` CI job, which names this csproj as one of its steps, and is
+       never seen by the ubuntu core-only job, which targets the core test csproj directly.
 
        UseWindowsForms is the one addition over the sibling project: the subject under test
        is a WinForms ApplicationContext, so the tests reference ContextMenuStrip and
@@ -17,13 +17,7 @@
        dedicated STA thread with a hand-pumped SynchronizationContext). -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
     <UseWindowsForms>true</UseWindowsForms>
-    <!-- Compile (not run) these on a non-Windows dev box: WinForms can't execute
-         here, but a macOS contributor still gets the compile gate. -->
-    <EnableWindowsTargeting>true</EnableWindowsTargeting>
 
     <!-- xUnit1031 ("don't block on tasks in a test method") guards against deadlocking a
          test thread that owns a SynchronizationContext the awaited work needs. Neither half
@@ -37,10 +31,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.4" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
 
   <ItemGroup>
