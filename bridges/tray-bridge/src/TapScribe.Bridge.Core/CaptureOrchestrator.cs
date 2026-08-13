@@ -94,16 +94,19 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                         onFailed: ex => onFailed(identity, ex),
                         spec.Gate ?? gate, stream, connectionFactory);
                 }
-                catch (Exception ex) when (ex is COMException or InvalidOperationException)
+                catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
                 {
                     // A device that failed to OPEN is skipped, not fatal: the remaining ones
                     // still start, so one dead device doesn't sink the whole meeting.
                     // TapSession.Begin rethrows WITHOUT disposing the capture — it only
                     // unsubscribes — so release it here and surface the failure tagged by
-                    // identity. The filter is what capture.Start throws (WASAPI's
-                    // COMException, or InvalidOperationException for an already-started or
-                    // closed device); anything else is NOT a skippable device failure and
-                    // goes to the unwind below. Dispose is contract-bound not to throw.
+                    // identity. The filter is what capture.Start throws: the seam's declared
+                    // native failure (ExternalException, which Windows' COMException derives
+                    // from), or InvalidOperationException for an already-started or closed
+                    // device. Anything else is NOT a skippable device failure and goes to the
+                    // unwind below — notably the ArgumentOutOfRangeException a TapSession
+                    // raises for out-of-range gate tuning, which is a caller bug and must
+                    // propagate. Dispose is contract-bound not to throw.
                     spec.Capture.Dispose();
                     onFailed(identity, ex);
                 }

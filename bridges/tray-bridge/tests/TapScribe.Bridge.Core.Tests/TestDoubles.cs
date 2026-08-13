@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -92,24 +93,42 @@ internal static class Fixtures
 /// <see cref="Emit"/>, so a test feeds synthetic PCM with no real audio device.</summary>
 internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 {
+    private int _disposals;
+
     public AudioFormat Format { get; } = format;
     public bool Started { get; private set; }
     public bool Stopped { get; private set; }
-    public bool Disposed { get; private set; }
+    public bool Disposed => Volatile.Read(ref _disposals) > 0;
 
-    /// <summary>When set, <see cref="Start"/> throws — a device that fails to open (in use,
-    /// invalidated, unsupported format). Records disposal (via <see cref="Disposed"/>) and
-    /// still supports real <see cref="Failed"/> subscription, so a test can drive both the
-    /// orchestrator's failed-capture cleanup and TapSession's ctor-catch unwind, then assert
-    /// a late Failed reaches nobody.</summary>
+    /// <summary>How many times this capture was released. An owner that hands a failed
+    /// capture on must not release it twice: the seam binds <see cref="Dispose"/> to be
+    /// throw-free, never to be idempotent.</summary>
+    public int Disposals => Volatile.Read(ref _disposals);
+
+    /// <summary>When set, <see cref="Start"/> throws <see cref="StartError"/> — a device that
+    /// fails to open (in use, invalidated, unsupported format). Records disposal (via
+    /// <see cref="Disposed"/>) and still supports real <see cref="Failed"/> subscription, so a
+    /// test can drive both the orchestrator's failed-capture cleanup and TapSession's
+    /// ctor-catch unwind, then assert a late Failed reaches nobody.</summary>
     public bool ThrowOnStart { get; init; }
 
-    /// <summary>When set, <see cref="Stop"/> throws — the endpoint was invalidated while
-    /// the meeting ran (unplugged / disabled / default-device switch), which is what
-    /// AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does not
-    /// promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is
+    /// <summary>What <see cref="Start"/> throws when <see cref="ThrowOnStart"/> is set: by
+    /// default the already-started / closed-device case. A backend whose NATIVE layer refuses
+    /// the endpoint raises an <see cref="ExternalException"/> instead — the failure type the
+    /// capture seam declares — so a test drives that shape by naming it here.</summary>
+    public Exception StartError { get; init; } = new InvalidOperationException("device open failed");
+
+    /// <summary>When set, <see cref="Stop"/> throws <see cref="StopError"/> — the endpoint was
+    /// invalidated while the meeting ran (unplugged / disabled / default-device switch), which
+    /// is what AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does
+    /// not promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is
     /// contract-bound), so the core must survive a backend that doesn't swallow it.</summary>
     public bool ThrowOnStop { get; init; }
+
+    /// <summary>What <see cref="Stop"/> throws when <see cref="ThrowOnStop"/> is set. Same
+    /// choice as <see cref="StartError"/>: the default is the managed shape, and a native
+    /// teardown failure is spelled as an <see cref="ExternalException"/>.</summary>
+    public Exception StopError { get; init; } = new InvalidOperationException("endpoint invalidated");
 
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
@@ -121,7 +140,7 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     public void Start()
     {
         if (ThrowOnStart)
-            throw new InvalidOperationException("device open failed");
+            throw StartError;
         Started = true;
     }
 
@@ -129,9 +148,9 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     {
         Stopped = true;
         if (ThrowOnStop)
-            throw new InvalidOperationException("endpoint invalidated");
+            throw StopError;
     }
-    public void Dispose() => Disposed = true;
+    public void Dispose() => Interlocked.Increment(ref _disposals);
 
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
 

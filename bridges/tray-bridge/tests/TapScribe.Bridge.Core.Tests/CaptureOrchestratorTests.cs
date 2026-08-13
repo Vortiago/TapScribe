@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 using static TapScribe.Bridge.Core.Tests.Fixtures;
 
@@ -345,6 +346,40 @@ public class CaptureOrchestratorTests
         // disposing — the orchestrator must, or it leaks).
         Assert.Contains(failures, f => f.Identity == "system");
         Assert.True(badSystem.Disposed);
+    }
+
+    [Fact]
+    public async Task StartAll_WhenADeviceFailsToStartWithANativeError_KeepsOthers_ReleasesItOnce_SurfacesIt()
+    {
+        // The capture seam declares a native/driver failure as an ExternalException, so a
+        // backend that isn't Windows COM still lands on the per-device skip. A filter written
+        // in terms of a platform's own exception type quietly stops catching when the backend
+        // changes, and the whole meeting dies on one dead device.
+        var transport = new FakeTapTransport();
+        var badMic = new FakeAudioCapture(RecorderFormat)
+        {
+            ThrowOnStart = true,
+            StartError = new ExternalException("the driver refused the endpoint"),
+        };
+        var system = new FakeAudioCapture(RecorderFormat);
+        var failures = new List<(string Identity, Exception Error)>();
+
+        await using CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(badMic, "mic"), Spec(system, "system")],
+            onConnected: _ => { },
+            onFailed: (id, ex) => { lock (failures) failures.Add((id, ex)); },
+            FastGate(), FastStream(), transport.Create);
+
+        // Best-effort: the device that did start still runs the meeting.
+        Assert.Equal(1, orchestrator.PipelineCount);
+        system.Emit(Loud(40));
+        await Poll.UntilAsync(() => transport.HasStreamed("system"), Wait, "the good pipeline to stream");
+
+        // The dead device is surfaced under its own identity and released exactly once —
+        // TapSession.Begin rethrows without disposing, and nothing else can reach it.
+        (string Identity, Exception Error) failure = Assert.Single(failures);
+        Assert.Equal("mic", failure.Identity);
+        Assert.Equal(1, badMic.Disposals);
     }
 
     [Fact]
