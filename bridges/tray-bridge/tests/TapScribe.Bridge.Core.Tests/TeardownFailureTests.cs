@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 using static TapScribe.Bridge.Core.Tests.Fixtures;
 
@@ -46,5 +47,32 @@ public class TeardownFailureTests
 
         Assert.True(mic.Disposed, "the invalidated device was never released");
         Assert.True(system.Disposed, "a sibling device was taken down with the failing one");
+    }
+
+    [Fact]
+    public async Task DisposeAsync_WhenStoppingFailsNatively_CompletesAndStillReleasesTheDevice()
+    {
+        // The same teardown, from a backend that is not Windows COM. The seam declares a
+        // native failure as an ExternalException, so a filter naming a platform's own type
+        // stops catching the moment the backend changes: the throw then escapes a DisposeAsync
+        // the tray's Quit blocks on, and the device is never released.
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat)
+        {
+            ThrowOnStop = true,
+            StopError = new ExternalException("the endpoint went away"),
+        };
+        var session = TapSession.Begin(
+            mic, new TapConnectionOptions { Identity = "mic", Name = "mic" },
+            onConnected: () => { }, onFailed: _ => { },
+            FastGate(), FastStream(), transport.Create);
+
+        mic.Emit(Loud(40));
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the pipeline to stream");
+
+        await session.DisposeAsync().AsTask().WaitAsync(Wait);
+
+        Assert.True(mic.Stopped);
+        Assert.True(mic.Disposed, "the device was leaked: the stop failure skipped the release");
     }
 }

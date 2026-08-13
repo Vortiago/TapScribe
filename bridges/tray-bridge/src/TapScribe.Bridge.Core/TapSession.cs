@@ -263,7 +263,7 @@ public sealed class TapSession : IAsyncDisposable
             {
                 _capture.Stop();
             }
-            catch (Exception ex) when (ex is COMException or InvalidOperationException)
+            catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
             {
                 // The endpoint was invalidated while the meeting ran (unplugged / disabled /
                 // default-device switch): stopping a WASAPI client for a device that is gone
@@ -274,8 +274,10 @@ public sealed class TapSession : IAsyncDisposable
                 // disposes the device enumerator on the next line) and from Quit (which blocks
                 // on DisposeAsync and is documented to rely on it being throw-free). What is
                 // lost is the stop error's detail; the device loss itself already reached the
-                // operator through IAudioCapture.Failed -> onFailed. The filter is what a
-                // capture backend's Stop can raise, so an unexpected exception still escapes.
+                // operator through IAudioCapture.Failed -> onFailed. The filter is what the
+                // capture seam lets Stop raise: a native failure (ExternalException, which
+                // COMException derives from) or InvalidOperationException. An unexpected
+                // exception still escapes.
             }
         }
 
