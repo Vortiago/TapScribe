@@ -24,6 +24,14 @@ public static partial class MacOSProductVersion
     /// </summary>
     public static Version? Current()
     {
+        // Guarded, not merely documented: this assembly is plain net10.0 on purpose and
+        // builds and runs on the ubuntu lane, where "libc" has no sysctlbyname and the
+        // P/Invoke throws DllNotFound/EntryPointNotFound instead of honouring the
+        // null-when-unreadable contract above. Not-a-Mac is exactly "the OS declines to
+        // say", so it takes the same answer as an unreadable reading.
+        if (!OperatingSystem.IsMacOS())
+            return null;
+
         // sysctl's two-call shape: ask with no buffer to learn the length, then ask again
         // with one that size. The reading comes back NUL-terminated, which Parse trims.
         nuint length = 0;
