@@ -44,11 +44,12 @@ public class TrayEndTeardownTests
         Assert.True(harness.Enumerator.Disposed,
             "the teardown threw and the endpoints were never released");
         Assert.Equal(1, harness.Enumerator.Disposals);
-        // An enumerator hands its endpoint to each capture it opens, so it must outlive them.
-        // The rule is stated in prose at every site that follows it and enforced by no type,
-        // so each path that releases one asserts the order.
-        Assert.True(harness.Enumerator.CapturesReleasedFirst,
-            "the enumerator was released while a capture it opened was still live");
+        // Deliberately NOT asserting CapturesReleasedFirst here, which the clean End and the
+        // Quit path both do. Captures-before-enumerator is the ordering everywhere the teardown
+        // SUCCEEDS, but this test is the path where it throws part-way: the enumerator is
+        // released from a finally precisely so a failed teardown cannot strand the endpoints
+        // for the process lifetime, and a capture the throw skipped is then still live. Holding
+        // the ordering here would mean skipping the release, which is the bug this test pins.
     }
 
     [Fact]
