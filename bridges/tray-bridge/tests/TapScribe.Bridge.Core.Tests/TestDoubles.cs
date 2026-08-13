@@ -105,7 +105,7 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     /// throw-free, never to be idempotent.</summary>
     public int Disposals => Volatile.Read(ref _disposals);
 
-    /// <summary>When set, <see cref="Start"/> throws <see cref="StartError"/> — a device that
+    /// <summary>When set, <see cref="Start"/> throws <see cref="StartError"/>: a device that
     /// fails to open (in use, invalidated, unsupported format). Records disposal (via
     /// <see cref="Disposed"/>) and still supports real <see cref="Failed"/> subscription, so a
     /// test can drive both the orchestrator's failed-capture cleanup and TapSession's
@@ -114,11 +114,11 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 
     /// <summary>What <see cref="Start"/> throws when <see cref="ThrowOnStart"/> is set: by
     /// default the already-started / closed-device case. A backend whose NATIVE layer refuses
-    /// the endpoint raises an <see cref="ExternalException"/> instead — the failure type the
-    /// capture seam declares — so a test drives that shape by naming it here.</summary>
+    /// the endpoint raises an <see cref="ExternalException"/> instead (the failure type the
+    /// capture seam declares), so a test drives that shape by naming it here.</summary>
     public Exception StartError { get; init; } = new InvalidOperationException("device open failed");
 
-    /// <summary>When set, <see cref="Stop"/> throws <see cref="StopError"/> — the endpoint was
+    /// <summary>When set, <see cref="Stop"/> throws <see cref="StopError"/>: the endpoint was
     /// invalidated while the meeting ran (unplugged / disabled / default-device switch), which
     /// is what AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does
     /// not promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is

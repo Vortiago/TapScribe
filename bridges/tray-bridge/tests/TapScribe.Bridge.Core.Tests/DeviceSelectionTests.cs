@@ -117,7 +117,7 @@ public class DeviceSelectionTests
     [Fact]
     public void Resolve_BlankIdentityCollidingWithTheBaseIdentity_VerdictIsDuplicateIdentity()
     {
-        // A blank Speaker ID streams under the BASE identity — ToTapOptions substitutes it —
+        // A blank Speaker ID streams under the BASE identity (ToTapOptions substitutes it),
         // so a blank one and one that spells the base identity out are the same speaker at the
         // Recorder. Told the base identity, Resolve sees that BEFORE any device is opened,
         // which is where the shell has an actionable message ("give each a distinct identity");

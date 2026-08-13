@@ -64,10 +64,10 @@ public class TrayStartTests
     public void Start_WhenTheOrchestratorRefusesTheSpecs_ReleasesEachCaptureExactlyOnce()
     {
         // The real B2 trigger, end to end: both devices open, are handed to StartAll, and
-        // StartAll gives back no orchestrator. Every device here fails to START — each is
-        // released by the core's per-device skip, and then zero pipelines is not a meeting,
-        // so the whole set is refused. Two owners would both release those captures — the
-        // core (which releases what it refuses) and the shell's finally — on a backend that
+        // StartAll gives back no orchestrator. Every device here fails to START, so each is
+        // released by the core's per-device skip, and then zero pipelines is not a meeting
+        // and the whole set is refused. Two owners would both release those captures (the
+        // core, which releases what it refuses, and the shell's finally) on a backend that
         // is contract-bound to be throw-free but nowhere promised to be idempotent.
         using var sta = new StaShell();
         var harness = new TrayHarness();

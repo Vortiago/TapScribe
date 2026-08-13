@@ -375,7 +375,7 @@ public class CaptureOrchestratorTests
         system.Emit(Loud(40));
         await Poll.UntilAsync(() => transport.HasStreamed("system"), Wait, "the good pipeline to stream");
 
-        // The dead device is surfaced under its own identity and released exactly once —
+        // The dead device is surfaced under its own identity and released exactly once:
         // TapSession.Begin rethrows without disposing, and nothing else can reach it.
         (string Identity, Exception Error) failure = Assert.Single(failures);
         Assert.Equal("mic", failure.Identity);
