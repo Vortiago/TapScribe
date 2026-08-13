@@ -44,6 +44,11 @@ public class TrayEndTeardownTests
         Assert.True(harness.Enumerator.Disposed,
             "the teardown threw and the endpoints were never released");
         Assert.Equal(1, harness.Enumerator.Disposals);
+        // An enumerator hands its endpoint to each capture it opens, so it must outlive them.
+        // The rule is stated in prose at every site that follows it and enforced by no type,
+        // so each path that releases one asserts the order.
+        Assert.True(harness.Enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
     }
 
     [Fact]
@@ -85,6 +90,8 @@ public class TrayEndTeardownTests
 
         Assert.True(mic.Stopped && mic.Disposed, "End must stop and release the capture");
         Assert.True(harness.Enumerator.Disposed);
+        Assert.True(harness.Enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
         Assert.True(tray.StartItem.Enabled);
         Assert.False(tray.EndItem.Enabled);
     }

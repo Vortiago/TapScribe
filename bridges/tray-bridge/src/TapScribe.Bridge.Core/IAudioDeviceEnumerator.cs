@@ -24,6 +24,10 @@ public interface IAudioDeviceEnumerator : IDisposable
     /// The active endpoints: both capture devices (mics) and loopback-capable render
     /// devices, each carrying its <see cref="DeviceFlow"/> and default flag.
     /// </summary>
+    /// <exception cref="ExternalException">The platform could not walk the device tree (no
+    /// audio service, a driver error). Same declared type as <see cref="Open"/>: both callers
+    /// that survive a failed enumeration filter on it, and an empty list means "no endpoints",
+    /// never "the question could not be asked".</exception>
     IReadOnlyList<CaptureDevice> List();
 
     /// <summary>

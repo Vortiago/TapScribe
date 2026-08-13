@@ -202,9 +202,14 @@ public sealed class BridgeSettings
     /// (<see cref="DefaultDevices"/>, <see cref="EffectiveIdentity"/> and
     /// <see cref="SeedFromEnvironment"/>) are instance- and seed-level, so making it
     /// per-platform means stamping it onto every settings instance the store loads, not
-    /// threading it through one factory. Slice 7 owns that, alongside the rest of the identity
-    /// defaults; a knob on one of the three sites would read as configured while the other two
-    /// still said Windows.
+    /// threading it through one factory. A knob on one of the three would read as configured
+    /// while the other two still said Windows.
+    ///
+    /// The shape it wants is the one <c>TrayStores.SettingsFileName</c> already has: the same
+    /// class of value (frozen, operator-facing, changing it orphans operator data), living
+    /// Windows-side and reaching the core through <see cref="BridgeSettingsStore"/>'s
+    /// constructor beside the directory and filename. Slice 7 owns that, alongside the rest of
+    /// the identity defaults.
     /// </summary>
     private const string WindowsFallbackIdentity = "windows-tray";
 

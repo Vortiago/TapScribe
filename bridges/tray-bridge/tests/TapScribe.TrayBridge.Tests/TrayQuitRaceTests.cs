@@ -48,6 +48,8 @@ public class TrayQuitRaceTests
         Assert.Equal(1, system.Disposals);
         Assert.True(harness.Enumerator.Disposed, "the device enumerator was abandoned");
         Assert.Equal(1, harness.Enumerator.Disposals);
+        Assert.True(harness.Enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
     }
 
     [Fact]

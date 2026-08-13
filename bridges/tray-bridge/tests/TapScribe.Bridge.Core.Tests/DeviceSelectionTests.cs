@@ -10,6 +10,11 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 public class DeviceSelectionTests
 {
+    /// <summary>The base identity for cases that are not about the blank-Speaker-ID
+    /// substitution. Deliberately unlike any per-device identity these tests use, so it can
+    /// never be the thing an assertion is accidentally matching.</summary>
+    private const string Base = "tray";
+
     private static CaptureDevice Mic(string id, bool isDefault = false) =>
         new(id, $"Mic {id}", DeviceFlow.Capture, isDefault);
 
@@ -27,11 +32,11 @@ public class DeviceSelectionTests
 
         ResolveResult result = DeviceSelection.Resolve(
             [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic")],
-            available);
+            available, Base);
 
         ResolvedDevice resolved = Assert.Single(result.Resolved);
         Assert.Equal("builtin", resolved.Device.Id); // the default, not the USB mic
-        Assert.Equal("mic", resolved.Identity);
+        Assert.Equal("mic", resolved.StreamingIdentity);
         Assert.Equal("My Mic", resolved.Name);
         Assert.Empty(result.Missing);
     }
@@ -46,7 +51,7 @@ public class DeviceSelectionTests
 
         ResolveResult result = DeviceSelection.Resolve(
             [new DeviceSelection.Pinned("usb", "mic", "USB Mic")],
-            available);
+            available, Base);
 
         ResolvedDevice resolved = Assert.Single(result.Resolved);
         Assert.Equal("usb", resolved.Device.Id); // the pinned one, even though it isn't default
@@ -61,7 +66,7 @@ public class DeviceSelectionTests
         IReadOnlyList<CaptureDevice> available = [Mic("builtin", isDefault: true)];
         var gone = new DeviceSelection.Pinned("usb", "mic", "USB Mic");
 
-        ResolveResult result = DeviceSelection.Resolve([gone], available);
+        ResolveResult result = DeviceSelection.Resolve([gone], available, Base);
 
         Assert.Empty(result.Resolved);
         Assert.Same(gone, Assert.Single(result.Missing));
@@ -72,7 +77,7 @@ public class DeviceSelectionTests
     {
         ResolveResult result = DeviceSelection.Resolve(
             [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic")],
-            [Mic("builtin", isDefault: true)]);
+            [Mic("builtin", isDefault: true)], Base);
 
         Assert.Equal(SelectionVerdict.Ok, result.Verdict);
     }
@@ -89,7 +94,7 @@ public class DeviceSelectionTests
                 new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic"),
                 new DeviceSelection.Pinned("gone", "system", "System"),
             ],
-            available);
+            available, Base);
 
         Assert.Empty(result.Resolved);
         Assert.Equal(SelectionVerdict.NothingToCapture, result.Verdict);
@@ -109,7 +114,7 @@ public class DeviceSelectionTests
                 new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "A"),
                 new DeviceSelection.Pinned("usb", "mic", "B"),
             ],
-            available);
+            available, Base);
 
         Assert.Equal(SelectionVerdict.DuplicateIdentity, result.Verdict);
     }
@@ -144,7 +149,7 @@ public class DeviceSelectionTests
                 new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic"),
                 new DeviceSelection.FollowDefault(DeviceFlow.Render, "system", "System Audio"),
             ],
-            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)]);
+            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)], Base);
 
         var baseConn = new TapConnectionOptions { Host = "rec", Port = 9000, Tls = true, Token = "tok" };
         IReadOnlyList<TapConnectionOptions> options =
@@ -179,7 +184,7 @@ public class DeviceSelectionTests
 
         ResolveResult result = DeviceSelection.Resolve(
             [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic")],
-            available);
+            available, Base);
 
         ResolvedDevice resolved = Assert.Single(result.Resolved);
         Assert.Equal("a", resolved.Device.Id);
@@ -199,10 +204,10 @@ public class DeviceSelectionTests
                 new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic", micGate),
                 new DeviceSelection.FollowDefault(DeviceFlow.Render, "system", "System", systemGate),
             ],
-            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)]);
+            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)], Base);
 
-        Assert.Equal(micGate, Assert.Single(result.Resolved, r => r.Identity == "mic").Gate);
-        Assert.Equal(systemGate, Assert.Single(result.Resolved, r => r.Identity == "system").Gate);
+        Assert.Equal(micGate, Assert.Single(result.Resolved, r => r.StreamingIdentity =="mic").Gate);
+        Assert.Equal(systemGate, Assert.Single(result.Resolved, r => r.StreamingIdentity =="system").Gate);
     }
 
     [Fact]
@@ -217,14 +222,14 @@ public class DeviceSelectionTests
                 new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic"),
                 new DeviceSelection.FollowDefault(DeviceFlow.Render, "system", "System"),
             ],
-            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)]);
+            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)], Base);
 
         Assert.Equal(
             GateSettings.DefaultForFlow(DeviceFlow.Capture),
-            Assert.Single(result.Resolved, r => r.Identity == "mic").Gate);
+            Assert.Single(result.Resolved, r => r.StreamingIdentity =="mic").Gate);
         Assert.Equal(
             GateSettings.DefaultForFlow(DeviceFlow.Render),
-            Assert.Single(result.Resolved, r => r.Identity == "system").Gate);
+            Assert.Single(result.Resolved, r => r.StreamingIdentity =="system").Gate);
     }
 
     [Fact]
@@ -235,7 +240,7 @@ public class DeviceSelectionTests
         // `with` copy), or a meeting's taps would silently lose the operator's setting.
         ResolveResult result = DeviceSelection.Resolve(
             [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic")],
-            [Mic("builtin", isDefault: true)]);
+            [Mic("builtin", isDefault: true)], Base);
 
         var baseConn = new TapConnectionOptions { Tls = true, AllowSelfSignedCert = true };
         TapConnectionOptions opt = Assert.Single(result.ToTapOptions("sess", baseConn));
@@ -246,9 +251,13 @@ public class DeviceSelectionTests
     [Fact]
     public void ToTapOptions_BlankIdentityAndName_FallBackToTheBaseIdentity()
     {
+        // The substitution happens at Resolve, so the base identity goes in there and
+        // ToTapOptions stamps what it is handed. Passing it in both places is what a caller
+        // does (TrayContext reads both off one TapConnectionOptions).
         ResolveResult result = DeviceSelection.Resolve(
             [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "", "")],
-            [Mic("builtin", isDefault: true)]);
+            [Mic("builtin", isDefault: true)],
+            baseIdentity: "fallback-id");
 
         var baseConn = new TapConnectionOptions { Identity = "fallback-id", Name = "base-name" };
         TapConnectionOptions opt = Assert.Single(result.ToTapOptions("sess", baseConn));

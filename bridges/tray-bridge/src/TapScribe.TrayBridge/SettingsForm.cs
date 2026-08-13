@@ -426,10 +426,12 @@ internal sealed class SettingsForm : Form
             available = _listDevices();
             _deviceStatus.Text = "";
         }
-        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
         {
-            // Enumeration failed (no audio service, COM error): the two follow-default
-            // checkboxes still work (they resolve at Start), so just show no pin rows.
+            // Enumeration failed (no audio service, a native error): the two follow-default
+            // checkboxes still work (they resolve at Start), so just show no pin rows. The
+            // filter names the enumerator seam's declared failure, ExternalException, which
+            // Windows' COMException derives from.
             available = [];
             _deviceStatus.Text = $"Could not list devices: {ex.Message}";
         }
@@ -484,7 +486,7 @@ internal sealed class SettingsForm : Form
             return meter;
         }
         catch (Exception ex) when (
-            ex is COMException or NotSupportedException or ArgumentException or InvalidOperationException)
+            ex is ExternalException or NotSupportedException or ArgumentException or InvalidOperationException)
         {
             // Device in use / invalidated / unsupported format: leave the bar flat rather
             // than fail the dialog — the same best-effort open as the meeting capture path.

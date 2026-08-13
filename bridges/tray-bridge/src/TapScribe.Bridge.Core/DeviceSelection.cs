@@ -38,10 +38,10 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
 
     /// <summary>
     /// The identity a selection actually streams under: its own, or
-    /// <paramref name="baseIdentity"/> when it is blank. The ONE owner of that substitution,
-    /// so <see cref="Resolve"/>'s collision check and
-    /// <see cref="ResolveResult.ToTapOptions"/>'s stamping cannot disagree about which
-    /// selections are the same speaker.
+    /// <paramref name="baseIdentity"/> when it is blank. Public for
+    /// <see cref="BridgeSettings.ToGateOptionsByIdentity"/>, which keys UNRESOLVED selections
+    /// and so cannot read a <see cref="ResolvedDevice.StreamingIdentity"/>; everything on the
+    /// resolved side reads that property instead of re-deriving this.
     /// </summary>
     public static string EffectiveIdentity(string identity, string baseIdentity) =>
         string.IsNullOrWhiteSpace(identity) ? baseIdentity : identity;
@@ -52,18 +52,20 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
     /// follow-default selection picks the current default of its flow.
     ///
     /// <paramref name="baseIdentity"/> is the identity a blank Speaker ID streams under (the
-    /// caller's <see cref="TapConnectionOptions.Identity"/>). Supply it and the duplicate check
-    /// runs on the identity each device will ACTUALLY tap under, so a blank one colliding with
-    /// a verbatim base identity is refused here, before a device is opened. A caller that has
-    /// no base identity omits it and the raw identities are compared.
+    /// caller's <see cref="TapConnectionOptions.Identity"/>). Required, because the substitution
+    /// is what decides which selections are the SAME SPEAKER: resolving without it compares raw
+    /// identities, so a blank one and a verbatim base one look distinct here and collide at the
+    /// Recorder. Each resolved device carries the answer as its
+    /// <see cref="ResolvedDevice.StreamingIdentity"/>, computed once, right here.
     /// </summary>
     public static ResolveResult Resolve(
         IReadOnlyList<DeviceSelection> selections,
         IReadOnlyList<CaptureDevice> available,
-        string? baseIdentity = null)
+        string baseIdentity)
     {
         ArgumentNullException.ThrowIfNull(selections);
         ArgumentNullException.ThrowIfNull(available);
+        ArgumentNullException.ThrowIfNull(baseIdentity);
 
         var resolved = new List<ResolvedDevice>();
         var missing = new List<DeviceSelection>();
@@ -86,13 +88,12 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
                 // or — for a selection that carried none — the sensible default for the
                 // RESOLVED device's flow (so a loopback still gets the sensitive default).
                 resolved.Add(new ResolvedDevice(
-                    device, selection.Identity, selection.Name,
+                    device, EffectiveIdentity(selection.Identity, baseIdentity), selection.Name,
                     selection.Gate ?? GateSettings.DefaultForFlow(device.Flow)));
         }
 
         bool duplicateIdentity = resolved
-            .GroupBy(r => baseIdentity is null ? r.Identity : EffectiveIdentity(r.Identity, baseIdentity),
-                     StringComparer.Ordinal)
+            .GroupBy(r => r.StreamingIdentity, StringComparer.Ordinal)
             .Any(g => g.Count() > 1);
         SelectionVerdict verdict =
             resolved.Count == 0 ? SelectionVerdict.NothingToCapture
@@ -105,8 +106,16 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
 /// <summary>A selection that resolved to a concrete <see cref="CaptureDevice"/>, carrying
 /// the identity/name it will stream under and the per-device <see cref="GateSettings"/>
 /// its <see cref="LevelGate"/> is built from (always concrete — defaulted by flow when the
-/// selection carried none).</summary>
-public sealed record ResolvedDevice(CaptureDevice Device, string Identity, string Name, GateSettings Gate);
+/// selection carried none).
+///
+/// <paramref name="StreamingIdentity"/> is the substituted identity, never the raw one off the
+/// selection: a blank Speaker ID is already resolved to the base identity by the time it lands
+/// here. Carrying only the substituted form is what stops the duplicate check and
+/// <see cref="ResolveResult.ToTapOptions"/> from disagreeing about which devices are the same
+/// speaker, which is precisely the bug that let two devices pass Resolve and then collide at
+/// the Recorder.</summary>
+public sealed record ResolvedDevice(
+    CaptureDevice Device, string StreamingIdentity, string Name, GateSettings Gate);
 
 /// <summary>The outcome of <see cref="DeviceSelection.Resolve"/>: the selections that
 /// bound to a present device, the ones that did not, and a <see cref="SelectionVerdict"/>
@@ -131,13 +140,14 @@ public sealed record ResolveResult(
         return Resolved
             .Select(r =>
             {
-                // A blank Speaker ID falls back to the base identity (which
-                // ToConnectionOptions already guarantees non-empty), so a tap is never
-                // opened under an empty WAV-slug identity; a blank display name falls
-                // back to the identity so the dashboard never shows an empty label.
-                string identity = DeviceSelection.EffectiveIdentity(r.Identity, baseOptions.Identity);
-                string name = string.IsNullOrEmpty(r.Name) ? identity : r.Name;
-                return baseOptions with { Identity = identity, Name = name, Session = session };
+                // The identity is read, not re-derived: Resolve already substituted the base
+                // identity for a blank Speaker ID (which ToConnectionOptions guarantees
+                // non-empty), so a tap is never opened under an empty WAV-slug identity and
+                // the identity stamped here is by construction the one the duplicate check
+                // ran on. A blank display name falls back to it so the dashboard never shows
+                // an empty label.
+                string name = string.IsNullOrEmpty(r.Name) ? r.StreamingIdentity : r.Name;
+                return baseOptions with { Identity = r.StreamingIdentity, Name = name, Session = session };
             })
             .ToList();
     }
