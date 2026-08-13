@@ -90,11 +90,9 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
                     selection.Gate ?? GateSettings.DefaultForFlow(device.Flow)));
         }
 
-        Func<ResolvedDevice, string> streamingIdentity = baseIdentity is null
-            ? static r => r.Identity
-            : r => EffectiveIdentity(r.Identity, baseIdentity);
         bool duplicateIdentity = resolved
-            .GroupBy(streamingIdentity, StringComparer.Ordinal)
+            .GroupBy(r => baseIdentity is null ? r.Identity : EffectiveIdentity(r.Identity, baseIdentity),
+                     StringComparer.Ordinal)
             .Any(g => g.Count() > 1);
         SelectionVerdict verdict =
             resolved.Count == 0 ? SelectionVerdict.NothingToCapture

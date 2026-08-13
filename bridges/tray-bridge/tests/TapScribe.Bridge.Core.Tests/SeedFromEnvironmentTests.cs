@@ -81,24 +81,18 @@ public class SeedFromEnvironmentTests
     }
 
     [Fact]
-    public void SeedFromEnvironment_WhenTheOsOffersNoUserName_UsesTheCallersFallbackIdentity()
+    public void SeedFromEnvironment_WhenTheOsOffersNoUserName_SeedsTheFrozenTrayIdentity()
     {
         WithEnv(
             new() { ["TAPSCRIBE_IDENTITY"] = null },
             () =>
             {
                 // The identity is the WAV filename slug and the key the Recorder attributes
-                // recordings under, so it belongs to the SHELL, not to the core: a shell that
-                // is not the Windows tray must not seed itself as one.
-                BridgeSettings elsewhere = BridgeSettings.SeedFromEnvironment(
-                    "mac-tray", osUserName: static () => "");
-                Assert.Equal("mac-tray", elsewhere.Identity);
-
-                // ...and the Windows slug is frozen: changing it re-attributes the tray as a
-                // brand-new speaker, so a caller that names no fallback still gets it verbatim.
-                BridgeSettings unqualified = BridgeSettings.SeedFromEnvironment(
-                    osUserName: static () => "");
-                Assert.Equal("windows-tray", unqualified.Identity);
+                // recordings under, so the slug is frozen: changing it re-attributes the tray
+                // as a brand-new speaker. Pinned here because nothing else reaches this path
+                // (it needs an OS with no username), so a rename would otherwise land silently.
+                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment(osUserName: static () => "");
+                Assert.Equal("windows-tray", seeded.Identity);
             });
     }
 

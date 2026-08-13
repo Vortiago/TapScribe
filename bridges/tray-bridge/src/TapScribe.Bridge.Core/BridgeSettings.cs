@@ -105,7 +105,7 @@ public sealed class BridgeSettings
         string micLabel =
             !string.IsNullOrWhiteSpace(Name) ? Name.Trim()
             : !string.IsNullOrWhiteSpace(Identity) ? Identity.Trim()
-            : FallbackIdentity(WindowsFallbackIdentity);
+            : FallbackIdentity();
         return
         [
             new DeviceSelection.FollowDefault(DeviceFlow.Capture, micLabel, micLabel),
@@ -189,14 +189,22 @@ public sealed class BridgeSettings
     // blank. Shared by ToConnectionOptions and the gate-by-identity map so the live re-tune
     // keys line up with the tap identities.
     private string EffectiveIdentity =>
-        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity(WindowsFallbackIdentity) : Identity.Trim();
+        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
 
     /// <summary>
-    /// The identity the Windows tray streams under when the OS offers no username. Frozen,
-    /// and deliberately keeping its pre-rename spelling: the identity is the WAV filename slug
-    /// and the key the Recorder attributes recordings under, so changing it re-attributes the
-    /// tray as a brand-new speaker (see <see cref="TapConnectionOptions.Identity"/>). A shell
-    /// on another platform passes its own to <see cref="SeedFromEnvironment"/>.
+    /// The identity the tray streams under when the OS offers no username. Frozen, and
+    /// deliberately keeping its pre-rename spelling: the identity is the WAV filename slug and
+    /// the key the Recorder attributes recordings under, so changing it re-attributes the tray
+    /// as a brand-new speaker (see <see cref="TapConnectionOptions.Identity"/>).
+    ///
+    /// It is a WINDOWS value applied on every platform, which is wrong for a Mac shell but is
+    /// deliberately left alone here: the three members that fall back to it
+    /// (<see cref="DefaultDevices"/>, <see cref="EffectiveIdentity"/> and
+    /// <see cref="SeedFromEnvironment"/>) are instance- and seed-level, so making it
+    /// per-platform means stamping it onto every settings instance the store loads, not
+    /// threading it through one factory. Slice 7 owns that, alongside the rest of the identity
+    /// defaults; a knob on one of the three sites would read as configured while the other two
+    /// still said Windows.
     /// </summary>
     private const string WindowsFallbackIdentity = "windows-tray";
 
@@ -205,14 +213,10 @@ public sealed class BridgeSettings
     /// environment variables when present (so an existing env-based setup keeps
     /// working), otherwise sensible defaults.
     ///
-    /// <paramref name="fallbackIdentity"/> is what to seed when neither
-    /// <c>TAPSCRIBE_IDENTITY</c> nor the OS has a name to offer. It is a per-platform value
-    /// (see <see cref="WindowsFallbackIdentity"/>), so the shell supplies it and the core only
-    /// holds the Windows default. <paramref name="osUserName"/> reads the OS username;
-    /// injected so the no-username path is exercisable without an OS-level fixture.
+    /// <paramref name="osUserName"/> reads the OS username; injected so the no-username path
+    /// is exercisable without an OS-level fixture.
     /// </summary>
-    public static BridgeSettings SeedFromEnvironment(
-        string fallbackIdentity = WindowsFallbackIdentity, Func<string>? osUserName = null)
+    public static BridgeSettings SeedFromEnvironment(Func<string>? osUserName = null)
     {
         return new BridgeSettings
         {
@@ -220,7 +224,7 @@ public sealed class BridgeSettings
             Port = int.TryParse(Env("TAPSCRIBE_PORT"), out int port) ? port : 8001,
             Tls = Env("TAPSCRIBE_TLS") is "1" or "true",
             AllowSelfSignedCert = Env("TAPSCRIBE_TLS_ALLOW_SELF_SIGNED") is "1" or "true",
-            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(fallbackIdentity, osUserName),
+            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(osUserName),
             Name = Env("TAPSCRIBE_NAME") ?? "",
             Token = Env("TAPSCRIBE_TAP_TOKEN") ?? "",
         };
@@ -232,9 +236,9 @@ public sealed class BridgeSettings
         }
     }
 
-    private static string FallbackIdentity(string fallback, Func<string>? osUserName = null)
+    private static string FallbackIdentity(Func<string>? osUserName = null)
     {
         string user = (osUserName ?? (static () => Environment.UserName))();
-        return string.IsNullOrEmpty(user) ? fallback : user;
+        return string.IsNullOrEmpty(user) ? WindowsFallbackIdentity : user;
     }
 }
