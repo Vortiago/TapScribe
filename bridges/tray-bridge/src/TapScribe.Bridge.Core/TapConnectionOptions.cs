@@ -28,14 +28,20 @@ public sealed record TapConnectionOptions
     public bool AllowSelfSignedCert { get; init; }
 
     /// <summary>
-    /// Stable per-speaker identifier; the WAV filename slug and the key the
-    /// Recorder attributes recordings under. The default deliberately keeps the
-    /// pre-rename "windows-tray" spelling (the bridges/tray-bridge/ directory
-    /// rename left it alone): changing it re-attributes the tray as a brand-new
-    /// speaker, so it needs a migration, not a rename — same contract class as
-    /// <c>TrayStores.SettingsFileName</c>.
+    /// The tray's frozen per-speaker slug, deliberately keeping its pre-rename spelling (the
+    /// bridges/tray-bridge/ directory rename left it alone). Changing it re-attributes the tray
+    /// as a brand-new speaker, so it needs a migration, not a rename — same contract class as
+    /// <c>TrayStores.SettingsFileName</c>. Named rather than repeated, because it is also what
+    /// <see cref="BridgeSettings"/> seeds when the OS offers no username, and the two must
+    /// move together or they are a migration bug rather than two defaults.
     /// </summary>
-    public string Identity { get; init; } = "windows-tray";
+    public const string TrayIdentity = "windows-tray";
+
+    /// <summary>
+    /// Stable per-speaker identifier; the WAV filename slug and the key the
+    /// Recorder attributes recordings under.
+    /// </summary>
+    public string Identity { get; init; } = TrayIdentity;
 
     /// <summary>Human-readable display name shown on the dashboard.</summary>
     public string Name { get; init; } = "";

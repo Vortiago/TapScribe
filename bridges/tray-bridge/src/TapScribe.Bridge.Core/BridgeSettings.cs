@@ -124,7 +124,7 @@ public sealed class BridgeSettings
     /// </summary>
     public IReadOnlyDictionary<string, GateOptions> ToGateOptionsByIdentity()
     {
-        string fallbackIdentity = EffectiveIdentity;
+        string fallbackIdentity = BaseIdentity;
         var map = new Dictionary<string, GateOptions>(StringComparer.Ordinal);
         foreach (DeviceSelection device in EffectiveDevices)
         {
@@ -180,26 +180,27 @@ public sealed class BridgeSettings
         // Carry the opt-in faithfully; the security boundary is the connection site, which
         // only wires the accept-any validator when Tls && AllowSelfSignedCert.
         AllowSelfSignedCert = AllowSelfSignedCert,
-        Identity = EffectiveIdentity,
+        Identity = BaseIdentity,
         Name = Name,
         Token = Token,
     };
 
-    // The base identity a tap streams under when no per-device identity is set — never
-    // blank. Shared by ToConnectionOptions and the gate-by-identity map so the live re-tune
-    // keys line up with the tap identities.
-    private string EffectiveIdentity =>
+    // This settings instance's base identity: the one a tap streams under when no per-device
+    // identity is set, never blank. Shared by ToConnectionOptions and the gate-by-identity map
+    // so the live re-tune keys line up with the tap identities. Named BaseIdentity to match
+    // DeviceSelection.Resolve's parameter, since that is exactly what it is passed as; NOT to
+    // be confused with DeviceSelection.EffectiveIdentity, which answers the different question
+    // of what ONE device streams under given a base.
+    private string BaseIdentity =>
         string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
 
     /// <summary>
-    /// The identity the tray streams under when the OS offers no username. Frozen, and
-    /// deliberately keeping its pre-rename spelling: the identity is the WAV filename slug and
-    /// the key the Recorder attributes recordings under, so changing it re-attributes the tray
-    /// as a brand-new speaker (see <see cref="TapConnectionOptions.Identity"/>).
+    /// What the tray seeds when the OS offers no username: the frozen slug, so the seeded
+    /// identity and <see cref="TapConnectionOptions.Identity"/>'s default cannot drift.
     ///
     /// It is a WINDOWS value applied on every platform, which is wrong for a Mac shell but is
     /// deliberately left alone here: the three members that fall back to it
-    /// (<see cref="DefaultDevices"/>, <see cref="EffectiveIdentity"/> and
+    /// (<see cref="DefaultDevices"/>, <see cref="BaseIdentity"/> and
     /// <see cref="SeedFromEnvironment"/>) are instance- and seed-level, so making it
     /// per-platform means stamping it onto every settings instance the store loads, not
     /// threading it through one factory. A knob on one of the three would read as configured
@@ -211,7 +212,7 @@ public sealed class BridgeSettings
     /// constructor beside the directory and filename. Slice 7 owns that, alongside the rest of
     /// the identity defaults.
     /// </summary>
-    private const string WindowsFallbackIdentity = "windows-tray";
+    private const string WindowsFallbackIdentity = TapConnectionOptions.TrayIdentity;
 
     /// <summary>
     /// Defaults for a first run with no saved file: seed from the legacy
