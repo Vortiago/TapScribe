@@ -206,8 +206,8 @@ public class DeviceSelectionTests
             ],
             [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)], Base);
 
-        Assert.Equal(micGate, Assert.Single(result.Resolved, r => r.StreamingIdentity =="mic").Gate);
-        Assert.Equal(systemGate, Assert.Single(result.Resolved, r => r.StreamingIdentity =="system").Gate);
+        Assert.Equal(micGate, Assert.Single(result.Resolved, r => r.StreamingIdentity == "mic").Gate);
+        Assert.Equal(systemGate, Assert.Single(result.Resolved, r => r.StreamingIdentity == "system").Gate);
     }
 
     [Fact]
@@ -226,10 +226,10 @@ public class DeviceSelectionTests
 
         Assert.Equal(
             GateSettings.DefaultForFlow(DeviceFlow.Capture),
-            Assert.Single(result.Resolved, r => r.StreamingIdentity =="mic").Gate);
+            Assert.Single(result.Resolved, r => r.StreamingIdentity == "mic").Gate);
         Assert.Equal(
             GateSettings.DefaultForFlow(DeviceFlow.Render),
-            Assert.Single(result.Resolved, r => r.StreamingIdentity =="system").Gate);
+            Assert.Single(result.Resolved, r => r.StreamingIdentity == "system").Gate);
     }
 
     [Fact]

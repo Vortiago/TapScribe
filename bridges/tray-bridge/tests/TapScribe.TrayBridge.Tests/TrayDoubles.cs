@@ -164,8 +164,11 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator
 
     public void Dispose()
     {
+        // Latched on the FIRST release: recomputing it on a second one would measure the
+        // ordering against captures that are all released by then, so a double release would
+        // overwrite its own evidence with a true.
+        CapturesReleasedFirst ??= _opened.TrueForAll(c => c.Disposed);
         Interlocked.Increment(ref _disposals);
-        CapturesReleasedFirst = _opened.TrueForAll(c => c.Disposed);
     }
 }
 

@@ -86,6 +86,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
             foreach (PipelineSpec spec in specs)
             {
                 string identity = spec.Options.Identity;
+                Exception? skipped = null;
                 try
                 {
                     sessions[identity] = TapSession.Begin(
@@ -106,9 +107,16 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                     // to the unwind below, which owns that rule. Dispose is contract-bound not
                     // to throw.
                     spec.Capture.Dispose();
-                    onFailed(identity, ex);
+                    skipped = ex;
                 }
+                // This capture has an owner either way now: the session that begun, or the
+                // release above. Counted BEFORE the notification, because onFailed is the
+                // CALLER's callback and nothing binds it to be throw-free. A throw from it
+                // would otherwise leave the unwind releasing a capture already released here,
+                // and Dispose is nowhere promised to be idempotent.
                 considered++;
+                if (skipped is not null)
+                    onFailed(identity, skipped);
             }
 
             // Zero pipelines is not a meeting. The per-device catch above is best-effort so

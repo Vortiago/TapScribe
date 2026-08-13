@@ -16,7 +16,9 @@ namespace TapScribe.Bridge.Core;
 /// native handles for the device tree it walks. Disposal releases those handles, and
 /// nothing else: the captures it handed out have their own owners. An enumerator hands
 /// its endpoint over to each capture it opens, so it must OUTLIVE them - dispose the
-/// captures first, then the enumerator.
+/// captures first, then the enumerator. Same contract as
+/// <see cref="IAudioCapture"/>'s release: it must not throw, since every caller reaches
+/// it from a finally that has no other owner to fall back on.
 /// </summary>
 public interface IAudioDeviceEnumerator : IDisposable
 {
@@ -37,10 +39,15 @@ public interface IAudioDeviceEnumerator : IDisposable
     /// caller (a <see cref="TapSession"/>) takes ownership and disposes it.
     /// </summary>
     /// <exception cref="ExternalException">The platform refused the endpoint (in use,
-    /// invalidated, unsupported format). This is the seam's declared failure type for a
-    /// native/driver error - Windows' <c>COMException</c> derives from it - and a backend
-    /// must not leak a platform-specific exception type above the seam, since every caller
-    /// that skips a dead device filters on this one.</exception>
+    /// invalidated). This is the seam's declared failure type for a native/driver error -
+    /// Windows' <c>COMException</c> derives from it - and a backend must not leak a
+    /// platform-specific exception type above the seam, since every caller that skips a dead
+    /// device filters on this one.</exception>
+    /// <exception cref="NotSupportedException">The endpoint offers no format the pipeline can
+    /// take. Declared separately from the native failure because it is not one: the device
+    /// answered, and the answer was unusable.</exception>
+    /// <exception cref="InvalidOperationException">The endpoint cannot be opened in its
+    /// current state.</exception>
     /// <exception cref="ArgumentException">The id names no active endpoint of the
     /// requested flow.</exception>
     IAudioCapture Open(CaptureDevice device);

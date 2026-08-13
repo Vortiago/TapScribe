@@ -21,6 +21,11 @@ public sealed class AudioCapturedEventArgs : EventArgs
 /// WASAPI (Windows) is one implementation, kept in the Windows project so the
 /// core takes no platform dependency. A future macOS/Linux backend implements
 /// the same interface.
+///
+/// <see cref="IDisposable.Dispose"/> releases the endpoint and MUST NOT THROW: every
+/// teardown path reaches it from a finally or from the tray's bounded Quit, so a throw
+/// there strands the device for the process lifetime. It is NOT required to be idempotent
+/// - exactly one owner releases a capture, which is why the tests count the releases.
 /// </summary>
 public interface IAudioCapture : IDisposable
 {

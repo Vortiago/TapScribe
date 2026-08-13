@@ -8,12 +8,15 @@ namespace TapScribe.Bridge.Core.Tests;
 /// released on the REJECTION path too. <see cref="PipelineSpec"/> declares that the
 /// orchestrator takes ownership of its <see cref="PipelineSpec.Capture"/>, and the
 /// per-device catch already honours that for a device that fails to start — but the
-/// duplicate-identity guard throws BEFORE the loop, so every capture the caller opened
-/// is stranded with no owner. The tray shell's Start reaches that guard for real: two
-/// device selections whose identities differ only by a blank one (which
-/// <see cref="ResolveResult.ToTapOptions"/> substitutes the base identity for) pass
-/// <see cref="SelectionVerdict.Ok"/> and collide here, and the shell's finally disposes
-/// only the enumerator — so both WASAPI captures leak for the process lifetime.
+/// refusals that throw BEFORE or AFTER the loop (the duplicate-identity guard, an
+/// unfiltered throw out of it) leave every capture the caller opened with no owner: the
+/// shell handed ownership over with the specs and its finally then disposes only the
+/// enumerator, so those endpoints leak for the process lifetime.
+///
+/// The duplicate guard is the core's own backstop, not the shell's route in:
+/// <see cref="DeviceSelection.Resolve"/> takes the base identity and so returns
+/// <see cref="SelectionVerdict.DuplicateIdentity"/> before any device is opened. It stays
+/// because the core cannot assume its caller resolved through that path.
 /// </summary>
 public class CaptureOwnershipTests
 {

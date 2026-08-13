@@ -38,7 +38,7 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
 
     /// <summary>
     /// The identity a selection actually streams under: its own, or
-    /// <paramref name="baseIdentity"/> when it is blank. Public for
+    /// <paramref name="baseIdentity"/> when it is blank. Exposed for
     /// <see cref="BridgeSettings.ToGateOptionsByIdentity"/>, which keys UNRESOLVED selections
     /// and so cannot read a <see cref="ResolvedDevice.StreamingIdentity"/>; everything on the
     /// resolved side reads that property instead of re-deriving this.
@@ -57,6 +57,11 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
     /// identities, so a blank one and a verbatim base one look distinct here and collide at the
     /// Recorder. Each resolved device carries the answer as its
     /// <see cref="ResolvedDevice.StreamingIdentity"/>, computed once, right here.
+    ///
+    /// It must not be blank: it is the identity that gets STAMPED on a blank Speaker ID's tap,
+    /// and nothing downstream substitutes again, so a blank one here opens a tap under an empty
+    /// WAV-slug identity. <see cref="BridgeSettings.ToConnectionOptions"/> guarantees non-blank;
+    /// the check is what stops another caller from quietly not doing so.
     /// </summary>
     public static ResolveResult Resolve(
         IReadOnlyList<DeviceSelection> selections,
@@ -65,7 +70,7 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
     {
         ArgumentNullException.ThrowIfNull(selections);
         ArgumentNullException.ThrowIfNull(available);
-        ArgumentNullException.ThrowIfNull(baseIdentity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(baseIdentity);
 
         var resolved = new List<ResolvedDevice>();
         var missing = new List<DeviceSelection>();

@@ -708,6 +708,12 @@ are easy to conflate:
   Note the WAV filename still carries only `safe_name(identity)[:10]`
   (`parse_wav_speaker_ident`) — *truncated*, so the filename slug is **not** a
   reliable key; the full Identity comes from the Roster.
+  Two Bridge-side qualifiers, for a shell that taps several devices at once: the
+  **base identity** is what it streams under when a device carries no Speaker ID
+  of its own, and a device's **streaming identity** is its own Speaker ID, or the
+  base identity when that is blank. The substitution is made once, at device
+  resolution, so the duplicate-identity check and the taps that get opened agree
+  on which devices are one speaker.
 - **Occurrence** — one appearance of an Identity in one session (live or
   recorded). Its **speaker key** is `identity` today; once diarization (#78)
   splits one Identity into several voices it becomes `identity#cluster`. Auto

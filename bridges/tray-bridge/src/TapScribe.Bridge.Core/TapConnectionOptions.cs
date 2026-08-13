@@ -30,7 +30,7 @@ public sealed record TapConnectionOptions
     /// <summary>
     /// The tray's frozen per-speaker slug, deliberately keeping its pre-rename spelling (the
     /// bridges/tray-bridge/ directory rename left it alone). Changing it re-attributes the tray
-    /// as a brand-new speaker, so it needs a migration, not a rename — same contract class as
+    /// as a brand-new speaker, so it needs a migration, not a rename: the same contract class as
     /// <c>TrayStores.SettingsFileName</c>. Named rather than repeated, because it is also what
     /// <see cref="BridgeSettings"/> seeds when the OS offers no username, and the two must
     /// move together or they are a migration bug rather than two defaults.
