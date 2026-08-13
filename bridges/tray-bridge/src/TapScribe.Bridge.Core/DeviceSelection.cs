@@ -37,13 +37,30 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
         : DeviceSelection(Identity, Name, Gate);
 
     /// <summary>
+    /// The identity a selection actually streams under: its own, or
+    /// <paramref name="baseIdentity"/> when it is blank. The ONE owner of that substitution,
+    /// so <see cref="Resolve"/>'s collision check and
+    /// <see cref="ResolveResult.ToTapOptions"/>'s stamping cannot disagree about which
+    /// selections are the same speaker.
+    /// </summary>
+    public static string EffectiveIdentity(string identity, string baseIdentity) =>
+        string.IsNullOrWhiteSpace(identity) ? baseIdentity : identity;
+
+    /// <summary>
     /// Resolve saved <paramref name="selections"/> against the devices
     /// <paramref name="available"/> right now. Late-bound on purpose (ADR-0005): a
     /// follow-default selection picks the current default of its flow.
+    ///
+    /// <paramref name="baseIdentity"/> is the identity a blank Speaker ID streams under (the
+    /// caller's <see cref="TapConnectionOptions.Identity"/>). Supply it and the duplicate check
+    /// runs on the identity each device will ACTUALLY tap under, so a blank one colliding with
+    /// a verbatim base identity is refused here, before a device is opened. A caller that has
+    /// no base identity omits it and the raw identities are compared.
     /// </summary>
     public static ResolveResult Resolve(
         IReadOnlyList<DeviceSelection> selections,
-        IReadOnlyList<CaptureDevice> available)
+        IReadOnlyList<CaptureDevice> available,
+        string? baseIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(selections);
         ArgumentNullException.ThrowIfNull(available);
@@ -73,8 +90,11 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
                     selection.Gate ?? GateSettings.DefaultForFlow(device.Flow)));
         }
 
+        Func<ResolvedDevice, string> streamingIdentity = baseIdentity is null
+            ? static r => r.Identity
+            : r => EffectiveIdentity(r.Identity, baseIdentity);
         bool duplicateIdentity = resolved
-            .GroupBy(r => r.Identity, StringComparer.Ordinal)
+            .GroupBy(streamingIdentity, StringComparer.Ordinal)
             .Any(g => g.Count() > 1);
         SelectionVerdict verdict =
             resolved.Count == 0 ? SelectionVerdict.NothingToCapture
@@ -117,7 +137,7 @@ public sealed record ResolveResult(
                 // ToConnectionOptions already guarantees non-empty), so a tap is never
                 // opened under an empty WAV-slug identity; a blank display name falls
                 // back to the identity so the dashboard never shows an empty label.
-                string identity = string.IsNullOrWhiteSpace(r.Identity) ? baseOptions.Identity : r.Identity;
+                string identity = DeviceSelection.EffectiveIdentity(r.Identity, baseOptions.Identity);
                 string name = string.IsNullOrEmpty(r.Name) ? identity : r.Name;
                 return baseOptions with { Identity = identity, Name = name, Session = session };
             })

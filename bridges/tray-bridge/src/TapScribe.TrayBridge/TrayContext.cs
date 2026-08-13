@@ -199,7 +199,12 @@ internal sealed class TrayContext : ApplicationContext
             //    (follow-default binds to the current default). A non-Ok verdict is a hard
             //    stop surfaced clearly BEFORE any network call or device open.
             enumerator = _deps.OpenEnumerator();
-            ResolveResult resolution = DeviceSelection.Resolve(settings.EffectiveDevices, enumerator.List());
+            // The base identity goes in so the collision check runs on the identity each
+            // device will actually tap under: a blank Speaker ID streams under the base one,
+            // so two devices can be distinct here and the same speaker at the Recorder.
+            TapConnectionOptions baseOptions = settings.ToConnectionOptions();
+            ResolveResult resolution = DeviceSelection.Resolve(
+                settings.EffectiveDevices, enumerator.List(), baseOptions.Identity);
             if (resolution.Verdict != SelectionVerdict.Ok)
             {
                 string reason = resolution.Verdict switch
@@ -228,7 +233,7 @@ internal sealed class TrayContext : ApplicationContext
             //    its own identity/name) and open its capture. ToTapOptions preserves the
             //    Resolved order, so options[i] pairs with Resolved[i].
             IReadOnlyList<TapConnectionOptions> perDevice =
-                resolution.ToTapOptions(sessionId, settings.ToConnectionOptions());
+                resolution.ToTapOptions(sessionId, baseOptions);
             var specs = new List<PipelineSpec>();
             unowned = specs;
             for (int i = 0; i < resolution.Resolved.Count; i++)

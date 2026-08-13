@@ -128,7 +128,7 @@ public sealed class BridgeSettings
         var map = new Dictionary<string, GateOptions>(StringComparer.Ordinal);
         foreach (DeviceSelection device in EffectiveDevices)
         {
-            string identity = string.IsNullOrWhiteSpace(device.Identity) ? fallbackIdentity : device.Identity;
+            string identity = DeviceSelection.EffectiveIdentity(device.Identity, fallbackIdentity);
             // EffectiveDevices ran NormalizeGates, so every gate is filled here.
             map[identity] = device.Gate!.ToGateOptions();
         }
