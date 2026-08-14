@@ -85,4 +85,34 @@ public class KeychainTapTokenStoreTests
         Assert.Equal("TapScribe Tray Bridge", KeychainTapTokenStore.ServiceName);
         Assert.Equal("tap-token", KeychainTapTokenStore.AccountName);
     }
+
+    [RequiresMacOS]
+    public void RealKeychain_AddsCopiesAndDeletesAGenericPassword()
+    {
+        // The one test that talks to the login Keychain, and the only way the P/Invoke half
+        // is proved at all: the fake above proves the policy but nothing about whether
+        // SecItemAdd was handed a dictionary it understands. Driven at the seam rather than
+        // through the store so it can use an item of its own - running the store's real
+        // service and account here would delete the tester's actual saved token.
+        var keychain = new SecKeychainItems();
+        const string service = "TapScribe Tray Bridge (test)";
+        string account = $"round-trip-{Guid.NewGuid()}";
+        const string secret = "real-keychain-token-xyz";
+
+        try
+        {
+            Assert.Equal(KeychainStatus.Success, keychain.Add(service, account, secret));
+            Assert.Equal(KeychainStatus.Success, keychain.Copy(service, account, out string? read));
+            Assert.Equal(secret, read);
+            Assert.Equal(KeychainStatus.Success, keychain.Delete(service, account));
+            // The delete is a claim, not just cleanup: this is what a blanked token relies on.
+            Assert.Equal(KeychainStatus.ItemNotFound, keychain.Copy(service, account, out _));
+        }
+        finally
+        {
+            // Leave the login Keychain as we found it even when an assertion above fails,
+            // so a red run does not strand an item that makes the next run fail differently.
+            keychain.Delete(service, account);
+        }
+    }
 }
