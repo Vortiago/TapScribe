@@ -49,7 +49,7 @@ public class DrainBarrierTests
         var transport = new HeldDrainTransport();
         var capture = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: HeldDrainStream(), connectionFactory: transport.Create);
 
@@ -79,7 +79,7 @@ public class DrainBarrierTests
         var transport = new HeldDrainTransport();
         var capture = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: HeldDrainStream(), connectionFactory: transport.Create);
 
@@ -115,7 +115,7 @@ public class DrainBarrierTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -142,7 +142,7 @@ public class DrainBarrierTests
         var transport = new FakeTapTransport();
         var capture = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -176,7 +176,7 @@ public class DrainBarrierTests
         var transport = new HeldDrainTransport();
         var capture = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: HeldDrainStream(), connectionFactory: transport.Create);
 

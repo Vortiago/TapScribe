@@ -99,12 +99,6 @@ public sealed class BridgeRuntime
 
     private async Task StartAsync(BridgeSettings settings)
     {
-        IAudioDeviceEnumerator? enumerator = null;
-        // Captures opened but not yet handed to the orchestrator. Nothing else can reach them,
-        // so a throw in that window strands every one of them for the process lifetime: an
-        // endpoint held "in use" with nothing able to release it. The finally below is their
-        // only owner until StartAll takes over.
-        List<PipelineSpec>? unowned = null;
         // Non-null once the meeting is published, which is the LAST thing the try does.
         // Everything left to render then happens BELOW the catch, where it cannot reach
         // FailToIdle: a throw while noticing a skipped device would otherwise be classified as
@@ -113,73 +107,27 @@ public sealed class BridgeRuntime
         StartedMeeting? started = null;
         try
         {
-            // 1) Resolve the operator's selection against what is present RIGHT NOW
-            //    (follow-default binds to the current default). The base identity goes in so
-            //    the collision check runs on the identity each device will actually tap under:
-            //    a blank Speaker ID streams under the base one, so two devices can be distinct
-            //    here and the same speaker at the Recorder. A non-Ok verdict is a hard stop
-            //    surfaced BEFORE any network call or device open.
-            enumerator = _deps.OpenEnumerator();
-            TapConnectionOptions baseOptions = settings.ToConnectionOptions();
-            ResolveResult resolution = DeviceSelection.Resolve(
-                settings.EffectiveDevices, enumerator.List(), baseOptions.Identity);
-            if (resolution.Verdict != SelectionVerdict.Ok)
-            {
-                FailToIdle("Could not start meeting", DescribeVerdict(resolution.Verdict));
-                return; // the finally releases the enumerator on this early exit
-            }
+            OpenedMeeting? opened = await OpenMeetingAsync(settings).ConfigureAwait(false);
+            if (opened is null)
+                return; // the selection cannot start a meeting, and OpenMeetingAsync said so
 
-            // 2) Mint a detached session. This doubles as the connection pre-flight: an
-            //    unreachable Recorder or a rejected token throws here, before any device is
-            //    opened.
-            string sessionId;
-            using (var cts = new CancellationTokenSource(_budgets.MintTimeout))
-                sessionId = await _deps.MintDetachedSession(settings, cts.Token).ConfigureAwait(false);
-
-            // 3) One tap per resolved device, each routing into the one session under its own
-            //    identity/name and its OWN gate (#151). ToTapOptions preserves the Resolved
-            //    order, so options[i] pairs with Resolved[i].
-            IReadOnlyList<TapConnectionOptions> perDevice = resolution.ToTapOptions(sessionId, baseOptions);
-            var specs = new List<PipelineSpec>();
-            unowned = specs;
-            for (int i = 0; i < resolution.Resolved.Count; i++)
-            {
-                ResolvedDevice resolved = resolution.Resolved[i];
-                TryAddSpec(specs, enumerator, resolved, perDevice[i]);
-            }
-            if (specs.Count == 0)
-                // Every resolved device failed to OPEN (in use, format unsupported, gone).
-                // StartAll would refuse an empty set anyway, so this is kept for its VERB:
-                // opening is this runtime's own stage and the orchestrator cannot name it, and
-                // "opened" versus "started" is the operator's only clue which of the two stages
-                // their devices died at.
-                throw new InvalidOperationException("No selected device could be opened.");
-
-            // Which devices are actually streaming, and what that means for the status line, is
-            // the core's DeviceTally. Touched from the dispatcher only (both callbacks marshal
-            // first), which is the tally's contract.
-            var tally = new DeviceTally(specs.Count);
-            // Ownership of the enumerator transfers AT THE CALL, exactly as the specs' does:
-            // StartAll releases everything it was given on every exit that is not a handed-back
-            // orchestrator, so both locals are cleared first and the finally below has nothing
-            // left to release on the paths that throw from inside it.
-            IAudioDeviceEnumerator opening = enumerator;
-            enumerator = null;
-            unowned = null;
+            // Ownership of the whole set transfers AT THE CALL: StartAll releases everything it
+            // was given on every exit that is not a handed-back orchestrator, and the open phase
+            // hands its set over whole, so there is nothing here to clear and no window in which
+            // this method owns a device.
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
-                specs,
-                onConnected: id => _dispatcher.Post(() => ApplyStatus(tally.Connected(id).Status)),
+                opened.Captures,
+                onConnected: id => _dispatcher.Post(() => ApplyStatus(opened.Tally.Connected(id).Status)),
                 onFailed: (id, ex) => _dispatcher.Post(() =>
                 {
-                    TallyReport report = tally.Dropped(id);
+                    TallyReport report = opened.Tally.Dropped(id);
                     ApplyStatus(report.Status);
                     // Only on a transition: a tap that cannot reach the Recorder reports once
                     // per Utterance, so a device that dropped ONCE would otherwise notify for
                     // the whole meeting.
                     if (report.Transition)
                         _view.ShowNotice($"{id} stopped", ex.Message, NoticeKind.Warning);
-                }),
-                opening);
+                }));
                 // No shared gate arg: each spec already carries its own per-device gate.
 
             bool abandoned;
@@ -194,7 +142,7 @@ public sealed class BridgeRuntime
                 if (!abandoned)
                     // DateTimeOffset.Now is the meeting's wall-clock start, for the
                     // Past-meetings history (#168).
-                    _meeting = new Meeting(orchestrator, sessionId, DateTimeOffset.Now);
+                    _meeting = new Meeting(orchestrator, opened.SessionId, DateTimeOffset.Now);
             }
             if (abandoned)
             {
@@ -204,7 +152,7 @@ public sealed class BridgeRuntime
                 return;
             }
 
-            started = new StartedMeeting(tally, resolution.Missing); // the meeting is live from here
+            started = new StartedMeeting(opened.Tally, opened.Missing); // the meeting is live from here
         }
         catch (Exception ex) when (
             ex is HttpRequestException
@@ -222,21 +170,6 @@ public sealed class BridgeRuntime
             // "Starting…". The filter keeps this off CodeQL's catch-of-all radar.
             StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
             FailToIdle("Could not start meeting", failure.Message);
-        }
-        finally
-        {
-            // Captures FIRST, then the enumerator that opened them: an enumerator hands its
-            // endpoint over to each capture it opens, so it has to outlive them. These are the
-            // ones opened but never handed over, which nothing else can reach. Both locals are
-            // null from the StartAll call onwards, which releases what it refuses, so a running
-            // meeting keeps its devices and a refused set is never released twice. Dispose is
-            // contract-bound not to throw.
-            if (unowned is not null)
-                foreach (PipelineSpec spec in unowned)
-                    spec.Capture.Dispose();
-            // Released on every exit that did not get as far as handing it over: the non-Ok
-            // early return, or a throw from the resolve, the mint, or a device open.
-            enumerator?.Dispose();
         }
 
         if (started is null)
@@ -259,6 +192,96 @@ public sealed class BridgeRuntime
                     NoticeKind.Warning);
         });
     }
+
+    /// <summary>
+    /// The open phase of a start: resolve the operator's selection against the devices present
+    /// now, mint the session they will tap into, and open one capture per resolved device.
+    ///
+    /// Hands back ONE fully owned <see cref="CaptureSet"/> or releases everything it opened,
+    /// which is the same total rule <see cref="CaptureOrchestrator.StartAll"/> keeps for the
+    /// phase after it. Between the two there is no moment at which a capture or an enumerator
+    /// belongs to <see cref="StartAsync"/>, so that method has nothing to hold, nothing to clear
+    /// and no release of its own to get right. Null means the selection cannot start a meeting
+    /// and the operator has already been told; a throw is the caller's to classify.
+    /// </summary>
+    private async Task<OpenedMeeting?> OpenMeetingAsync(BridgeSettings settings)
+    {
+        IAudioDeviceEnumerator enumerator = _deps.OpenEnumerator();
+        // The set is filled in place: TryAddSpec appends to this same list, so the release below
+        // covers every capture opened so far whichever open it was that threw. Nothing else can
+        // reach them, so without it each one is stranded for the process lifetime: an endpoint
+        // held "in use" with nothing able to let go of it.
+        var specs = new List<PipelineSpec>();
+        var opened = new CaptureSet(specs, enumerator);
+        bool handedOver = false;
+        try
+        {
+            // 1) Resolve the operator's selection against what is present RIGHT NOW
+            //    (follow-default binds to the current default). The base identity goes in so
+            //    the collision check runs on the identity each device will actually tap under:
+            //    a blank Speaker ID streams under the base one, so two devices can be distinct
+            //    here and the same speaker at the Recorder. A non-Ok verdict is a hard stop
+            //    surfaced BEFORE any network call or device open.
+            TapConnectionOptions baseOptions = settings.ToConnectionOptions();
+            ResolveResult resolution = DeviceSelection.Resolve(
+                settings.EffectiveDevices, enumerator.List(), baseOptions.Identity);
+            if (resolution.Verdict != SelectionVerdict.Ok)
+            {
+                FailToIdle("Could not start meeting", DescribeVerdict(resolution.Verdict));
+                return null;
+            }
+
+            // 2) Mint a detached session. This doubles as the connection pre-flight: an
+            //    unreachable Recorder or a rejected token throws here, before any device is
+            //    opened.
+            string sessionId;
+            using (var cts = new CancellationTokenSource(_budgets.MintTimeout))
+                sessionId = await _deps.MintDetachedSession(settings, cts.Token).ConfigureAwait(false);
+
+            // 3) One tap per resolved device, each routing into the one session under its own
+            //    identity/name and its OWN gate (#151). ToTapOptions preserves the Resolved
+            //    order, so options[i] pairs with Resolved[i].
+            IReadOnlyList<TapConnectionOptions> perDevice = resolution.ToTapOptions(sessionId, baseOptions);
+            for (int i = 0; i < resolution.Resolved.Count; i++)
+            {
+                ResolvedDevice resolved = resolution.Resolved[i];
+                TryAddSpec(specs, enumerator, resolved, perDevice[i]);
+            }
+            if (specs.Count == 0)
+                // Every resolved device failed to OPEN (in use, format unsupported, gone).
+                // StartAll would refuse an empty set anyway, so this is kept for its VERB:
+                // opening is this runtime's own stage and the orchestrator cannot name it, and
+                // "opened" versus "started" is the operator's only clue which of the two stages
+                // their devices died at.
+                throw new InvalidOperationException("No selected device could be opened.");
+
+            // Which devices are actually streaming, and what that means for the status line, is
+            // the core's DeviceTally. Touched from the dispatcher only (both callbacks marshal
+            // first), which is the tally's contract. Sized here, BEFORE the set is handed back,
+            // so nothing that can throw stands between the open and the transfer.
+            var tally = new DeviceTally(specs.Count);
+            handedOver = true;
+            return new OpenedMeeting(opened, sessionId, tally, resolution.Missing);
+        }
+        finally
+        {
+            // ONE total rule, the same one StartAll states for the phase after this: unless the
+            // set was handed back, nothing this opened survives it. The captures go first and
+            // the enumerator after them, which is the set's own business rather than a sequence
+            // restated here. Reached on the non-Ok early return above, and on a throw from the
+            // resolve, the mint or a device open.
+            if (!handedOver)
+                opened.Release();
+        }
+    }
+
+    /// <summary>A meeting's devices, open and not yet streaming: the
+    /// <see cref="CaptureSet"/> that <see cref="CaptureOrchestrator.StartAll"/> takes ownership
+    /// of, the detached session they will tap into, the <see cref="DeviceTally"/> sized by how
+    /// many opened, and the selections that did not resolve. One value, so the handover is one
+    /// statement with nothing between it and the open that could strand the set.</summary>
+    private sealed record OpenedMeeting(
+        CaptureSet Captures, string SessionId, DeviceTally Tally, IReadOnlyList<DeviceSelection> Missing);
 
     /// <summary>A published, streaming meeting's presentation state: the live
     /// <see cref="DeviceTally"/> and the selections that did not resolve. Its non-nullness is

@@ -24,7 +24,7 @@ public class CaptureOrchestratorTests
         var transport = new FakeTapTransport();
         var capture = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -43,7 +43,7 @@ public class CaptureOrchestratorTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic", "Alice"), Spec(system, "system", "System Audio")],
+            new CaptureSet([Spec(mic, "mic", "Alice"), Spec(system, "system", "System Audio")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -75,7 +75,7 @@ public class CaptureOrchestratorTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic", gate: DeafGate()), Spec(system, "system", gate: FastGate())],
+            new CaptureSet([Spec(mic, "mic", gate: DeafGate()), Spec(system, "system", gate: FastGate())]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: null, stream: FastStream(), connectionFactory: transport.Create);
 
@@ -95,7 +95,7 @@ public class CaptureOrchestratorTests
         var system = new FakeAudioCapture(RecorderFormat);
         // Start both pipelines deaf (threshold above a loud frame's RMS), then re-tune.
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: DeafGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -130,7 +130,7 @@ public class CaptureOrchestratorTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: DeafGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -153,7 +153,7 @@ public class CaptureOrchestratorTests
         var transport = new FakeTapTransport();
         var mic = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic")],
+            new CaptureSet([Spec(mic, "mic")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: DeafGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -179,7 +179,7 @@ public class CaptureOrchestratorTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -204,7 +204,7 @@ public class CaptureOrchestratorTests
         var a = new FakeAudioCapture(RecorderFormat);
         var b = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(a, "a"), Spec(b, "b")],
+            new CaptureSet([Spec(a, "a"), Spec(b, "b")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -246,7 +246,7 @@ public class CaptureOrchestratorTests
         var transport = new FakeTapTransport();
         var loopback = new FakeAudioCapture(RenderMixFormat); // 48 kHz / 2 ch / Float32
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(loopback, "system", "System Audio")],
+            new CaptureSet([Spec(loopback, "system", "System Audio")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -266,7 +266,7 @@ public class CaptureOrchestratorTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
@@ -299,7 +299,7 @@ public class CaptureOrchestratorTests
         }
 
         var orchestrator = CaptureOrchestrator.StartAll(
-            specs, onConnected: _ => { }, onFailed: (_, _) => { },
+            new CaptureSet(specs), onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: stream, connectionFactory: transport.Create);
 
         foreach (FakeAudioCapture capture in captures)
@@ -350,7 +350,7 @@ public class CaptureOrchestratorTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(badSystem, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(badSystem, "system")]),
             onConnected: _ => { },
             onFailed: (id, ex) => { lock (failures) failures.Add((id, ex)); },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
@@ -374,7 +374,7 @@ public class CaptureOrchestratorTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { },
             onFailed: (id, ex) => { lock (failures) failures.Add((id, ex)); },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
@@ -402,7 +402,7 @@ public class CaptureOrchestratorTests
         // Two devices under one identity would cross-attribute at the Recorder (it
         // buckets WAVs by the sanitised identity), so the orchestrator refuses up front.
         Assert.Throws<ArgumentException>(() => CaptureOrchestrator.StartAll(
-            [Spec(a, "system"), Spec(b, "system")],
+            new CaptureSet([Spec(a, "system"), Spec(b, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
@@ -420,10 +420,10 @@ public class CaptureOrchestratorTests
         const string session = "2026-06-16T12-00-00";
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [
+            new CaptureSet([
                 new PipelineSpec(mic, new TapConnectionOptions { Identity = "mic", Session = session }),
                 new PipelineSpec(system, new TapConnectionOptions { Identity = "system", Session = session }),
-            ],
+            ]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 

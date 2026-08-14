@@ -21,13 +21,40 @@ namespace TapScribe.Bridge.Core.Tests;
 /// The enumerator is the same claim one level up. It hands its endpoint over to each capture
 /// it opens, so it has to outlive them: an ordering that was a rule stated in prose at every
 /// teardown path and re-implemented at each, precisely because no single object owned both.
-/// <see cref="CaptureOrchestrator.StartAll"/> takes it, so "released, after the captures,
-/// exactly once" is one implementation and the tests below are about it rather than about
-/// each caller's memory.
+/// <see cref="CaptureSet"/> holds both and <see cref="CaptureOrchestrator.StartAll"/> takes the
+/// set, so "released, after the captures, exactly once" is one implementation and the tests
+/// below are about it rather than about each caller's memory.
 /// </summary>
 public class CaptureOwnershipTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
+
+    [Fact]
+    public void Release_ReleasesTheEnumeratorAfterTheCaptures()
+    {
+        // A set nobody has taken yet, which is where the shell's start stands between opening
+        // the devices and handing them over. Releasing it keeps the same ordering every
+        // teardown does, because it is the same claim about the same two things.
+        var enumerator = new FakeAudioDeviceEnumerator();
+        FakeAudioCapture mic = enumerator.Add(
+            new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), RecorderFormat);
+        FakeAudioCapture system = enumerator.Add(
+            new CaptureDevice("system", "system", DeviceFlow.Render, true), RecorderFormat);
+        var opened = new CaptureSet(
+            [
+                Spec(enumerator.Open(enumerator.List()[0]), "mic"),
+                Spec(enumerator.Open(enumerator.List()[1]), "system"),
+            ],
+            enumerator);
+
+        opened.Release();
+
+        Assert.Equal(1, mic.Disposals);
+        Assert.Equal(1, system.Disposals);
+        Assert.True(enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
+        Assert.Equal(1, enumerator.Disposals);
+    }
 
     [Fact]
     public void StartAll_WhenItRefusesTheSpecs_ReleasesTheEnumeratorAfterTheCaptures()
@@ -49,9 +76,9 @@ public class CaptureOwnershipTests
         ];
 
         Assert.Throws<InvalidOperationException>(() => CaptureOrchestrator.StartAll(
-            [Spec(opened[0], "mic"), Spec(opened[1], "system")],
+            new CaptureSet([Spec(opened[0], "mic"), Spec(opened[1], "system")], enumerator),
             onConnected: _ => { }, onFailed: (_, _) => { },
-            enumerator, gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
         Assert.True(enumerator.Disposed, "the enumerator was stranded by the unwind");
         Assert.Equal(1, enumerator.Disposals);
@@ -67,9 +94,9 @@ public class CaptureOwnershipTests
         enumerator.Add(new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), RecorderFormat);
         IAudioCapture mic = enumerator.Open(enumerator.List()[0]);
         CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic")],
+            new CaptureSet([Spec(mic, "mic")], enumerator),
             onConnected: _ => { }, onFailed: (_, _) => { },
-            enumerator, gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         await orchestrator.DisposeAsync().AsTask().WaitAsync(Wait);
         // A second teardown is reachable in production: an abandoned start disposes the
@@ -97,9 +124,9 @@ public class CaptureOwnershipTests
         };
         enumerator.Add(new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), mic);
         CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(enumerator.Open(enumerator.List()[0]), "mic")],
+            new CaptureSet([Spec(enumerator.Open(enumerator.List()[0]), "mic")], enumerator),
             onConnected: _ => { }, onFailed: (_, _) => { },
-            enumerator, gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         await Assert.ThrowsAsync<IOException>(() => orchestrator.EndMeetingAsync().WaitAsync(Wait));
 
@@ -138,11 +165,12 @@ public class CaptureOwnershipTests
         var untouched = new FakeAudioCapture(RecorderFormat);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => CaptureOrchestrator.StartAll(
+            new CaptureSet(
             [
                 Spec(begun, "mic"),
                 Spec(doomed, "system", gate: new GateOptions { OpenThreshold = -1 }),
                 Spec(untouched, "line-in"),
-            ],
+            ]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
@@ -164,7 +192,7 @@ public class CaptureOwnershipTests
         var b = new FakeAudioCapture(RecorderFormat);
 
         Assert.Throws<ArgumentException>(() => CaptureOrchestrator.StartAll(
-            [Spec(a, "system"), Spec(b, "system")],
+            new CaptureSet([Spec(a, "system"), Spec(b, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 

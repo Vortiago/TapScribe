@@ -27,7 +27,7 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
@@ -50,7 +50,7 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
@@ -77,7 +77,7 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
@@ -98,7 +98,7 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
@@ -124,7 +124,7 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic"), Spec(healthy, "system")],
+            new CaptureSet([Spec(capture, "mic"), Spec(healthy, "system")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);

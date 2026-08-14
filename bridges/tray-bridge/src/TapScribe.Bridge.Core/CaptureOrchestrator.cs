@@ -16,6 +16,38 @@ namespace TapScribe.Bridge.Core;
 public sealed record PipelineSpec(IAudioCapture Capture, TapConnectionOptions Options, GateOptions? Gate = null);
 
 /// <summary>
+/// The devices one meeting taps, as ONE ownership unit: a <see cref="PipelineSpec"/> per
+/// device and the <see cref="IAudioDeviceEnumerator"/> their endpoints came out of, where
+/// there is one. They belong together because an enumerator hands its endpoint over to each
+/// capture it opens and so has to outlive them: one value holding both is what makes that
+/// ordering unwritable to get wrong, instead of a rule every teardown path restates for itself.
+///
+/// Deliberately NOT <see cref="IDisposable"/>. Ownership TRANSFERS at
+/// <see cref="CaptureOrchestrator.StartAll"/>, which releases the set on every exit that is not
+/// a handed-back orchestrator, so a scope-bound release would free what the orchestrator now
+/// owns: a second release of seams contract-bound to be throw-free and nowhere promised to be
+/// idempotent. A holder either hands the set on or calls <see cref="Release"/>, and there is no
+/// third state.
+/// </summary>
+public sealed record CaptureSet(IReadOnlyList<PipelineSpec> Specs, IAudioDeviceEnumerator? Enumerator = null)
+{
+    /// <summary>
+    /// Release the whole set: the captures first, then the enumerator behind them. For a set
+    /// nothing has taken yet, so the captures are raw and this is a plain
+    /// <see cref="IDisposable.Dispose"/> each, rather than the session teardown
+    /// <see cref="CaptureOrchestrator.DisposeAsync"/> owes a pipeline that has begun. Both
+    /// seams are contract-bound not to throw, which is what lets this run from a finally with
+    /// no other owner to fall back on.
+    /// </summary>
+    public void Release()
+    {
+        foreach (PipelineSpec spec in Specs)
+            spec.Capture.Dispose();
+        Enumerator?.Dispose();
+    }
+}
+
+/// <summary>
 /// Runs N concurrent per-identity capture pipelines — one <see cref="TapSession"/>
 /// per <see cref="PipelineSpec"/> — so one user can tap their mic and the system
 /// loopback (and more) at once, each landing on the Recorder as its own speaker.
@@ -62,25 +94,25 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     /// lives on the spec — ADR-0007). <paramref name="connectionFactory"/> defaults to a
     /// real <see cref="TapClient"/>; tests inject a fake.
     /// </summary>
-    /// <param name="enumerator">The device enumerator the specs' captures were opened from,
-    /// where there is one. Ownership passes AT THE CALL, exactly as the specs' does, and it is
-    /// released AFTER every capture on every path: an enumerator hands its endpoint over to
-    /// each capture it opens, so it has to outlive them. Holding both here is what makes that
-    /// ordering unwritable to get wrong; it used to be a rule each caller restated in prose and
-    /// re-implemented per teardown path.</param>
+    /// <param name="captures">The devices to tap and the enumerator their endpoints came out
+    /// of, as the one value that holds both. Ownership passes AT THE CALL, all of it: unless
+    /// this hands back an orchestrator, nothing in the set survives the call, and the enumerator
+    /// is released AFTER every capture on every path. Taking the set rather than a spec list
+    /// plus a loose enumerator is what leaves the caller nothing to hold across the transfer.
+    /// </param>
     public static CaptureOrchestrator StartAll(
-        IReadOnlyList<PipelineSpec> specs,
+        CaptureSet captures,
         Action<string> onConnected,
         Action<string, Exception> onFailed,
-        IAudioDeviceEnumerator? enumerator = null,
         GateOptions? gate = null,
         TapStreamOptions? stream = null,
         Func<TapConnectionOptions, ITapConnection>? connectionFactory = null)
     {
-        ArgumentNullException.ThrowIfNull(specs);
+        ArgumentNullException.ThrowIfNull(captures);
         ArgumentNullException.ThrowIfNull(onConnected);
         ArgumentNullException.ThrowIfNull(onFailed);
 
+        IReadOnlyList<PipelineSpec> specs = captures.Specs;
         var sessions = new Dictionary<string, TapSession>(specs.Count, StringComparer.Ordinal);
         int considered = 0;   // specs whose capture now has an owner: a session, or the catch below
         bool handedOver = false;
@@ -146,7 +178,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                 throw new InvalidOperationException("No selected device could be started.");
 
             handedOver = true;
-            return new CaptureOrchestrator(sessions, enumerator);
+            return new CaptureOrchestrator(sessions, captures.Enumerator);
         }
         finally
         {
@@ -161,7 +193,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
             // the process lifetime: an endpoint held "in use", and any session already begun
             // still streaming PCM with nothing able to stop it.
             if (!handedOver)
-                Abandon(specs, considered, sessions, enumerator);
+                Abandon(captures, considered, sessions);
         }
     }
 
@@ -169,9 +201,9 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     // got to (the one it threw on, and every one after it), then the sessions that did begin,
     // then the enumerator all of them came out of.
     private static void Abandon(
-        IReadOnlyList<PipelineSpec> specs, int considered, Dictionary<string, TapSession> sessions,
-        IAudioDeviceEnumerator? enumerator)
+        CaptureSet captures, int considered, Dictionary<string, TapSession> sessions)
     {
+        IReadOnlyList<PipelineSpec> specs = captures.Specs;
         for (int i = considered; i < specs.Count; i++)
             specs[i].Capture.Dispose();
 
@@ -186,7 +218,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
         // one ordering the success path uses. A teardown that overruns the cap defers the
         // release rather than skipping it: the task still runs, and releasing the endpoints'
         // owner out from under a capture that is still closing is the failure worth avoiding.
-        new CaptureOrchestrator(sessions, enumerator).DisposeAsync().AsTask().Wait(AbandonTeardownCap);
+        new CaptureOrchestrator(sessions, captures.Enumerator).DisposeAsync().AsTask().Wait(AbandonTeardownCap);
     }
 
     /// <summary>How many pipelines are currently running.</summary>

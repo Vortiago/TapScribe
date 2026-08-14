@@ -32,7 +32,7 @@ public class ZeroPipelineMeetingTests
         var failures = new List<string>();
 
         Assert.Throws<InvalidOperationException>(() => CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { },
             onFailed: (id, _) => failures.Add(id),
             gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
