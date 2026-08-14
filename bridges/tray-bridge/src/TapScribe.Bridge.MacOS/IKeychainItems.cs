@@ -7,24 +7,28 @@ namespace TapScribe.Bridge.MacOS;
 /// policy is about. With the raw calls behind this, the policy is tested on any OS through
 /// <c>FakeKeychain</c> and only the P/Invoke half needs a Mac.
 ///
-/// Deliberately a mirror of the C API rather than an abstraction over the Keychain: each
-/// method is one <c>SecItem*</c> call and answers with its raw <c>OSStatus</c>, so nothing
-/// is decided down here. Every judgement about what a status MEANS belongs to the store.
+/// The four operations on ONE generic-password item, not on the Keychain: which item is
+/// bound when the implementation is built, so no call site can pass a service and an account
+/// that do not go together, and the store never restates its own two constants four times.
+///
+/// Each method is otherwise one <c>SecItem*</c> call answering with its raw <c>OSStatus</c>,
+/// so nothing is decided down here. Every judgement about what a status MEANS belongs to the
+/// store.
 /// </summary>
 internal interface IKeychainItems
 {
-    /// <summary>SecItemCopyMatching for one generic password.</summary>
-    int Copy(string service, string account, out string? secret);
+    /// <summary>SecItemCopyMatching.</summary>
+    int Copy(out string? secret);
 
-    /// <summary>SecItemAdd of one generic password.</summary>
-    int Add(string service, string account, string secret);
+    /// <summary>SecItemAdd.</summary>
+    int Add(string secret);
 
-    /// <summary>SecItemUpdate of one generic password: the replace half of a save, because
-    /// Add refuses an item that already exists rather than overwriting it.</summary>
-    int Update(string service, string account, string secret);
+    /// <summary>SecItemUpdate: the replace half of a save, because Add refuses an item that
+    /// already exists rather than overwriting it.</summary>
+    int Update(string secret);
 
-    /// <summary>SecItemDelete of one generic password.</summary>
-    int Delete(string service, string account);
+    /// <summary>SecItemDelete.</summary>
+    int Delete();
 }
 
 /// <summary>The handful of <c>OSStatus</c> values this code names. Apple's full list is in

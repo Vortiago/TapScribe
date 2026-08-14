@@ -16,7 +16,9 @@ namespace TapScribe.Bridge.MacOS;
 /// values keyed by CFString globals, so a call is "build a dictionary, make it, release
 /// what you made". <see cref="CfScope"/> is what keeps the last part honest.
 /// </summary>
-internal sealed partial class SecKeychainItems : IKeychainItems
+/// <param name="service">kSecAttrService of the one item this instance speaks for.</param>
+/// <param name="account">kSecAttrAccount of that item.</param>
+internal sealed partial class SecKeychainItems(string service, string account) : IKeychainItems
 {
     // Full framework paths: a bare "Security" is not reliably probed.
     private const string SecurityLibrary = "/System/Library/Frameworks/Security.framework/Security";
@@ -27,7 +29,7 @@ internal sealed partial class SecKeychainItems : IKeychainItems
 
     /// <summary>SecItemCopyMatching, asking for the password data of the one matching item.
     /// </summary>
-    public int Copy(string service, string account, out string? secret)
+    public int Copy(out string? secret)
     {
         secret = null;
         if (!OperatingSystem.IsMacOS())
@@ -36,8 +38,6 @@ internal sealed partial class SecKeychainItems : IKeychainItems
         using var scope = new CfScope();
         IntPtr query = Query(
             scope,
-            service,
-            account,
             (Globals.ReturnData, Globals.True),
             (Globals.MatchLimit, Globals.MatchLimitOne));
 
@@ -46,66 +46,57 @@ internal sealed partial class SecKeychainItems : IKeychainItems
             return status;
 
         // A success with nothing attached is not a shape this query should be able to
-        // produce, since it asks for kSecReturnData. It is guarded anyway because the two
-        // calls below take the process down rather than failing on a null, and an item with
-        // no data (one another tool wrote) would be an odd way to lose the whole tray.
+        // produce, since it asks for kSecReturnData. It is guarded anyway because reading
+        // the CFData below takes the process down rather than failing on a null, and an item
+        // with no data (one another tool wrote) would be an odd way to lose the whole tray.
         if (data == IntPtr.Zero)
             return KeychainStatus.ItemNotFound;
 
-        // Copy-rule: SecItemCopyMatching hands back an owned CFData, and it is not the
-        // scope's because it was not created here.
-        try
-        {
-            secret = Utf8(data);
-        }
-        finally
-        {
-            CFRelease(data);
-        }
+        // Copy-rule: SecItemCopyMatching hands back a CFData this call owns. Handing it to
+        // the scope rather than releasing it by hand is what makes that ownership look like
+        // every other pointer here, and it releases on the throwing path too.
+        secret = Utf8(scope.Keep(data));
         return KeychainStatus.Success;
     }
 
     /// <summary>SecItemAdd of one generic password. Refuses an existing item with
     /// errSecDuplicateItem; replacing is the caller's decision, not this one's.</summary>
-    public int Add(string service, string account, string secret)
+    public int Add(string secret)
     {
         if (!OperatingSystem.IsMacOS())
             return KeychainStatus.NotAvailable;
 
         using var scope = new CfScope();
-        return SecItemAdd(Query(scope, service, account, (Globals.ValueData, Secret(scope, secret))), IntPtr.Zero);
+        return SecItemAdd(Query(scope, (Globals.ValueData, Secret(scope, secret))), IntPtr.Zero);
     }
 
     /// <summary>SecItemUpdate of one generic password. The query names the item and the
     /// second dictionary carries only what changes, which is why this cannot reuse Add's
     /// single-dictionary shape.</summary>
-    public int Update(string service, string account, string secret)
+    public int Update(string secret)
     {
         if (!OperatingSystem.IsMacOS())
             return KeychainStatus.NotAvailable;
 
         using var scope = new CfScope();
-        return SecItemUpdate(
-            Query(scope, service, account),
-            CfDictionary(scope, (Globals.ValueData, Secret(scope, secret))));
+        return SecItemUpdate(Query(scope), CfDictionary(scope, (Globals.ValueData, Secret(scope, secret))));
     }
 
     /// <summary>SecItemDelete of one generic password.</summary>
-    public int Delete(string service, string account)
+    public int Delete()
     {
         if (!OperatingSystem.IsMacOS())
             return KeychainStatus.NotAvailable;
 
         using var scope = new CfScope();
-        return SecItemDelete(Query(scope, service, account));
+        return SecItemDelete(Query(scope));
     }
 
-    // The dictionary that names one item: this class, this service, this account. Add's
-    // value and Copy's return-and-limit flags ride along as extra entries, because in this
-    // API the query and the attributes to store are the same kind of thing. Update is the
-    // exception and passes none, since what it changes goes in a dictionary of its own.
-    private static IntPtr Query(
-        CfScope scope, string service, string account, params (IntPtr Key, IntPtr Value)[] extra) =>
+    // The dictionary that names this instance's item: this class, this service, this
+    // account. Add's value and Copy's return-and-limit flags ride along as extra entries,
+    // because in this API the query and the attributes to store are the same kind of thing.
+    // Update is the exception and passes none, since what it changes goes in its own.
+    private IntPtr Query(CfScope scope, params (IntPtr Key, IntPtr Value)[] extra) =>
         CfDictionary(
             scope,
             [
@@ -139,21 +130,22 @@ internal sealed partial class SecKeychainItems : IKeychainItems
     private static IntPtr CFString(string value) =>
         CFStringCreateWithCString(IntPtr.Zero, value, EncodingUtf8);
 
+    // The length-taking overload, not the NUL-terminated one: a CFData is a byte count and a
+    // pointer, with no terminator promised, so reading it as a C string would run past the
+    // secret into whatever follows it.
     private static string Utf8(IntPtr data)
     {
         nint length = CFDataGetLength(data);
         IntPtr bytes = CFDataGetBytePtr(data);
-        if (length <= 0 || bytes == IntPtr.Zero)
-            return "";
-
-        byte[] buffer = new byte[length];
-        Marshal.Copy(bytes, buffer, 0, (int)length);
-        return Encoding.UTF8.GetString(buffer);
+        return length <= 0 || bytes == IntPtr.Zero
+            ? ""
+            : Marshal.PtrToStringUTF8(bytes, (int)length);
     }
 
-    /// <summary>Every CoreFoundation object created during one call, released together at
-    /// the end of it. Create-and-forget is a leak in this API and there is no finalizer to
-    /// catch it, so making the release structural is cheaper than remembering it.</summary>
+    /// <summary>Every CoreFoundation object this call owns, released together at the end of
+    /// it: the ones it created, and the ones an API handed it under the copy rule.
+    /// Create-and-forget is a leak in this API and there is no finalizer to catch it, so
+    /// making the release structural is cheaper than remembering it.</summary>
     private sealed class CfScope : IDisposable
     {
         private readonly List<IntPtr> _created = [];

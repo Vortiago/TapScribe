@@ -29,7 +29,7 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
 
     /// <summary>A store backed by this Mac's login Keychain.</summary>
     public KeychainTapTokenStore()
-        : this(new SecKeychainItems())
+        : this(new SecKeychainItems(ServiceName, AccountName))
     {
     }
 
@@ -43,7 +43,7 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
         // job. A missing item makes it a no-op, which is why the status is not inspected.
         if (string.IsNullOrEmpty(token))
         {
-            _items.Delete(ServiceName, AccountName);
+            _items.Delete();
             return null;
         }
 
@@ -56,8 +56,8 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
         // saving the Settings dialog without touching the token field reaches it, since
         // BridgeSettingsStore hands the unchanged token back through here every time.
         // Update destroys nothing when it fails.
-        if (_items.Add(ServiceName, AccountName, token) == KeychainStatus.DuplicateItem)
-            _items.Update(ServiceName, AccountName, token);
+        if (_items.Add(token) == KeychainStatus.DuplicateItem)
+            _items.Update(token);
 
         // A Keychain that refuses the add leaves the operator believing a token was saved,
         // and this seam has nowhere to say otherwise: the return value is the at-rest value,
@@ -77,7 +77,7 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
         // authorisation the operator revoked) are all things the tray cannot fix and must
         // not fail to launch over. What is lost is the saved token for this launch; the
         // operator re-enters it in the dialog, and a save overwrites the unread item.
-        return _items.Copy(ServiceName, AccountName, out string? secret) == KeychainStatus.Success
+        return _items.Copy(out string? secret) == KeychainStatus.Success
             ? secret ?? ""
             : "";
     }

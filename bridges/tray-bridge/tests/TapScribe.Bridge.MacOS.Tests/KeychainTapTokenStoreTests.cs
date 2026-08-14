@@ -114,35 +114,33 @@ public class KeychainTapTokenStoreTests
         // SecItemAdd was handed a dictionary it understands. Driven at the seam rather than
         // through the store so it can use an item of its own - running the store's real
         // service and account here would delete the tester's actual saved token.
-        var keychain = new SecKeychainItems();
-        const string service = "TapScribe Tray Bridge (test)";
-        string account = $"round-trip-{Guid.NewGuid()}";
+        var keychain = new SecKeychainItems("TapScribe Tray Bridge (test)", $"round-trip-{Guid.NewGuid()}");
         const string secret = "real-keychain-token-xyz";
 
         try
         {
-            Assert.Equal(KeychainStatus.Success, keychain.Add(service, account, secret));
-            Assert.Equal(KeychainStatus.Success, keychain.Copy(service, account, out string? read));
+            Assert.Equal(KeychainStatus.Success, keychain.Add(secret));
+            Assert.Equal(KeychainStatus.Success, keychain.Copy(out string? read));
             Assert.Equal(secret, read);
 
             // The replace leg, and the reason it is here rather than only against the fake:
             // Update is the one call that sends TWO dictionaries, so a mistake in either is
             // invisible to a double that just overwrites a value. Add refusing the duplicate
             // is what sends a save down this path at all.
-            Assert.Equal(KeychainStatus.DuplicateItem, keychain.Add(service, account, "ignored"));
-            Assert.Equal(KeychainStatus.Success, keychain.Update(service, account, "replaced-token"));
-            Assert.Equal(KeychainStatus.Success, keychain.Copy(service, account, out string? replaced));
+            Assert.Equal(KeychainStatus.DuplicateItem, keychain.Add("ignored"));
+            Assert.Equal(KeychainStatus.Success, keychain.Update("replaced-token"));
+            Assert.Equal(KeychainStatus.Success, keychain.Copy(out string? replaced));
             Assert.Equal("replaced-token", replaced);
 
-            Assert.Equal(KeychainStatus.Success, keychain.Delete(service, account));
+            Assert.Equal(KeychainStatus.Success, keychain.Delete());
             // The delete is a claim, not just cleanup: this is what a blanked token relies on.
-            Assert.Equal(KeychainStatus.ItemNotFound, keychain.Copy(service, account, out _));
+            Assert.Equal(KeychainStatus.ItemNotFound, keychain.Copy(out _));
         }
         finally
         {
             // Leave the login Keychain as we found it even when an assertion above fails,
             // so a red run does not strand an item that makes the next run fail differently.
-            keychain.Delete(service, account);
+            keychain.Delete();
         }
     }
 }

@@ -2,14 +2,14 @@ namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
 /// A hand-written <see cref="IKeychainItems"/> standing in for the login Keychain (#419):
-/// an in-memory dictionary keyed the way the real one is, plus a settable status so a test
-/// can drive the refusals a real Keychain will not perform on demand (an operator declining
-/// the unlock prompt, a locked keychain). Nothing here talks to the OS, so every policy
-/// test in this class runs on the ubuntu lane too.
+/// the one item the seam speaks for, plus settable statuses so a test can drive the refusals
+/// a real Keychain will not perform on demand (an operator declining the unlock prompt, a
+/// locked keychain). Nothing here talks to the OS, so every policy test in this class runs
+/// on the ubuntu lane too.
 /// </summary>
 internal sealed class FakeKeychain : IKeychainItems
 {
-    private readonly Dictionary<(string Service, string Account), string> _items = [];
+    private string? _stored;
 
     /// <summary>When set, every call answers with this instead of doing the work, which is
     /// how a denied Keychain is driven.</summary>
@@ -23,48 +23,50 @@ internal sealed class FakeKeychain : IKeychainItems
 
     private int? StoreRefusal => RefusesStore ?? Refuses;
 
-    public int Copy(string service, string account, out string? secret)
+    public int Copy(out string? secret)
     {
         secret = null;
         if (Refuses is int refusal)
             return refusal;
-        if (!_items.TryGetValue((service, account), out string? stored))
+        if (_stored is null)
             return KeychainStatus.ItemNotFound;
-        secret = stored;
+        secret = _stored;
         return KeychainStatus.Success;
     }
 
-    // Refuses an existing item rather than replacing it, because that is what SecItemAdd
-    // does. A double that upserted here would hide the bug this models: a second Write
+    // Refuses an EXISTING item rather than replacing it, because that is what SecItemAdd
+    // does. A double that upserted here would hide the bug this models: a second save
     // silently keeping the FIRST token.
-    public int Add(string service, string account, string secret)
+    public int Add(string secret)
     {
         if (StoreRefusal is int refusal)
             return refusal;
-        if (!_items.TryAdd((service, account), secret))
+        if (_stored is not null)
             return KeychainStatus.DuplicateItem;
+        _stored = secret;
         return KeychainStatus.Success;
     }
 
     // Refuses a MISSING item, because SecItemUpdate does: it updates what a query matched,
     // and a query that matched nothing is errSecItemNotFound. A double that inserted here
     // would let a caller skip Add entirely and still look correct.
-    public int Update(string service, string account, string secret)
+    public int Update(string secret)
     {
         if (StoreRefusal is int refusal)
             return refusal;
-        if (!_items.ContainsKey((service, account)))
+        if (_stored is null)
             return KeychainStatus.ItemNotFound;
-        _items[(service, account)] = secret;
+        _stored = secret;
         return KeychainStatus.Success;
     }
 
-    public int Delete(string service, string account)
+    public int Delete()
     {
         if (Refuses is int refusal)
             return refusal;
-        return _items.Remove((service, account))
-            ? KeychainStatus.Success
-            : KeychainStatus.ItemNotFound;
+        if (_stored is null)
+            return KeychainStatus.ItemNotFound;
+        _stored = null;
+        return KeychainStatus.Success;
     }
 }
