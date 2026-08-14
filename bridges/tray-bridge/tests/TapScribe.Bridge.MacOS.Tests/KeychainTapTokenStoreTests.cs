@@ -23,4 +23,17 @@ public class KeychainTapTokenStoreTests
 
         Assert.Null(store.Write("tap-token-abc"));
     }
+
+    [Fact]
+    public void WriteThenRead_RoundTripsThePlaintext()
+    {
+        // The settings file has nothing to hand back, so Read is passed null and still owes
+        // the caller the token: the Keychain is where the value actually came from.
+        const string secret = "round-trip-token-xyz";
+        var store = new KeychainTapTokenStore(new FakeKeychain());
+
+        store.Write(secret);
+
+        Assert.Equal(secret, store.Read(null));
+    }
 }

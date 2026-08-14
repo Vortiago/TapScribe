@@ -10,16 +10,27 @@ namespace TapScribe.Bridge.MacOS;
 /// </summary>
 public sealed class KeychainTapTokenStore : ITapTokenStore
 {
+    private const string ServiceName = "TapScribe Tray Bridge";
+    private const string AccountName = "tap-token";
+
     private readonly IKeychainItems _items;
 
     internal KeychainTapTokenStore(IKeychainItems items) => _items = items;
 
     /// <summary>Null, always: the secret went to the Keychain, so nothing about it belongs
     /// in the settings file.</summary>
-    public string? Write(string token) => null;
+    public string? Write(string token)
+    {
+        _items.Add(ServiceName, AccountName, token);
+        return null;
+    }
 
     /// <summary>The plaintext from the Keychain. <paramref name="atRest"/> is ignored: the
     /// macOS settings file has never carried a token, which is what Write's null means.
     /// </summary>
-    public string Read(string? atRest) => "";
+    public string Read(string? atRest)
+    {
+        _items.Copy(ServiceName, AccountName, out string? secret);
+        return secret!;
+    }
 }
