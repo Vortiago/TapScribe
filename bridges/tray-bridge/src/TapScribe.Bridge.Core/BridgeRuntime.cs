@@ -240,6 +240,34 @@ public sealed class BridgeRuntime
             _view.ShowNotice(title, message, NoticeKind.Warning);
         });
 
+    /// <summary>
+    /// Hand the runtime the running event loop. Call this ONCE, from the shell, as soon as its
+    /// loop is pumping and its <see cref="IDispatcher"/> can actually deliver: everything below
+    /// marshals through the view, and a constructor runs too early for that on either platform
+    /// (WinForms has not installed its SynchronizationContext yet; AppKit has not finished
+    /// launching). Resumes a pipeline a previous session left running, which the Recorder kept
+    /// going across both restarts. Polls only: no drain, no re-trigger.
+    /// </summary>
+    public void Startup()
+    {
+        MeetingState? state = _deps.StateStore.Load();
+        if (state is null)
+            return; // the common case: a fresh launch with no meeting to resume
+
+        BridgeSettings settings;
+        lock (_gate)
+            settings = _settings;
+
+        _view.SetMenuState(canStart: false, canEnd: false);
+        ApplyStatus(new TrayStatus.Processing("Resuming…"));
+        Task resume = RunPipelineFlowAsync(
+            settings, state.SessionId,
+            run: (controller, ct) => controller.ResumeAsync(ct),
+            drainAsync: null); // nothing of ours is streaming: a previous process owned those taps
+        lock (_gate)
+            _endTask = resume;
+    }
+
     /// <summary>The in-flight End (or Resume) flow, so a test can await the real one.</summary>
     public Task? EndTask
     {
