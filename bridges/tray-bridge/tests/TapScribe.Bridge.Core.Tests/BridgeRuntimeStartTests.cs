@@ -32,4 +32,32 @@ public class BridgeRuntimeStartTests
         Assert.False(harness.View.CanStart, "Start stayed enabled over a live meeting");
         Assert.True(harness.View.CanEnd, "the meeting was never published as running");
     }
+
+    [Fact]
+    public async Task Start_WhenNoSelectedDeviceIsPresent_ReturnsToIdleWithoutMintingASession()
+    {
+        using var harness = new RuntimeHarness(); // no devices registered at all
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        // A non-Ok verdict is a hard stop surfaced BEFORE any network call: the operator's
+        // devices are gone, and minting a session first would leave an empty detached session
+        // on the Recorder for every failed start.
+        Assert.False(harness.MintReached.IsCompleted, "the pre-flight verdict did not short-circuit the mint");
+
+        // Back to idle, with a message that names the fix rather than the fault.
+        Assert.True(harness.View.CanStart, "Start stayed greyed out after a failed start");
+        Assert.False(harness.View.CanEnd);
+        Assert.Equal(TrayIcon.Error, harness.View.LastStatus!.Icon);
+        (string title, string message, NoticeKind kind) = Assert.Single(harness.View.Notices);
+        Assert.Equal(NoticeKind.Warning, kind);
+        Assert.Equal("Could not start meeting", title);
+        Assert.Contains("Settings", message, StringComparison.Ordinal);
+
+        // The enumerator is opened before the verdict is known, so this early exit is one of
+        // the paths that has to release it.
+        Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded");
+    }
 }
