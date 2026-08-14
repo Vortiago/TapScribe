@@ -106,8 +106,8 @@ public class KeychainTapTokenStoreTests
         Assert.Equal("tap-token", KeychainTapTokenStore.AccountName);
     }
 
-    [RequiresMacOS]
-    public void RealKeychain_AddsCopiesAndDeletesAGenericPassword()
+    [RequiresMacOS("reach a login Keychain")]
+    public void RealKeychain_AddsCopiesUpdatesAndDeletesAGenericPassword()
     {
         // The one test that talks to the login Keychain, and the only way the P/Invoke half
         // is proved at all: the fake above proves the policy but nothing about whether

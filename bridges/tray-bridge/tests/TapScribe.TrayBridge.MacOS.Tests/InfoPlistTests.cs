@@ -14,14 +14,17 @@ namespace TapScribe.TrayBridge.MacOS.Tests;
 public class InfoPlistTests
 {
     [Fact]
-    public void CFBundleIdentifier_StaysTheKeychainAndLaunchServicesContract()
+    public void CFBundleIdentifier_StaysTheLaunchServicesAndSigningContract()
     {
-        // Load-bearing far beyond naming. macOS scopes Keychain items to the bundle
-        // identifier, so the operator's saved tap token is reachable under this string and
-        // no other: changing it orphans every stored token exactly as renaming
-        // windows-tray-bridge.json would orphan every saved Windows setting. LaunchServices
-        // also dedupes by it, so a collision lets the OS launch the wrong app. A change here
-        // needs a migration, not an edit.
+        // Load-bearing beyond naming: LaunchServices dedupes by it, so a collision lets the
+        // OS launch the wrong app, and a signed build's identity is built on it, which is
+        // what a Keychain ACL ends up trusting once there is a signature to trust.
+        //
+        // It is NOT the tap token's contract, though. Items in the file-based login Keychain
+        // are found by kSecAttrService and kSecAttrAccount, which are free labels this app
+        // chooses: see KeychainTapTokenStore.ServiceName, which owns that pair and carries
+        // the migration warning for it. Two strings claiming to be the one that orphans
+        // every stored token would leave the next person migrating unable to tell which.
         Assert.Equal("net.havso.tapscribe.traybridge", InfoPlist.Built.Text("CFBundleIdentifier"));
     }
 

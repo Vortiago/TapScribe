@@ -12,9 +12,13 @@ namespace TapScribe.Bridge.MacOS.Tests;
 /// these cleanly instead of failing.</summary>
 internal sealed class RequiresMacOSAttribute : FactAttribute
 {
-    public RequiresMacOSAttribute()
+    /// <param name="capability">What the test needs a Mac FOR, folded into the skip reason.
+    /// The ubuntu lane's skip list is the only signal that a piece of P/Invoke went
+    /// unexercised there, so it has to name the capability rather than whichever test
+    /// happened to be written first.</param>
+    public RequiresMacOSAttribute(string capability = "answer for itself")
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            Skip = "not running macOS, so this host has no macOS version to read";
+            Skip = $"not running macOS, so this host cannot {capability}";
     }
 }
