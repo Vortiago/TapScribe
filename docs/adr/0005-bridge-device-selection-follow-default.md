@@ -50,10 +50,10 @@ ambiguous and brittle).
 
 ## Consequences
 
-- `DeviceSelection` (model + resolver) lives in `Bridge.Core`;
-  `BridgeSettings` in `Bridge.Windows` persists a `List<DeviceSelection>`
-  alongside the DPAPI-protected token.
-- `TrayContext` resolves via `DeviceSelection.Resolve`, surfacing `missing` as
+- `DeviceSelection` (model + resolver) and `BridgeSettings` both live in
+  `Bridge.Core`; the settings persist a `List<DeviceSelection>` alongside a
+  token the platform's `ITapTokenStore` protects (DPAPI on Windows).
+- `BridgeRuntime` resolves via `DeviceSelection.Resolve`, surfacing `missing` as
   a non-fatal balloon and the zero-resolved / duplicate-identity verdicts as a
   pre-start error (see the Level-gate and detached-session entries in
   CONTEXT.md).
