@@ -14,11 +14,14 @@ fi
 # so the race window is short.
 echo '{"async": true, "asyncTimeout": 300000}'
 
-# Python: install the runtime + dev deps the CI matrix uses. Mirrors
-# .github/workflows so a green hook implies a green CI install step.
+# Python: the same install ci.yml's `tests` job runs. `-e .` resolves the
+# core deps and their version bounds from pyproject instead of restating
+# them here, so that half cannot drift out of step with CI. hypothesis is
+# imported at module scope by tests/test_tap_endpoint.py: without it
+# `pytest tests` aborts during collection, which also blocks the pre-push
+# gate in .claude/hooks/pre-push.sh.
 pip install --quiet --disable-pip-version-check \
-  fastapi uvicorn python-multipart numpy websockets \
-  pytest pytest-asyncio pytest-cov httpx ruff cryptography
+  -e . pytest pytest-asyncio pytest-cov httpx hypothesis ruff
 
 # JS: bridges/local-test-bridge has no package.json and the Chrome
 # extension's tests run on plain `node --test`, so no `npm install`.
