@@ -199,8 +199,13 @@ internal sealed class RuntimeHarness : IDisposable
 
     private MeetingHistoryStore? _historyStore;
 
+    /// <summary>Where the settings store writes. Overridden by the test that needs the save to
+    /// FAIL, which is a property of the destination rather than of the settings.</summary>
+    public string? SettingsStoreDirectory { get; init; }
+
     public BridgeSettingsStore SettingsStore =>
-        _settingsStore ??= new BridgeSettingsStore(new FakeTapTokenStore(), _directory, "runtime-test.json");
+        _settingsStore ??= new BridgeSettingsStore(
+            new FakeTapTokenStore(), SettingsStoreDirectory ?? _directory, "runtime-test.json");
 
     private BridgeSettingsStore? _settingsStore;
 

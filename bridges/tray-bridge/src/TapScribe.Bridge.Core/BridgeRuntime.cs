@@ -268,6 +268,59 @@ public sealed class BridgeRuntime
             _endTask = resume;
     }
 
+    /// <summary>The settings currently in force. The shell seeds its dialog from this rather
+    /// than from its own copy, so an edit that failed to reach disk still governs the
+    /// session.</summary>
+    public BridgeSettings Settings
+    {
+        get { lock (_gate) return _settings; }
+    }
+
+    /// <summary>
+    /// Apply an edited settings object: publish it, persist it, and push the per-device gate
+    /// tuning to any running pipelines (issues #149, #153).
+    ///
+    /// Editing while a meeting is live is allowed. Connection and device changes bind at the
+    /// next Start (those pipelines bound them at Begin), but the level-gate knobs re-tune the
+    /// running pipelines in place, so a sensitivity change takes effect with no Stop/Start,
+    /// touching only the devices whose tuning changed.
+    /// </summary>
+    public void ApplySettings(BridgeSettings updated)
+    {
+        ArgumentNullException.ThrowIfNull(updated);
+
+        // Publish under the same lock every other reader takes (Start, End, Startup). Those
+        // read it from thread-pool continuations, so "they all happen to run on the UI thread"
+        // was never true, and an unlocked write of a reference field is not ordered against
+        // them.
+        lock (_gate)
+            _settings = updated;
+
+        try
+        {
+            _deps.SettingsStore.Save(updated);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The settings directory could not be written (permissions, full disk, a file
+            // standing where the directory should be). Keep the new settings for this session
+            // and tell the operator they will not persist: throwing their edit away because
+            // the disk is unavailable would be the worse failure.
+            _view.ShowNotice("Settings not saved", ex.Message, NoticeKind.Warning);
+        }
+
+        // Grab the orchestrator under the lock (a Start may publish it from a thread-pool
+        // continuation), then call out WITHOUT holding it: UpdateGates is a quick atomic
+        // fan-out and should not run under _gate. The per-identity map routes each device's new
+        // tuning to its own pipeline; one whose identity is not running is skipped. No meeting
+        // means null means a no-op. Applied even if the save above failed, so the in-memory
+        // re-tune still reaches the pipelines for this session.
+        CaptureOrchestrator? running;
+        lock (_gate)
+            running = _orchestrator;
+        running?.UpdateGates(updated.ToGateOptionsByIdentity());
+    }
+
     /// <summary>The in-flight End (or Resume) flow, so a test can await the real one.</summary>
     public Task? EndTask
     {
