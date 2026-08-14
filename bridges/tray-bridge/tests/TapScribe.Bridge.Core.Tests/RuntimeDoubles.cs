@@ -102,6 +102,11 @@ internal sealed class RuntimeHarness : IDisposable
     /// <see cref="CompleteMint"/>: the seam that holds a Start in flight.</summary>
     public bool HoldMint { get; init; }
 
+    /// <summary>When set, the mint throws it instead of answering. The mint doubles as the
+    /// connection pre-flight, so this is how a test models an unreachable Recorder or a
+    /// rejected token without standing one up.</summary>
+    public Exception? MintError { get; init; }
+
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
 
     public MeetingStateStore StateStore => _stateStore ??= new MeetingStateStore(_directory);
@@ -140,6 +145,8 @@ internal sealed class RuntimeHarness : IDisposable
         async (_, cancellationToken) =>
         {
             _mintReached.TrySetResult();
+            if (MintError is not null)
+                throw MintError;
             if (!HoldMint)
                 return SessionId;
             return await _mint.Task.WaitAsync(cancellationToken).ConfigureAwait(false);

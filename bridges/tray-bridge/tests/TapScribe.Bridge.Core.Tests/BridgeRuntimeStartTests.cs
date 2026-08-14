@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace TapScribe.Bridge.Core.Tests;
 
 /// <summary>
@@ -59,5 +61,54 @@ public class BridgeRuntimeStartTests
         // The enumerator is opened before the verdict is known, so this early exit is one of
         // the paths that has to release it.
         Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded");
+    }
+
+    [Fact]
+    public async Task Start_WhenTheRecorderRefusesTheToken_SaysSoAndLeavesNoMeetingBehind()
+    {
+        using var harness = new RuntimeHarness
+        {
+            MintError = new HttpRequestException("Unauthorized", null, HttpStatusCode.Unauthorized),
+        };
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        // Classified, not raw: "status code 401" tells the operator nothing about what to do.
+        (string title, string message, _) = Assert.Single(harness.View.Notices);
+        Assert.Equal("Could not start meeting", title);
+        Assert.Equal(
+            StartFailure.Classify(harness.MintError!, harness.Settings.Host, harness.Settings.Port).Message,
+            message);
+
+        // The mint runs BEFORE any device is opened, which is what makes it the pre-flight:
+        // a refused token must not have cost the operator an opened endpoint.
+        Assert.False(mic.Started, "a device was opened despite the pre-flight failing");
+        Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded");
+        Assert.True(harness.View.CanStart, "Start stayed greyed out after a failed start");
+        Assert.False(harness.View.CanEnd);
+    }
+
+    [Fact]
+    public async Task Start_WhenTheRecorderIsUnreachable_SaysSoRatherThanWedgingOnStarting()
+    {
+        using var harness = new RuntimeHarness { MintError = new HttpRequestException("refused") };
+        harness.AddDevice("mic", DeviceFlow.Capture);
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        // The distinction the operator acts on: unreachable means check the host/port, a
+        // rejected token means check the token. Both must beat leaving the header on
+        // "Starting…" forever, which is what an unclassified escape from this fire-and-forget
+        // task would do.
+        Assert.Equal(
+            StartFailureKind.Unreachable,
+            StartFailure.Classify(harness.MintError!, harness.Settings.Host, harness.Settings.Port).Kind);
+        Assert.Equal(TrayIcon.Error, harness.View.LastStatus!.Icon);
+        Assert.True(harness.View.CanStart);
     }
 }

@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Text.Json;
+
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
@@ -154,6 +157,23 @@ public sealed class BridgeRuntime
                 _view.SetMenuState(canStart: false, canEnd: true);
                 ApplyStatus(tally.Status);
             });
+        }
+        catch (Exception ex) when (
+            ex is HttpRequestException
+                or OperationCanceledException
+                or JsonException
+                or InvalidOperationException
+                or ExternalException
+                or NotSupportedException
+                or ArgumentException)
+        {
+            // Pre-flight or device-open failure: classify the cause and return the menu to
+            // idle with a clear message. Includes the session-mint timeout
+            // (OperationCanceledException) and a malformed new-session response (JsonException)
+            // so neither can escape this fire-and-forget task and wedge the shell on
+            // "Starting…". The filter keeps this off CodeQL's catch-of-all radar.
+            StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
+            FailToIdle("Could not start meeting", failure.Message);
         }
         finally
         {
