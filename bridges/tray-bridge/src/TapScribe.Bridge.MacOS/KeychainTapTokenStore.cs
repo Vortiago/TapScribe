@@ -39,14 +39,25 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
     /// in the settings file.</summary>
     public string? Write(string token)
     {
-        // Delete first, whatever the token is. SecItemAdd refuses an existing item with
-        // errSecDuplicateItem instead of replacing it, so a re-saved token would otherwise
-        // keep the old one; and an empty token means the operator blanked the field, where
-        // deleting is the entire job. A missing item makes this a no-op, which is why the
-        // status is not worth inspecting.
-        _items.Delete(ServiceName, AccountName);
-        if (!string.IsNullOrEmpty(token))
-            _items.Add(ServiceName, AccountName, token);
+        // An empty token is the operator blanking the field, where removing the item IS the
+        // job. A missing item makes it a no-op, which is why the status is not inspected.
+        if (string.IsNullOrEmpty(token))
+        {
+            _items.Delete(ServiceName, AccountName);
+            return null;
+        }
+
+        // Add, then replace what is already there. Never clear first: SecItemAdd refuses an
+        // existing item with errSecDuplicateItem rather than overwriting it, so a re-save
+        // has to go through Update either way, and deleting to make room opens a window
+        // where the old token is gone and the new one has not landed. A Keychain that
+        // refuses the store in that window (it locked between the two calls, the operator
+        // dismissed the prompt) would revoke a working token nobody asked to clear, and
+        // saving the Settings dialog without touching the token field reaches it, since
+        // BridgeSettingsStore hands the unchanged token back through here every time.
+        // Update destroys nothing when it fails.
+        if (_items.Add(ServiceName, AccountName, token) == KeychainStatus.DuplicateItem)
+            _items.Update(ServiceName, AccountName, token);
 
         // A Keychain that refuses the add leaves the operator believing a token was saved,
         // and this seam has nowhere to say otherwise: the return value is the at-rest value,

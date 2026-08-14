@@ -74,6 +74,26 @@ public class KeychainTapTokenStoreTests
     }
 
     [Fact]
+    public void Write_WhenTheKeychainRefusesToStore_KeepsThePreviousToken()
+    {
+        // A save that cannot be stored must not cost the operator the token they already
+        // had. Clearing the item first would: the delete lands, the store is refused (the
+        // keychain locked between the two calls, the operator dismissed the prompt), and a
+        // working token is revoked that nobody asked to clear. Saving the Settings dialog
+        // without touching the token field is enough to reach it, since BridgeSettingsStore
+        // hands the unchanged token back through Write every time.
+        var keychain = new FakeKeychain();
+        var store = new KeychainTapTokenStore(keychain);
+        store.Write("first-token");
+
+        keychain.RefusesStore = KeychainStatus.InteractionNotAllowed;
+        store.Write("second-token");
+        keychain.RefusesStore = null;
+
+        Assert.Equal("first-token", store.Read(null));
+    }
+
+    [Fact]
     public void ServiceAndAccount_StayTheKeychainItemContract()
     {
         // The operator's token is reachable under this (service, account) pair and no
@@ -104,6 +124,16 @@ public class KeychainTapTokenStoreTests
             Assert.Equal(KeychainStatus.Success, keychain.Add(service, account, secret));
             Assert.Equal(KeychainStatus.Success, keychain.Copy(service, account, out string? read));
             Assert.Equal(secret, read);
+
+            // The replace leg, and the reason it is here rather than only against the fake:
+            // Update is the one call that sends TWO dictionaries, so a mistake in either is
+            // invisible to a double that just overwrites a value. Add refusing the duplicate
+            // is what sends a save down this path at all.
+            Assert.Equal(KeychainStatus.DuplicateItem, keychain.Add(service, account, "ignored"));
+            Assert.Equal(KeychainStatus.Success, keychain.Update(service, account, "replaced-token"));
+            Assert.Equal(KeychainStatus.Success, keychain.Copy(service, account, out string? replaced));
+            Assert.Equal("replaced-token", replaced);
+
             Assert.Equal(KeychainStatus.Success, keychain.Delete(service, account));
             // The delete is a claim, not just cleanup: this is what a blanked token relies on.
             Assert.Equal(KeychainStatus.ItemNotFound, keychain.Copy(service, account, out _));

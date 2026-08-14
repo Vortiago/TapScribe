@@ -19,6 +19,10 @@ internal interface IKeychainItems
     /// <summary>SecItemAdd of one generic password.</summary>
     int Add(string service, string account, string secret);
 
+    /// <summary>SecItemUpdate of one generic password: the replace half of a save, because
+    /// Add refuses an item that already exists rather than overwriting it.</summary>
+    int Update(string service, string account, string secret);
+
     /// <summary>SecItemDelete of one generic password.</summary>
     int Delete(string service, string account);
 }

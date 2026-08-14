@@ -73,14 +73,21 @@ internal sealed partial class SecKeychainItems : IKeychainItems
             return KeychainStatus.NotAvailable;
 
         using var scope = new CfScope();
-        byte[] bytes = Encoding.UTF8.GetBytes(secret);
-        IntPtr attributes = Query(
-            scope,
-            service,
-            account,
-            (Globals.ValueData, scope.Keep(CFDataCreate(IntPtr.Zero, bytes, bytes.Length))));
+        return SecItemAdd(Query(scope, service, account, (Globals.ValueData, Secret(scope, secret))), IntPtr.Zero);
+    }
 
-        return SecItemAdd(attributes, IntPtr.Zero);
+    /// <summary>SecItemUpdate of one generic password. The query names the item and the
+    /// second dictionary carries only what changes, which is why this cannot reuse Add's
+    /// single-dictionary shape.</summary>
+    public int Update(string service, string account, string secret)
+    {
+        if (!OperatingSystem.IsMacOS())
+            return KeychainStatus.NotAvailable;
+
+        using var scope = new CfScope();
+        return SecItemUpdate(
+            Query(scope, service, account),
+            CfDictionary(scope, (Globals.ValueData, Secret(scope, secret))));
     }
 
     /// <summary>SecItemDelete of one generic password.</summary>
@@ -93,20 +100,23 @@ internal sealed partial class SecKeychainItems : IKeychainItems
         return SecItemDelete(Query(scope, service, account));
     }
 
-    // The dictionary all three calls share: this class of item, this service, this account.
-    // Add's value and Copy's return-and-limit flags ride along as extra entries, because in
-    // this API the query and the attributes to store are the same kind of thing.
+    // The dictionary that names one item: this class, this service, this account. Add's
+    // value and Copy's return-and-limit flags ride along as extra entries, because in this
+    // API the query and the attributes to store are the same kind of thing. Update is the
+    // exception and passes none, since what it changes goes in a dictionary of its own.
     private static IntPtr Query(
-        CfScope scope, string service, string account, params (IntPtr Key, IntPtr Value)[] extra)
-    {
-        (IntPtr Key, IntPtr Value)[] entries =
-        [
-            (Globals.Class, Globals.ClassGenericPassword),
-            (Globals.AttrService, scope.Keep(CFString(service))),
-            (Globals.AttrAccount, scope.Keep(CFString(account))),
-            .. extra,
-        ];
+        CfScope scope, string service, string account, params (IntPtr Key, IntPtr Value)[] extra) =>
+        CfDictionary(
+            scope,
+            [
+                (Globals.Class, Globals.ClassGenericPassword),
+                (Globals.AttrService, scope.Keep(CFString(service))),
+                (Globals.AttrAccount, scope.Keep(CFString(account))),
+                .. extra,
+            ]);
 
+    private static IntPtr CfDictionary(CfScope scope, params (IntPtr Key, IntPtr Value)[] entries)
+    {
         IntPtr[] keys = [.. entries.Select(entry => entry.Key)];
         IntPtr[] values = [.. entries.Select(entry => entry.Value)];
         // The kCFType callbacks make the dictionary retain what it holds for as long as it
@@ -118,6 +128,12 @@ internal sealed partial class SecKeychainItems : IKeychainItems
             keys.Length,
             Globals.TypeDictionaryKeyCallBacks,
             Globals.TypeDictionaryValueCallBacks));
+    }
+
+    private static IntPtr Secret(CfScope scope, string secret)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(secret);
+        return scope.Keep(CFDataCreate(IntPtr.Zero, bytes, bytes.Length));
     }
 
     private static IntPtr CFString(string value) =>
@@ -200,6 +216,9 @@ internal sealed partial class SecKeychainItems : IKeychainItems
 
     [LibraryImport(SecurityLibrary)]
     private static partial int SecItemCopyMatching(IntPtr query, out IntPtr result);
+
+    [LibraryImport(SecurityLibrary)]
+    private static partial int SecItemUpdate(IntPtr query, IntPtr attributesToUpdate);
 
     [LibraryImport(SecurityLibrary)]
     private static partial int SecItemDelete(IntPtr query);
