@@ -91,10 +91,23 @@ internal sealed class FakeTrayView : ITrayView
     /// does not have to know about enumerators.</summary>
     public Func<bool>? ReleasedProbe { get; set; }
 
+    /// <summary>Answers "was this call marshalled", supplied by the harness. Every ITrayView
+    /// method is contractually on the shell's UI thread; Shutdown is the one the runtime
+    /// reaches after two ConfigureAwait(false) awaits, so it is the one that can silently stop
+    /// being.</summary>
+    public Func<bool>? MarshalProbe { get; set; }
+
+    /// <summary>Whether Shutdown arrived through the dispatcher. Null until it is called.</summary>
+    public bool? ShutdownWasMarshalled { get; private set; }
+
     public void Shutdown()
     {
+        // Read BEFORE taking the lock: the probe asks the dispatcher a question about the
+        // current call, and holding the view's own lock has nothing to do with it.
+        bool? marshalled = MarshalProbe?.Invoke();
         lock (_lock)
         {
+            ShutdownWasMarshalled = marshalled;
             CapturesReleasedBeforeShutdown = ReleasedProbe?.Invoke();
             ShutdownCalled = true;
         }
@@ -146,12 +159,35 @@ internal sealed class FakeMeetingWindow : IMeetingWindow
 /// ordering guarantees are the subject, so running inline keeps a test's assertions on the
 /// line after the call that caused them.
 /// </summary>
-internal sealed class InlineDispatcher : IDispatcher
+internal sealed class InlineDispatcher(Action? afterFirstPost = null) : IDispatcher
 {
+    private bool _posted;
+
+    /// <summary>Whether control is currently inside a <see cref="Post"/>. ITrayView promises
+    /// every method is called on the shell's UI thread, which for the runtime means "through
+    /// the dispatcher"; this is how a test can hold it to that, since running posts inline
+    /// makes the thread itself indistinguishable.</summary>
+    public bool InPost { get; private set; }
+
     public void Post(Action action)
     {
         ArgumentNullException.ThrowIfNull(action);
-        action();
+        bool outer = InPost;
+        InPost = true;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            InPost = outer;
+        }
+        if (_posted)
+            return;
+        _posted = true;
+        // The hook a test needs to act at the one instant it cannot otherwise reach: the
+        // window closing the moment it has something to show.
+        afterFirstPost?.Invoke();
     }
 }
 
@@ -225,7 +261,13 @@ internal sealed class RuntimeHarness : IDisposable
 
     /// <summary>Where the settings store writes. Overridden by the test that needs the save to
     /// FAIL, which is a property of the destination rather than of the settings.</summary>
-    public string? SettingsStoreDirectory { get; init; }
+    public string? SettingsStoreDirectory { get; set; }
+
+    /// <summary>Hand the harness another temp path to remove at teardown, so a test that has to
+    /// build one itself does not leak it per run.</summary>
+    public void AlsoDelete(string path) => _extraPaths.Add(path);
+
+    private readonly List<string> _extraPaths = [];
 
     public BridgeSettingsStore SettingsStore =>
         _settingsStore ??= new BridgeSettingsStore(
@@ -300,7 +342,14 @@ internal sealed class RuntimeHarness : IDisposable
         QuitTeardownCap = TimeSpan.FromSeconds(5),
     };
 
-    public BridgeRuntime Build() => new(View, Dispatcher, Dependencies, Settings, Budgets);
+    public BridgeRuntime Build()
+    {
+        // Wired once, here, rather than per AddDevice: Build runs after the devices are
+        // registered and is where the harness already hands the runtime its collaborators.
+        View.ReleasedProbe = () => _opened.TrueForAll(c => c.Disposed) && Enumerator.Disposed;
+        View.MarshalProbe = () => Dispatcher.InPost;
+        return new BridgeRuntime(View, Dispatcher, Dependencies, Settings, Budgets);
+    }
 
     /// <summary>Await the in-flight Start. Asserts only that it SETTLED: whether it succeeded
     /// is the caller's subject, and several tests are about starts that do not.</summary>
@@ -328,6 +377,8 @@ internal sealed class RuntimeHarness : IDisposable
         {
             if (Directory.Exists(_directory))
                 Directory.Delete(_directory, recursive: true);
+            foreach (string path in _extraPaths)
+                File.Delete(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 
@@ -16,11 +17,6 @@ namespace TapScribe.Bridge.Core;
 /// </summary>
 public sealed class BridgeRuntime
 {
-    /// <summary>How long the session mint may take before Start gives up. Without a bound
-    /// HttpClient waits its 100 s default, which would wedge the shell on "Starting…" against
-    /// a host that accepts the connection and never replies.</summary>
-    private static readonly TimeSpan MintTimeout = TimeSpan.FromSeconds(20);
-
     private readonly ITrayView _view;
     private readonly IDispatcher _dispatcher;
     private readonly BridgeDependencies _deps;
@@ -29,11 +25,8 @@ public sealed class BridgeRuntime
     // Read and written under _gate, always: Start snapshots them and carries the snapshot into
     // thread-pool continuations, so there is no thread any of these is private to.
     private BridgeSettings _settings;
-    private CaptureOrchestrator? _orchestrator;
-    private IAudioDeviceEnumerator? _enumerator; // outlives the captures it opened
-    private string? _sessionId;                  // the detached session the running meeting taps into
+    private Meeting? _meeting;                   // non-null exactly while a meeting is streaming
     private Task? _startTask;
-    private DateTimeOffset _startedAt;           // wall-clock start, for the Past-meetings history (#168)
 
     private Task? _endTask;
     // The in-flight End/Resume flow's cancellation, published so teardown can stop it and
@@ -80,14 +73,14 @@ public sealed class BridgeRuntime
         {
             // Already running, already starting (the mint is a round-trip long), or on the
             // way out.
-            if (_orchestrator is not null || _startTask is { IsCompleted: false } || _quitting)
+            if (_meeting is not null || _startTask is { IsCompleted: false } || _quitting)
                 return;
             settings = _settings;
         }
 
         // Disable Start now so a second click can't race a second meeting; the rest is async
         // and reports back through the dispatcher.
-        _view.SetMenuState(canStart: false, canEnd: false);
+        ShowBusy();
         ApplyStatus(new TrayStatus.Starting());
 
         // Publish the task rather than firing and forgetting: teardown waits on it, so a
@@ -123,7 +116,7 @@ public sealed class BridgeRuntime
             //    unreachable Recorder or a rejected token throws here, before any device is
             //    opened.
             string sessionId;
-            using (var cts = new CancellationTokenSource(MintTimeout))
+            using (var cts = new CancellationTokenSource(_budgets.MintTimeout))
                 sessionId = await _deps.MintDetachedSession(settings, cts.Token).ConfigureAwait(false);
 
             // 3) One tap per resolved device, each routing into the one session under its own
@@ -136,6 +129,13 @@ public sealed class BridgeRuntime
                 ResolvedDevice resolved = resolution.Resolved[i];
                 TryAddSpec(specs, enumerator, resolved, perDevice[i]);
             }
+            if (specs.Count == 0)
+                // Every resolved device failed to OPEN (in use, format unsupported, gone).
+                // StartAll would refuse an empty set anyway, so this is kept for its VERB:
+                // opening is this runtime's own stage and the orchestrator cannot name it, and
+                // "opened" versus "started" is the operator's only clue which of the two stages
+                // their devices died at.
+                throw new InvalidOperationException("No selected device could be opened.");
 
             // Which devices are actually streaming, and what that means for the status line, is
             // the core's DeviceTally. Touched from the dispatcher only (both callbacks marshal
@@ -167,10 +167,9 @@ public sealed class BridgeRuntime
                 abandoned = _quitting;
                 if (!abandoned)
                 {
-                    _orchestrator = orchestrator;
-                    _enumerator = enumerator;
-                    _sessionId = sessionId;
-                    _startedAt = DateTimeOffset.Now;
+                    // DateTimeOffset.Now is the meeting's wall-clock start, for the
+                    // Past-meetings history (#168).
+                    _meeting = new Meeting(orchestrator, enumerator, sessionId, DateTimeOffset.Now);
                     enumerator = null; // ownership transferred; the finally must not release it
                 }
             }
@@ -182,10 +181,18 @@ public sealed class BridgeRuntime
                 return;
             }
 
+            // Devices that did not resolve are a non-fatal warning: the meeting runs on the
+            // ones that did, and the operator is told which it is missing.
+            IReadOnlyList<DeviceSelection> missing = resolution.Missing;
             _dispatcher.Post(() =>
             {
-                _view.SetMenuState(canStart: false, canEnd: true);
+                ShowMeetingRunning();
                 ApplyStatus(tally.Status);
+                if (missing.Count > 0)
+                    _view.ShowNotice(
+                        "Some devices unavailable",
+                        $"Skipped: {string.Join(", ", missing.Select(DescribeSelection))}",
+                        NoticeKind.Warning);
             });
         }
         catch (Exception ex) when (
@@ -242,6 +249,16 @@ public sealed class BridgeRuntime
     /// <summary>The operator-facing reason a device selection cannot start a meeting. Each
     /// verdict names the fix rather than the fault: the operator's next move is in Settings
     /// either way, and which tab differs.</summary>
+    /// <summary>Name a selection the way the operator chose it, for the "skipped" notice: a
+    /// follow-default entry has no device to name, so it is described by its role.</summary>
+    private static string DescribeSelection(DeviceSelection selection) => selection switch
+    {
+        DeviceSelection.FollowDefault { Flow: DeviceFlow.Capture } => "default microphone",
+        DeviceSelection.FollowDefault { Flow: DeviceFlow.Render } => "default system audio",
+        DeviceSelection.Pinned pinned => string.IsNullOrEmpty(pinned.Name) ? pinned.DeviceId : pinned.Name,
+        _ => selection.Identity,
+    };
+
     private static string DescribeVerdict(SelectionVerdict verdict) => verdict switch
     {
         SelectionVerdict.NothingToCapture =>
@@ -252,14 +269,31 @@ public sealed class BridgeRuntime
     };
 
     /// <summary>Roll the menu back to idle and surface why. Marshalled, because every caller
-    /// reaches it from a continuation.</summary>
+    /// reaches it from a continuation; <see cref="Failed"/> is the same three actions for a
+    /// caller already on the UI thread.</summary>
     private void FailToIdle(string title, string message) =>
-        _dispatcher.Post(() =>
-        {
-            _view.SetMenuState(canStart: true, canEnd: false);
-            ApplyStatus(new TrayStatus.Error(message));
-            _view.ShowNotice(title, message, NoticeKind.Warning);
-        });
+        _dispatcher.Post(() => Failed(new TrayStatus.Error(message), title, message));
+
+    /// <summary>Surface a failure and return the menu to idle. The one spelling of "something
+    /// went wrong and the operator can try again", so a start failure and a pipeline failure
+    /// cannot drift into doing these three things in two different orders.</summary>
+    private void Failed(TrayStatus status, string title, string message)
+    {
+        ShowIdleControls();
+        ApplyStatus(status);
+        _view.ShowNotice(title, message, NoticeKind.Warning);
+    }
+
+    /// <summary>Both commands off: a meeting is starting, ending, or a pipeline is in flight.
+    /// Named rather than a bool pair at each call site, because "false, false" reads as an
+    /// error state and is in fact the normal one three times over.</summary>
+    private void ShowBusy() => _view.SetMenuState(canStart: false, canEnd: false);
+
+    /// <summary>A meeting is streaming: End is the only move.</summary>
+    private void ShowMeetingRunning() => _view.SetMenuState(canStart: false, canEnd: true);
+
+    /// <summary>Nothing running: Start is the only move.</summary>
+    private void ShowIdleControls() => _view.SetMenuState(canStart: true, canEnd: false);
 
     /// <summary>
     /// Hand the runtime the running event loop. Call this ONCE, from the shell, as soon as its
@@ -279,7 +313,7 @@ public sealed class BridgeRuntime
         lock (_gate)
             settings = _settings;
 
-        _view.SetMenuState(canStart: false, canEnd: false);
+        ShowBusy();
         ApplyStatus(new TrayStatus.Processing("Resuming…"));
         Task resume = RunPipelineFlowAsync(
             settings, state.SessionId,
@@ -336,10 +370,10 @@ public sealed class BridgeRuntime
         // tuning to its own pipeline; one whose identity is not running is skipped. No meeting
         // means null means a no-op. Applied even if the save above failed, so the in-memory
         // re-tune still reaches the pipelines for this session.
-        CaptureOrchestrator? running;
+        Meeting? running;
         lock (_gate)
-            running = _orchestrator;
-        running?.UpdateGates(updated.ToGateOptionsByIdentity());
+            running = _meeting;
+        running?.Orchestrator.UpdateGates(updated.ToGateOptionsByIdentity());
     }
 
     /// <summary>The in-flight End (or Resume) flow, so a test can await the real one.</summary>
@@ -356,9 +390,8 @@ public sealed class BridgeRuntime
     /// </summary>
     public void End()
     {
-        (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator,
-            string? sessionId, DateTimeOffset startedAt) = TakeMeeting();
-        if (orchestrator is null || sessionId is null)
+        Meeting? meeting = TakeMeeting();
+        if (meeting is null)
             return;
 
         BridgeSettings settings;
@@ -367,16 +400,16 @@ public sealed class BridgeRuntime
 
         // Busy guard: both commands disabled for the whole pipeline, so a second End cannot
         // fire a second one.
-        _view.SetMenuState(canStart: false, canEnd: false);
+        ShowBusy();
         ApplyStatus(new TrayStatus.Ending());
-        Task end = EndAsync(settings, sessionId, startedAt, orchestrator, enumerator);
+        Task end = EndAsync(settings, meeting);
         lock (_gate)
             _endTask = end;
     }
 
-    private Task EndAsync(BridgeSettings settings, string sessionId, DateTimeOffset startedAt,
-        CaptureOrchestrator orchestrator, IAudioDeviceEnumerator? enumerator)
+    private Task EndAsync(BridgeSettings settings, Meeting meeting)
     {
+        string sessionId = meeting.SessionId;
         bool process = settings.ProcessOnEnd;
         // Persist the resume state and the Past-meetings entry only when a pipeline will
         // actually run: a record-only meeting has no pipeline to resume across a restart and
@@ -385,7 +418,7 @@ public sealed class BridgeRuntime
         if (process)
         {
             _deps.StateStore.Save(new MeetingState { SessionId = sessionId });
-            _deps.HistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
+            _deps.HistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = meeting.StartedAt });
         }
         return RunPipelineFlowAsync(
             settings, sessionId,
@@ -402,7 +435,7 @@ public sealed class BridgeRuntime
                     // End-meeting teardown is ONE call, drain then stop+dispose, so it cannot
                     // be reduced to a drain that leaks the devices and lets them stream past
                     // the barrier (see EndMeetingAsync).
-                    await orchestrator.EndMeetingAsync().ConfigureAwait(false);
+                    await meeting.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
                 }
                 finally
                 {
@@ -410,7 +443,7 @@ public sealed class BridgeRuntime
                     // the await it would be skipped on a throw, and nothing else holds this
                     // enumerator once End has detached the meeting, so the devices would stay
                     // open until the process exited.
-                    enumerator?.Dispose();
+                    meeting.Enumerator.Dispose();
                 }
             });
     }
@@ -490,7 +523,7 @@ public sealed class BridgeRuntime
                 _view.ShowNotice(
                     "Meeting summary ready", "Your meeting notes are ready.", NoticeKind.Information);
                 _view.OpenMeetingWindow().Render(view); // opened straight at the finished summary (#107)
-                _view.SetMenuState(canStart: true, canEnd: false);
+                ShowIdleControls();
                 break;
             case PipelinePhase.Failed:
                 FailPipeline(view.FailureReason ?? "The end-of-meeting pipeline failed.", view.FailureStage);
@@ -512,17 +545,15 @@ public sealed class BridgeRuntime
         }
     }
 
-    private void FailPipeline(string reason, string? stage = null)
-    {
-        ApplyStatus(new TrayStatus.PipelineFailed(reason));
-        _view.ShowNotice(
-            "Meeting summary failed", stage is null ? reason : $"{stage}: {reason}", NoticeKind.Warning);
-        _view.SetMenuState(canStart: true, canEnd: false);
-    }
+    private void FailPipeline(string reason, string? stage = null) =>
+        Failed(
+            new TrayStatus.PipelineFailed(reason),
+            "Meeting summary failed",
+            stage is null ? reason : $"{stage}: {reason}");
 
     private void ResetIdle()
     {
-        _view.SetMenuState(canStart: true, canEnd: false);
+        ShowIdleControls();
         ApplyStatus(new TrayStatus.Idle());
     }
 
@@ -563,39 +594,56 @@ public sealed class BridgeRuntime
         // HOW it settled is not this method's business, and a start genuinely can fault AFTER
         // publishing, so the result is deliberately not inspected: whether there is a meeting
         // to tear down is read from the field below under _gate, never inferred from the task.
-        if (start is not null)
+        // Guarded on IsCompleted, not just on null: _startTask stays non-null forever after the
+        // first Start, so an unguarded WhenAny arms a fresh timer on every quit that follows a
+        // finished meeting.
+        if (start is { IsCompleted: false })
             await Task.WhenAny(start, Task.Delay(_budgets.StartSettleTimeout)).ConfigureAwait(false);
 
-        (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator, _, _) = TakeMeeting();
+        Meeting? meeting = TakeMeeting();
 
         // Tear every pipeline down: the orchestrator drains and closes them CONCURRENTLY, each
         // bounded, and DisposeAsync is throw-free, so this stays about one drain budget rather
         // than N of them. The cap is a backstop; a sub-second tail may drop on a hard quit.
-        if (orchestrator is not null)
-            await orchestrator.DisposeAsync().AsTask()
+        if (meeting is not null)
+        {
+            await meeting.Orchestrator.DisposeAsync().AsTask()
                 .WaitAsync(_budgets.QuitTeardownCap)
                 .ConfigureAwait(false);
-        enumerator?.Dispose();
+            meeting.Enumerator.Dispose();
+        }
 
-        _view.Shutdown();
+        // Marshalled like every other view touch. Both awaits above are ConfigureAwait(false),
+        // so by here we are on a thread-pool thread: calling straight through would break the
+        // contract ITrayView states, and neither shell can absorb it. AppKit's teardown
+        // (NSStatusItem, NSApplication.Terminate) is main-thread-only, and the WinForms one has
+        // to Dispose its NotifyIcon and end the message loop from the thread that owns them.
+        _dispatcher.Post(_view.Shutdown);
     }
 
-    // Atomically detach the running meeting's orchestrator + enumerator + session id, leaving
-    // all of them null. Shared by End (which drains and triggers the pipeline) and teardown
-    // (which tears down without touching the menu, since it is exiting).
-    private (CaptureOrchestrator?, IAudioDeviceEnumerator?, string?, DateTimeOffset) TakeMeeting()
+    /// <summary>
+    /// A streaming meeting: the pipelines, the enumerator whose endpoints they hold, the
+    /// detached session they tap into, and when it began. ONE value rather than four fields,
+    /// because they are only ever published together and only ever detached together: split
+    /// apart, every consumer had to re-derive "is a meeting running" from two of them, and
+    /// clearing was four assignments that had to stay in step.
+    /// </summary>
+    private sealed record Meeting(
+        CaptureOrchestrator Orchestrator,
+        IAudioDeviceEnumerator Enumerator,
+        string SessionId,
+        DateTimeOffset StartedAt);
+
+    // Atomically detach the running meeting. Shared by End (which drains and triggers the
+    // pipeline) and teardown (which tears down without touching the menu, since it is exiting),
+    // so exactly one of the two ever gets it.
+    private Meeting? TakeMeeting()
     {
         lock (_gate)
         {
-            CaptureOrchestrator? orchestrator = _orchestrator;
-            IAudioDeviceEnumerator? enumerator = _enumerator;
-            string? sessionId = _sessionId;
-            DateTimeOffset startedAt = _startedAt;
-            _orchestrator = null;
-            _enumerator = null;
-            _sessionId = null;
-            _startedAt = default; // cleared with the rest: there is no active meeting
-            return (orchestrator, enumerator, sessionId, startedAt);
+            Meeting? meeting = _meeting;
+            _meeting = null;
+            return meeting;
         }
     }
 

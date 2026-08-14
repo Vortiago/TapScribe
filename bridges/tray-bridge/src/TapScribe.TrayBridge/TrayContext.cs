@@ -655,8 +655,10 @@ internal sealed class TrayContext : ApplicationContext
         var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
         // The render-marshaling + ride-to-summary lives in the cross-platform-tested Core
         // MeetingViewDriver (the form is the IMeetingView); this shell just supplies the
-        // ControlClient, the WinForms SynchronizationContext, and the window.
-        await MeetingViewDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
+        // ControlClient, a dispatcher over the WinForms context, and the window.
+        await MeetingViewDriver
+            .DriveAsync(controller, form, new SynchronizationContextDispatcher(ui), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private void FailPipeline(string reason, string? stage = null)

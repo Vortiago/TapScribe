@@ -38,6 +38,12 @@ public class BridgeRuntimeQuitTests
         // first would leave the pipelines posting into a view that is already gone.
         Assert.True(harness.View.ShutdownCalled, "the shell was never told teardown had finished");
         Assert.True(harness.View.CapturesReleasedBeforeShutdown);
+
+        // ...and it arrives MARSHALLED, like every other view call. Both awaits above are
+        // ConfigureAwait(false), so calling Shutdown straight through delivers it on a
+        // thread-pool thread: AppKit's teardown is main-thread-only and WinForms has to end its
+        // message loop from the thread that owns it, so neither shell can absorb that.
+        Assert.True(harness.View.ShutdownWasMarshalled, "Shutdown bypassed the dispatcher");
     }
 
     [Fact]
