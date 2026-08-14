@@ -10,8 +10,20 @@ namespace TapScribe.Bridge.MacOS;
 /// </summary>
 public sealed class KeychainTapTokenStore : ITapTokenStore
 {
-    private const string ServiceName = "TapScribe Tray Bridge";
-    private const string AccountName = "tap-token";
+    /// <summary>
+    /// The Keychain item's service, half of the operator-facing contract this store keeps
+    /// (the account below is the other half). Deliberately its OWN constant and NOT the
+    /// bundle identifier: kSecAttrService is a free label, what actually scopes an item to
+    /// this app is its code signature, and this assembly is a plain net10.0 library that
+    /// knows nothing of the shell's Info.plist. Spelling the bundle id here would make a
+    /// second declaration of it, so editing the manifest would silently orphan every
+    /// operator's token. A change to this string needs a migration, not an edit.
+    /// </summary>
+    public const string ServiceName = "TapScribe Tray Bridge";
+
+    /// <summary>The Keychain item's account. One token per operator, so it names the secret
+    /// rather than a user. Same contract as <see cref="ServiceName"/>.</summary>
+    public const string AccountName = "tap-token";
 
     private readonly IKeychainItems _items;
 

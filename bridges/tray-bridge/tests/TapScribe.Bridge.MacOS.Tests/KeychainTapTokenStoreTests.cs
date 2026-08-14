@@ -72,4 +72,17 @@ public class KeychainTapTokenStoreTests
 
         Assert.Equal("", store.Read(null));
     }
+
+    [Fact]
+    public void ServiceAndAccount_StayTheKeychainItemContract()
+    {
+        // The operator's token is reachable under this (service, account) pair and no
+        // other, so changing either orphans every stored token exactly as renaming
+        // windows-tray-bridge.json orphans every saved Windows setting: a change here needs
+        // a migration, not an edit. They are also the two strings the operator reads in
+        // Keychain Access, which is the other reason they are worth choosing rather than
+        // deriving.
+        Assert.Equal("TapScribe Tray Bridge", KeychainTapTokenStore.ServiceName);
+        Assert.Equal("tap-token", KeychainTapTokenStore.AccountName);
+    }
 }
