@@ -86,6 +86,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
             foreach (PipelineSpec spec in specs)
             {
                 string identity = spec.Options.Identity;
+                Exception? skipped = null;
                 try
                 {
                     sessions[identity] = TapSession.Begin(
@@ -94,20 +95,28 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                         onFailed: ex => onFailed(identity, ex),
                         spec.Gate ?? gate, stream, connectionFactory);
                 }
-                catch (Exception ex) when (ex is COMException or InvalidOperationException)
+                catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
                 {
                     // A device that failed to OPEN is skipped, not fatal: the remaining ones
                     // still start, so one dead device doesn't sink the whole meeting.
                     // TapSession.Begin rethrows WITHOUT disposing the capture — it only
                     // unsubscribes — so release it here and surface the failure tagged by
-                    // identity. The filter is what capture.Start throws (WASAPI's
-                    // COMException, or InvalidOperationException for an already-started or
-                    // closed device); anything else is NOT a skippable device failure and
-                    // goes to the unwind below. Dispose is contract-bound not to throw.
+                    // identity. The filter is what capture.Start throws: the seam's declared
+                    // native failure, or InvalidOperationException for an already-started or
+                    // closed device. Anything else is NOT a skippable device failure and goes
+                    // to the unwind below, which owns that rule. Dispose is contract-bound not
+                    // to throw.
                     spec.Capture.Dispose();
-                    onFailed(identity, ex);
+                    skipped = ex;
                 }
+                // This capture has an owner either way now: the session that begun, or the
+                // release above. Counted BEFORE the notification, because onFailed is the
+                // CALLER's callback and nothing binds it to be throw-free. A throw from it
+                // would otherwise leave the unwind releasing a capture already released here,
+                // and Dispose is nowhere promised to be idempotent.
                 considered++;
+                if (skipped is not null)
+                    onFailed(identity, skipped);
             }
 
             // Zero pipelines is not a meeting. The per-device catch above is best-effort so

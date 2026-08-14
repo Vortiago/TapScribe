@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 using static TapScribe.Bridge.Core.Tests.Fixtures;
 
@@ -321,30 +322,46 @@ public class CaptureOrchestratorTests
             $"DisposeAsync took {sw.ElapsedMilliseconds} ms; expected ~one drain budget, not n*budget");
     }
 
+    // A device that fails to open the managed way: already started, or closed.
     [Fact]
-    public async Task StartAll_WhenOneDeviceFailsToOpen_KeepsOthers_DisposesFailedCapture_SurfacesIt()
+    public Task StartAll_WhenOneDeviceFailsToOpen_KeepsOthers_DisposesFailedCapture_SurfacesIt() =>
+        AssertDeadDeviceIsSkipped(new InvalidOperationException("device open failed"));
+
+    [Fact]
+    public Task StartAll_WhenADeviceFailsToStartWithANativeError_KeepsOthers_ReleasesItOnce_SurfacesIt() =>
+        // The capture seam declares a native/driver failure as an ExternalException, so a
+        // backend that isn't Windows COM must land on the same per-device skip. A filter
+        // written in terms of a platform's own exception type quietly stops catching when the
+        // backend changes, and the whole meeting dies on one dead device.
+        AssertDeadDeviceIsSkipped(new ExternalException("the driver refused the endpoint"));
+
+    /// <summary>
+    /// Best-effort start, driven over whatever <paramref name="startError"/> the dead device
+    /// raises: the healthy sibling still streams, and the dead one is surfaced under its own
+    /// identity and released exactly once. Released by the ORCHESTRATOR, since
+    /// <c>TapSession.Begin</c> starts the capture in its constructor and rethrows without
+    /// disposing, so nothing else can still reach it.
+    /// </summary>
+    private static async Task AssertDeadDeviceIsSkipped(Exception startError)
     {
         var transport = new FakeTapTransport();
+        var badSystem = new FakeAudioCapture(RecorderFormat) { StartError = startError };
         var mic = new FakeAudioCapture(RecorderFormat);
-        var badSystem = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true }; // device fails to open
         var failures = new List<(string Identity, Exception Error)>();
 
-        await using var orchestrator = CaptureOrchestrator.StartAll(
+        await using CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
             [Spec(mic, "mic"), Spec(badSystem, "system")],
             onConnected: _ => { },
             onFailed: (id, ex) => { lock (failures) failures.Add((id, ex)); },
             FastGate(), FastStream(), transport.Create);
 
-        // Best-effort: the device that opened still runs the meeting.
         Assert.Equal(1, orchestrator.PipelineCount);
         mic.Emit(Loud(40));
-        await Poll.UntilAsync(() => transport.ConnectionsFor("mic").Count > 0, Wait, "the good pipeline to stream");
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the good pipeline to stream");
 
-        // The failed device is surfaced under its identity, and its capture is
-        // disposed (TapSession.Begin starts capture in its ctor and rethrows WITHOUT
-        // disposing — the orchestrator must, or it leaks).
-        Assert.Contains(failures, f => f.Identity == "system");
-        Assert.True(badSystem.Disposed);
+        (string Identity, Exception Error) failure = Assert.Single(failures);
+        Assert.Equal("system", failure.Identity);
+        Assert.Equal(1, badSystem.Disposals);
     }
 
     [Fact]

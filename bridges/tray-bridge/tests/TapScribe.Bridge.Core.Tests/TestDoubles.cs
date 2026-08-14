@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -92,24 +93,34 @@ internal static class Fixtures
 /// <see cref="Emit"/>, so a test feeds synthetic PCM with no real audio device.</summary>
 internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 {
+    private int _disposals;
+
     public AudioFormat Format { get; } = format;
     public bool Started { get; private set; }
     public bool Stopped { get; private set; }
-    public bool Disposed { get; private set; }
+    public bool Disposed => Volatile.Read(ref _disposals) > 0;
 
-    /// <summary>When set, <see cref="Start"/> throws — a device that fails to open (in use,
+    /// <summary>How many times this capture was released. An owner that hands a failed
+    /// capture on must not release it twice: the seam binds <see cref="Dispose"/> to be
+    /// throw-free, never to be idempotent.</summary>
+    public int Disposals => Volatile.Read(ref _disposals);
+
+    /// <summary>When set, <see cref="Start"/> throws it: a device that fails to open (in use,
     /// invalidated, unsupported format). Records disposal (via <see cref="Disposed"/>) and
     /// still supports real <see cref="Failed"/> subscription, so a test can drive both the
-    /// orchestrator's failed-capture cleanup and TapSession's ctor-catch unwind, then assert
-    /// a late Failed reaches nobody.</summary>
-    public bool ThrowOnStart { get; init; }
+    /// orchestrator's failed-capture cleanup and TapSession's ctor-catch unwind, then assert a
+    /// late Failed reaches nobody. Each caller names the failure it models: an
+    /// <see cref="InvalidOperationException"/> for the already-started / closed-device case, an
+    /// <see cref="ExternalException"/> for a backend whose NATIVE layer refused the
+    /// endpoint.</summary>
+    public Exception? StartError { get; init; }
 
-    /// <summary>When set, <see cref="Stop"/> throws — the endpoint was invalidated while
-    /// the meeting ran (unplugged / disabled / default-device switch), which is what
+    /// <summary>When set, <see cref="Stop"/> throws it: the endpoint was invalidated while the
+    /// meeting ran (unplugged / disabled / default-device switch), which is what
     /// AUDCLNT_E_DEVICE_INVALIDATED does to a WASAPI client at teardown. The seam does not
-    /// promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is
-    /// contract-bound), so the core must survive a backend that doesn't swallow it.</summary>
-    public bool ThrowOnStop { get; init; }
+    /// promise a throw-free <see cref="IAudioCapture.Stop"/> (only Dispose is contract-bound),
+    /// so the core must survive a backend that doesn't swallow it.</summary>
+    public Exception? StopError { get; init; }
 
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
@@ -120,18 +131,18 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 
     public void Start()
     {
-        if (ThrowOnStart)
-            throw new InvalidOperationException("device open failed");
+        if (StartError is not null)
+            throw StartError;
         Started = true;
     }
 
     public void Stop()
     {
         Stopped = true;
-        if (ThrowOnStop)
-            throw new InvalidOperationException("endpoint invalidated");
+        if (StopError is not null)
+            throw StopError;
     }
-    public void Dispose() => Disposed = true;
+    public void Dispose() => Interlocked.Increment(ref _disposals);
 
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
 
@@ -179,6 +190,13 @@ internal sealed class FakeAudioDeviceEnumerator : IAudioDeviceEnumerator
         _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
             ? capture
             : throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+
+    /// <summary>Records the release. There are no handles behind this fake, but the seam
+    /// declares one, so the double answers it rather than leaving a real backend's obligation
+    /// invisible to the tests.</summary>
+    public bool Disposed { get; private set; }
+
+    public void Dispose() => Disposed = true;
 }
 
 /// <summary>
@@ -258,6 +276,13 @@ internal sealed class FakeTapTransport
 
     public volatile bool Up = true;
 
+    /// <summary>What a connection raises while the transport is down. The default is the
+    /// managed shape; a native transport stack reports its failures as an
+    /// <see cref="ExternalException"/> instead, and only a caller-chosen exception can drive
+    /// that through the pump.</summary>
+    public Func<WebSocketError, string, Exception> Failure { get; init; } =
+        static (error, message) => new WebSocketException(error, message);
+
     // Per-identity outage: a connection whose options.Identity is listed here
     // fails to connect/send while the others stay up, so a multi-pipeline test can
     // knock out exactly one device. Snapshot array (like Up) so pump threads read
@@ -327,7 +352,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!transport.IsUpFor(Options.Identity))
-            throw new WebSocketException(WebSocketError.Faulted, "transport down");
+            throw transport.Failure(WebSocketError.Faulted, "transport down");
         return Task.CompletedTask;
     }
 
@@ -335,7 +360,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!transport.IsUpFor(Options.Identity))
-            throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely, "blip");
+            throw transport.Failure(WebSocketError.ConnectionClosedPrematurely, "blip");
         int index = BinaryPrimitives.ReadInt32LittleEndian(frame.Span);
         lock (_lock)
             Sent.Add(index);

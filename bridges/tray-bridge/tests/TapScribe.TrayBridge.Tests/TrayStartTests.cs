@@ -63,31 +63,25 @@ public class TrayStartTests
     [Fact]
     public void Start_WhenTheOrchestratorRefusesTheSpecs_ReleasesEachCaptureExactlyOnce()
     {
-        // The real B2 trigger, end to end. Resolve dedupes the RAW identity, so a blank one
-        // and one equal to the base identity look distinct and pass; ToTapOptions then
-        // substitutes the base identity for the blank one and they collide in StartAll, which
-        // refuses the whole set. Two owners would both release here — the core (which
-        // releases what it refuses) and the shell's finally — on a backend that is
-        // contract-bound to be throw-free but nowhere promised to be idempotent.
+        // The real B2 trigger, end to end: both devices open, are handed to StartAll, and
+        // StartAll gives back no orchestrator. Every device here fails to START, so each is
+        // released by the core's per-device skip, and then zero pipelines is not a meeting
+        // and the whole set is refused. Two owners would both release those captures (the
+        // core, which releases what it refuses, and the shell's finally) on a backend that
+        // is contract-bound to be throw-free but nowhere promised to be idempotent.
         using var sta = new StaShell();
-        BridgeSettings settings = TrayHarness.DefaultSettings();
-        settings.Devices =
-        [
-            // A blank identity, and one that IS the base identity — distinct to Resolve,
-            // identical after ToTapOptions substitutes.
-            new DeviceSelection.FollowDefault(DeviceFlow.Capture, "", ""),
-            new DeviceSelection.FollowDefault(DeviceFlow.Render, settings.Identity, settings.Identity),
-        ];
-        var harness = new TrayHarness { Settings = settings };
-        harness.Enumerator.Add("mic", DeviceFlow.Capture);
-        harness.Enumerator.Add("system", DeviceFlow.Render);
+        var harness = new TrayHarness();
+        harness.Enumerator.Add("mic", DeviceFlow.Capture, capture: new FakeCapture { ThrowOnStart = true });
+        harness.Enumerator.Add("system", DeviceFlow.Render, capture: new FakeCapture { ThrowOnStart = true });
 
         TrayContext tray = sta.BuildAndStart(harness);
 
         // The guard: both devices really were opened and handed over, so StartAll was
         // genuinely reached and refused them — otherwise the release count below is a
-        // statement about a path nobody took.
+        // statement about a path nobody took. The attempted Start is the other half of it:
+        // only the core starts a capture, so it proves the specs got that far.
         Assert.Equal(2, harness.Enumerator.Opened.Count);
+        Assert.All(harness.Enumerator.Opened, capture => Assert.Equal(1, capture.StartAttempts));
 
         Assert.All(harness.Enumerator.Opened, capture =>
             Assert.Equal(1, capture.Disposals)); // released once, by the core — not again by the shell

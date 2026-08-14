@@ -80,6 +80,22 @@ public class SeedFromEnvironmentTests
             });
     }
 
+    [Fact]
+    public void SeedFromEnvironment_WhenTheOsOffersNoUserName_SeedsTheFrozenTrayIdentity()
+    {
+        WithEnv(
+            new() { ["TAPSCRIBE_IDENTITY"] = null },
+            () =>
+            {
+                // The identity is the WAV filename slug and the key the Recorder attributes
+                // recordings under, so the slug is frozen: changing it re-attributes the tray
+                // as a brand-new speaker. Pinned here because nothing else reaches this path
+                // (it needs an OS with no username), so a rename would otherwise land silently.
+                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment(osUserName: static () => "");
+                Assert.Equal("windows-tray", seeded.Identity);
+            });
+    }
+
     /// <summary>Set the given env vars, run the body, then restore every key to its prior value.</summary>
     private static void WithEnv(Dictionary<string, string?> values, Action body)
     {

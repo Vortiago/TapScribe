@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.Core.Tests;
@@ -74,20 +75,39 @@ public class TapStreamTests
     // --- resilience: deterministic fake transport ----------------------------
 
     [Fact]
-    public async Task MidUtteranceBlip_ReconnectsWithSameUtteranceId_AndLosesNoFrame()
+    public Task MidUtteranceBlip_ReconnectsWithSameUtteranceId_AndLosesNoFrame() =>
+        AssertUtteranceSurvivesAnOutage(new FakeTapTransport(), "utt-blip");
+
+    [Fact]
+    public Task MidUtteranceNativeFailure_IsTreatedAsTransport_AndTheUtteranceSurvives() =>
+        // A transport whose native stack reports failures as ExternalException rather than a
+        // managed WebSocketException. That is a blip like any other, so it must survive on
+        // exactly the terms above; treating it as terminal kills the pump and silently ends
+        // the tap mid-speech.
+        AssertUtteranceSurvivesAnOutage(
+            new FakeTapTransport
+            {
+                Failure = static (_, _) => new ExternalException("the native transport stack failed"),
+            },
+            "utt-native");
+
+    /// <summary>
+    /// The blip-resilience claim, driven over whatever failure <paramref name="transport"/>
+    /// raises while it is down: the link drops mid-utterance, the client buffers the gap audio
+    /// and retries, and when the Recorder returns the utterance is intact. Shared so the shape
+    /// of an outage is described once and each caller supplies only the failure under test.
+    /// </summary>
+    private static async Task AssertUtteranceSurvivesAnOutage(FakeTapTransport transport, string utteranceId)
     {
-        var transport = new FakeTapTransport();
-        var options = new TapConnectionOptions { Identity = "mic", UtteranceId = "utt-blip" };
+        var options = new TapConnectionOptions { Identity = "mic", UtteranceId = utteranceId };
         var stream = TapStream.Begin(options, FastOptions(), connectionFactory: transport.Create);
 
         // First batch lands on connection 0.
         EnqueueRange(stream, 0, 20);
         await Poll.UntilAsync(() => transport.SentCount(0) >= 20, Wait, "conn0 to receive 20 frames");
 
-        // Blip: the link drops and the Recorder is briefly unreachable, so the
-        // client buffers the gap audio while it retries.
         transport.Up = false;
-        EnqueueRange(stream, 20, 30); // gap frames, buffered during the outage
+        EnqueueRange(stream, 20, 30); // gap frames, buffered while the failures repeat
         await Poll.UntilAsync(() => transport.Connections.Count >= 2, Wait, "a reconnect attempt");
 
         transport.Up = true; // Recorder back
@@ -96,11 +116,11 @@ public class TapStreamTests
         Assert.True(transport.Connections.Count >= 2, "expected a reconnect");
         // Every connection reused the same, non-empty utterance_id => the Recorder
         // appends to one WAV instead of producing a second file.
-        Assert.All(transport.Connections, c => Assert.Equal("utt-blip", c.UtteranceId));
-        // No frame lost across the blip: the unsent frame stays buffered and the gap
+        Assert.All(transport.Connections, c => Assert.Equal(utteranceId, c.UtteranceId));
+        // No frame lost across the outage: the unsent frame stays buffered and the gap
         // frames are flushed on reconnect.
         var received = transport.Connections.SelectMany(c => c.Sent).ToHashSet();
-        Assert.True(received.IsSupersetOf(Enumerable.Range(0, 50)), "every frame delivered across the blip");
+        Assert.True(received.IsSupersetOf(Enumerable.Range(0, 50)), "every frame delivered across the outage");
         Assert.Equal(50, stream.FramesSent);
     }
 

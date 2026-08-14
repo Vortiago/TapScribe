@@ -12,7 +12,7 @@ namespace TapScribe.Bridge.Windows;
 /// <see cref="WasapiLoopbackAudioCapture"/> for a render endpoint). Lives in the
 /// Windows project so the cross-platform core never sees MMDevice / DataFlow.
 /// </summary>
-public sealed class WasapiDeviceEnumerator : IAudioDeviceEnumerator, IDisposable
+public sealed class WasapiDeviceEnumerator : IAudioDeviceEnumerator
 {
     private readonly MMDeviceEnumerator _enumerator = new();
 

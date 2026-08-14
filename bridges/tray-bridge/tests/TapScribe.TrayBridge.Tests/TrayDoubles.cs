@@ -14,6 +14,7 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
     private readonly TaskCompletionSource _disposeReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private EventHandler<AudioCapturedEventArgs>? _data;
     private int _disposals;
+    private int _startAttempts;
 
     public AudioFormat Format { get; } = format ?? new AudioFormat(16_000, 1, SampleKind.Int16);
     public bool Started { get; private set; }
@@ -31,6 +32,17 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
     /// the dispose. It throws an IOException specifically: that is outside every catch filter
     /// on the End path, so it exercises the escape rather than the classified failure.</summary>
     public bool ThrowOnDetach { get; init; }
+
+    /// <summary>When set, <see cref="Start"/> throws the way an endpoint that is in use or
+    /// already gone does. That is what makes the core refuse a whole set of specs it has
+    /// already taken ownership of: it releases each failed capture and then refuses to hand
+    /// back a meeting with zero pipelines.</summary>
+    public bool ThrowOnStart { get; init; }
+
+    /// <summary>How many times an owner tried to START this capture. A capture is handed out
+    /// NOT started, and a failing Start never sets <see cref="Started"/>, so this is what says
+    /// the core got as far as building a session for it.</summary>
+    public int StartAttempts => Volatile.Read(ref _startAttempts);
 
     /// <summary>When set, <see cref="Dispose"/> blocks until <see cref="ReleaseDispose"/> —
     /// a device that is slow to let go, which holds the End drain open so a test can act
@@ -65,7 +77,13 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
     /// first-connect failures arrive by the same channel, once per Utterance.</summary>
     public void RaiseFailed(Exception error) => Failed?.Invoke(this, error);
 
-    public void Start() => Started = true;
+    public void Start()
+    {
+        Interlocked.Increment(ref _startAttempts);
+        if (ThrowOnStart)
+            throw new InvalidOperationException("device open failed");
+        Started = true;
+    }
 
     public void Stop() => Stopped = true;
 
@@ -82,10 +100,11 @@ internal sealed class FakeCapture(AudioFormat? format = null) : IAudioCapture
 /// <summary>
 /// A scripted device enumerator: hands out <see cref="FakeCapture"/>s for a fixed device
 /// list, records whether the shell released it, and can fail an <see cref="Open"/> the way a
-/// device that is busy or gone does. Disposable, like every real backend — the core seam
-/// doesn't declare it, so this is also what proves the shell releases it through the seam.
+/// device that is busy or gone does. The release is the seam's own
+/// <see cref="IDisposable"/>, which is what makes "did the shell release it, and after the
+/// captures" assertable.
 /// </summary>
-internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
+internal sealed class FakeEnumerator : IAudioDeviceEnumerator
 {
     private readonly List<CaptureDevice> _devices = [];
     private readonly Dictionary<string, FakeCapture> _captures = new(StringComparer.Ordinal);
@@ -145,8 +164,11 @@ internal sealed class FakeEnumerator : IAudioDeviceEnumerator, IDisposable
 
     public void Dispose()
     {
+        // Latched on the FIRST release: recomputing it on a second one would measure the
+        // ordering against captures that are all released by then, so a double release would
+        // overwrite its own evidence with a true.
+        CapturesReleasedFirst ??= _opened.TrueForAll(c => c.Disposed);
         Interlocked.Increment(ref _disposals);
-        CapturesReleasedFirst = _opened.TrueForAll(c => c.Disposed);
     }
 }
 

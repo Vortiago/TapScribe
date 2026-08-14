@@ -113,7 +113,10 @@ public class CaptureFailureSignalTests
     public async Task StartFailureUnwindingTheCtor_DetachesFromCapture_SoAPostFailureIsNotForwardedTwice()
     {
         var transport = new FakeTapTransport();
-        var capture = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true };
+        var capture = new FakeAudioCapture(RecorderFormat)
+        {
+            StartError = new InvalidOperationException("device open failed"),
+        };
         // A healthy sibling, so the meeting still has a pipeline: an orchestrator on which
         // EVERY device failed to start is refused outright (ZeroPipelineMeetingTests), and
         // this test is about the failed device's ctor unwind, not about that refusal.

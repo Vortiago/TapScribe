@@ -124,11 +124,11 @@ public sealed class BridgeSettings
     /// </summary>
     public IReadOnlyDictionary<string, GateOptions> ToGateOptionsByIdentity()
     {
-        string fallbackIdentity = EffectiveIdentity;
+        string fallbackIdentity = BaseIdentity;
         var map = new Dictionary<string, GateOptions>(StringComparer.Ordinal);
         foreach (DeviceSelection device in EffectiveDevices)
         {
-            string identity = string.IsNullOrWhiteSpace(device.Identity) ? fallbackIdentity : device.Identity;
+            string identity = DeviceSelection.EffectiveIdentity(device.Identity, fallbackIdentity);
             // EffectiveDevices ran NormalizeGates, so every gate is filled here.
             map[identity] = device.Gate!.ToGateOptions();
         }
@@ -180,23 +180,49 @@ public sealed class BridgeSettings
         // Carry the opt-in faithfully; the security boundary is the connection site, which
         // only wires the accept-any validator when Tls && AllowSelfSignedCert.
         AllowSelfSignedCert = AllowSelfSignedCert,
-        Identity = EffectiveIdentity,
+        Identity = BaseIdentity,
         Name = Name,
         Token = Token,
     };
 
-    // The base identity a tap streams under when no per-device identity is set — never
-    // blank. Shared by ToConnectionOptions and the gate-by-identity map so the live re-tune
-    // keys line up with the tap identities.
-    private string EffectiveIdentity =>
+    // This settings instance's base identity: the one a tap streams under when no per-device
+    // identity is set, never blank. Shared by ToConnectionOptions and the gate-by-identity map
+    // so the live re-tune keys line up with the tap identities. Named BaseIdentity to match
+    // DeviceSelection.Resolve's parameter, since that is exactly what it is passed as; NOT to
+    // be confused with DeviceSelection.EffectiveIdentity, which answers the different question
+    // of what ONE device streams under given a base.
+    private string BaseIdentity =>
         string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
+
+    /// <summary>
+    /// What the tray seeds when the OS offers no username: the frozen slug, so the seeded
+    /// identity and <see cref="TapConnectionOptions.Identity"/>'s default cannot drift.
+    ///
+    /// It is a WINDOWS value applied on every platform, which is wrong for a Mac shell but is
+    /// deliberately left alone here: the three members that fall back to it
+    /// (<see cref="DefaultDevices"/>, <see cref="BaseIdentity"/> and
+    /// <see cref="SeedFromEnvironment"/>) are instance- and seed-level, so making it
+    /// per-platform means stamping it onto every settings instance the store loads, not
+    /// threading it through one factory. A knob on one of the three would read as configured
+    /// while the other two still said Windows.
+    ///
+    /// The shape it wants is the one <c>TrayStores.SettingsFileName</c> already has: the same
+    /// class of value (frozen, operator-facing, changing it orphans operator data), living
+    /// Windows-side and reaching the core through <see cref="BridgeSettingsStore"/>'s
+    /// constructor beside the directory and filename. Slice 7 owns that, alongside the rest of
+    /// the identity defaults.
+    /// </summary>
+    private const string WindowsFallbackIdentity = TapConnectionOptions.TrayIdentity;
 
     /// <summary>
     /// Defaults for a first run with no saved file: seed from the legacy
     /// environment variables when present (so an existing env-based setup keeps
     /// working), otherwise sensible defaults.
+    ///
+    /// <paramref name="osUserName"/> reads the OS username; injected so the no-username path
+    /// is exercisable without an OS-level fixture.
     /// </summary>
-    public static BridgeSettings SeedFromEnvironment()
+    public static BridgeSettings SeedFromEnvironment(Func<string>? osUserName = null)
     {
         return new BridgeSettings
         {
@@ -204,7 +230,7 @@ public sealed class BridgeSettings
             Port = int.TryParse(Env("TAPSCRIBE_PORT"), out int port) ? port : 8001,
             Tls = Env("TAPSCRIBE_TLS") is "1" or "true",
             AllowSelfSignedCert = Env("TAPSCRIBE_TLS_ALLOW_SELF_SIGNED") is "1" or "true",
-            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(),
+            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(osUserName),
             Name = Env("TAPSCRIBE_NAME") ?? "",
             Token = Env("TAPSCRIBE_TAP_TOKEN") ?? "",
         };
@@ -216,13 +242,9 @@ public sealed class BridgeSettings
         }
     }
 
-    private static string FallbackIdentity()
+    private static string FallbackIdentity(Func<string>? osUserName = null)
     {
-        string user = Environment.UserName;
-        // "windows-tray" deliberately keeps its pre-rename spelling: the identity
-        // is the WAV filename slug and the key the Recorder attributes recordings
-        // under, so changing it re-attributes the tray as a brand-new speaker
-        // (see TapConnectionOptions.Identity).
-        return string.IsNullOrEmpty(user) ? "windows-tray" : user;
+        string user = (osUserName ?? (static () => Environment.UserName))();
+        return string.IsNullOrEmpty(user) ? WindowsFallbackIdentity : user;
     }
 }
