@@ -26,11 +26,15 @@ internal sealed class FakeKeychain : IKeychainItems
         return KeychainStatus.Success;
     }
 
+    // Refuses an existing item rather than replacing it, because that is what SecItemAdd
+    // does. A double that upserted here would hide the bug this models: a second Write
+    // silently keeping the FIRST token.
     public int Add(string service, string account, string secret)
     {
         if (Refuses is int refusal)
             return refusal;
-        _items[(service, account)] = secret;
+        if (!_items.TryAdd((service, account), secret))
+            return KeychainStatus.DuplicateItem;
         return KeychainStatus.Success;
     }
 

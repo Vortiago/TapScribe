@@ -34,6 +34,10 @@ internal static class KeychainStatus
     /// answer rather than a failure.</summary>
     public const int ItemNotFound = -25300;
 
+    /// <summary>errSecDuplicateItem: an item with this service and account already exists.
+    /// SecItemAdd refuses rather than replacing, which is why a save deletes first.</summary>
+    public const int DuplicateItem = -25299;
+
     /// <summary>errSecInteractionNotAllowed: the Keychain would have to prompt and may not
     /// (locked keychain, no UI session).</summary>
     public const int InteractionNotAllowed = -25308;

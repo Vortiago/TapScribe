@@ -45,4 +45,18 @@ public class KeychainTapTokenStoreTests
         // an empty field; a null would travel on into BridgeSettings.Token.
         Assert.Equal("", new KeychainTapTokenStore(new FakeKeychain()).Read(null));
     }
+
+    [Fact]
+    public void Write_AnEmptyToken_DropsTheStoredSecret()
+    {
+        // "" is how the dialog says "forget my token", and BridgeSettingsStore hands it over
+        // unconditionally for exactly this. A cleared token that stayed in the Keychain
+        // would come back on the next Load, so the operator could never revoke one.
+        var store = new KeychainTapTokenStore(new FakeKeychain());
+        store.Write("tap-token-abc");
+
+        store.Write("");
+
+        Assert.Equal("", store.Read(null));
+    }
 }

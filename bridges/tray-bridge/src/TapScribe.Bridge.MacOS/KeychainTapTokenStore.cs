@@ -21,7 +21,14 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
     /// in the settings file.</summary>
     public string? Write(string token)
     {
-        _items.Add(ServiceName, AccountName, token);
+        // Delete first, whatever the token is. SecItemAdd refuses an existing item with
+        // errSecDuplicateItem instead of replacing it, so a re-saved token would otherwise
+        // keep the old one; and an empty token means the operator blanked the field, where
+        // deleting is the entire job. A missing item makes this a no-op, which is why the
+        // status is not worth inspecting.
+        _items.Delete(ServiceName, AccountName);
+        if (!string.IsNullOrEmpty(token))
+            _items.Add(ServiceName, AccountName, token);
         return null;
     }
 
