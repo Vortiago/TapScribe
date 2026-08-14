@@ -40,6 +40,9 @@ public sealed class BridgeRuntime
     // cleared when the flow ends. Never disposed: see the construction site for why that is
     // the simplification and not the leak.
     private CancellationTokenSource? _flowCancellation;
+    // Set once teardown has claimed the runtime. A start mid-flight then tears its own meeting
+    // down instead of publishing it into a shell that has already stopped.
+    private bool _quitting;
 
     private TrayStatus? _lastStatus;             // what the view is currently showing
 
@@ -75,8 +78,9 @@ public sealed class BridgeRuntime
         BridgeSettings settings;
         lock (_gate)
         {
-            // Already running, or already starting (the mint is a round-trip long).
-            if (_orchestrator is not null || _startTask is { IsCompleted: false })
+            // Already running, already starting (the mint is a round-trip long), or on the
+            // way out.
+            if (_orchestrator is not null || _startTask is { IsCompleted: false } || _quitting)
                 return;
             settings = _settings;
         }
@@ -152,14 +156,31 @@ public sealed class BridgeRuntime
                 }));
                 // No shared gate arg: each spec already carries its own per-device gate.
 
+            bool abandoned;
             lock (_gate)
             {
-                _orchestrator = orchestrator;
-                _enumerator = enumerator;
-                _sessionId = sessionId;
-                _startedAt = DateTimeOffset.Now;
+                // Teardown ran while this start was in flight. Publishing now would hand the
+                // meeting to a shell that has already stopped: nobody would ever dispose it,
+                // the captures would keep streaming, and the detached session would stay open
+                // on the Recorder. Take the teardown ourselves instead. This is the same lock
+                // TakeMeeting uses, so exactly one of the two runs it.
+                abandoned = _quitting;
+                if (!abandoned)
+                {
+                    _orchestrator = orchestrator;
+                    _enumerator = enumerator;
+                    _sessionId = sessionId;
+                    _startedAt = DateTimeOffset.Now;
+                    enumerator = null; // ownership transferred; the finally must not release it
+                }
             }
-            enumerator = null; // ownership transferred; the finally must not release it
+            if (abandoned)
+            {
+                // The bounded teardown, the same one QuitAsync uses; the finally then releases
+                // the enumerator, after the captures it opened.
+                await orchestrator.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
 
             _dispatcher.Post(() =>
             {
@@ -503,6 +524,60 @@ public sealed class BridgeRuntime
     {
         _view.SetMenuState(canStart: true, canEnd: false);
         ApplyStatus(new TrayStatus.Idle());
+    }
+
+    /// <summary>
+    /// Tear everything down and then let the shell go. AWAITABLE rather than blocking, because
+    /// on AppKit the caller IS the main run loop: the WinForms shell could block it twice (for
+    /// a start still in flight, then for the pipelines to close) only because every await here
+    /// uses ConfigureAwait(false), so no continuation needs that thread to progress. That is an
+    /// unstated whole-file invariant, and it has no AppKit analogue: the problem there is
+    /// occupying the main queue, not capturing a context.
+    ///
+    /// Ends with <see cref="ITrayView.Shutdown"/>, which is the shell's cue to release its UI
+    /// and stop. Nothing is streaming and no callback is in flight by then.
+    /// </summary>
+    public async Task QuitAsync()
+    {
+        // Stop an in-flight End/Resume flow first: the shell's loop is about to go, so an
+        // uncancelled poll loop would keep talking to the Recorder and posting into a dead
+        // view for as long as the process lingered.
+        CancellationTokenSource? flow;
+        Task? start;
+        lock (_gate)
+        {
+            flow = _flowCancellation;
+            _flowCancellation = null;
+            _quitting = true; // a start in flight must tear itself down, not publish
+            start = _startTask;
+        }
+        flow?.Cancel();
+
+        // Let a start that is mid-flight settle. Until it publishes, TakeMeeting below sees
+        // nothing to take, so without this the captures would keep streaming, the meeting would
+        // go undisposed and the detached session would stay open on the Recorder, all the way
+        // until the process died. Bounded: the mint carries its own 20 s timeout, and quitting
+        // must not hang behind a Recorder that accepted the connection and went quiet. Past the
+        // bound the start is abandoned, which the _quitting flag above has already made safe.
+        //
+        // HOW it settled is not this method's business, and a start genuinely can fault AFTER
+        // publishing, so the result is deliberately not inspected: whether there is a meeting
+        // to tear down is read from the field below under _gate, never inferred from the task.
+        if (start is not null)
+            await Task.WhenAny(start, Task.Delay(_budgets.StartSettleTimeout)).ConfigureAwait(false);
+
+        (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator, _, _) = TakeMeeting();
+
+        // Tear every pipeline down: the orchestrator drains and closes them CONCURRENTLY, each
+        // bounded, and DisposeAsync is throw-free, so this stays about one drain budget rather
+        // than N of them. The cap is a backstop; a sub-second tail may drop on a hard quit.
+        if (orchestrator is not null)
+            await orchestrator.DisposeAsync().AsTask()
+                .WaitAsync(_budgets.QuitTeardownCap)
+                .ConfigureAwait(false);
+        enumerator?.Dispose();
+
+        _view.Shutdown();
     }
 
     // Atomically detach the running meeting's orchestrator + enumerator + session id, leaving

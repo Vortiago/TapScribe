@@ -75,6 +75,30 @@ internal sealed class FakeTrayView : ITrayView
         lock (_lock) _windows.Add(window);
         return window;
     }
+
+    /// <summary>Whether the shell was told teardown had finished.</summary>
+    public bool ShutdownCalled { get; private set; }
+
+    /// <summary>
+    /// Whether every capture the runtime held was already released when the shell was told to
+    /// shut down. That is the ordering claim: releasing the UI while pipelines are still
+    /// closing leaves them posting into a view that is gone. Null until Shutdown is called;
+    /// the predicate is supplied by the harness, which knows the captures.
+    /// </summary>
+    public bool? CapturesReleasedBeforeShutdown { get; private set; }
+
+    /// <summary>What "everything is released" means, injected by the harness so this double
+    /// does not have to know about enumerators.</summary>
+    public Func<bool>? ReleasedProbe { get; set; }
+
+    public void Shutdown()
+    {
+        lock (_lock)
+        {
+            CapturesReleasedBeforeShutdown = ReleasedProbe?.Invoke();
+            ShutdownCalled = true;
+        }
+    }
 }
 
 /// <summary>A meeting window that records what was rendered into it instead of drawing it,
@@ -224,8 +248,17 @@ internal sealed class RuntimeHarness : IDisposable
     };
 
     /// <summary>Register a device the enumerator will report and hand out a capture for.</summary>
-    public FakeAudioCapture AddDevice(string id, DeviceFlow flow, bool isDefault = true) =>
-        Enumerator.Add(new CaptureDevice(id, id, flow, isDefault), Fixtures.RecorderFormat);
+    public FakeAudioCapture AddDevice(string id, DeviceFlow flow, bool isDefault = true)
+    {
+        FakeAudioCapture capture = Enumerator.Add(new CaptureDevice(id, id, flow, isDefault), Fixtures.RecorderFormat);
+        _opened.Add(capture);
+        // Teach the view what "everything is released" means, so it can latch the ordering at
+        // the moment the shell is told to shut down.
+        View.ReleasedProbe = () => _opened.TrueForAll(c => c.Disposed) && Enumerator.Disposed;
+        return capture;
+    }
+
+    private readonly List<FakeAudioCapture> _opened = [];
 
     public BridgeDependencies Dependencies => _dependencies ??= new BridgeDependencies(
         () => Enumerator,

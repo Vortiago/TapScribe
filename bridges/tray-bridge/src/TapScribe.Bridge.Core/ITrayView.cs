@@ -45,6 +45,14 @@ public interface ITrayView
     /// and neither may disturb the live status line or the Start/End commands.
     /// </summary>
     IMeetingWindow OpenMeetingWindow();
+
+    /// <summary>
+    /// Teardown has finished: release the shell's own UI and stop its event loop. Called once,
+    /// at the END of <see cref="BridgeRuntime.QuitAsync"/>, so nothing is streaming and no
+    /// callback is still in flight by the time it runs. Releasing the UI any earlier would
+    /// leave the closing pipelines posting into a view that is already gone.
+    /// </summary>
+    void Shutdown();
 }
 
 /// <summary>
