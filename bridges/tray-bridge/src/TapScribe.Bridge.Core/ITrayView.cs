@@ -1,0 +1,41 @@
+namespace TapScribe.Bridge.Core;
+
+/// <summary>
+/// Which channel a notice belongs to. The tray has exactly two, and they differ in the
+/// operator's reading of them rather than in their plumbing: a <see cref="Warning"/> is
+/// something that went wrong and a <see cref="Information"/> is something that went right.
+/// Named rather than a bool so a call site says which it means.
+/// </summary>
+public enum NoticeKind
+{
+    /// <summary>Something failed, or a device dropped out of a running meeting.</summary>
+    Warning,
+
+    /// <summary>A milestone worth surfacing: the summary is ready, the recording is saved.</summary>
+    Information,
+}
+
+/// <summary>
+/// Everything the meeting runtime needs from a tray shell, and nothing else. The WinForms
+/// <c>TrayContext</c> implements it over a <c>NotifyIcon</c> and a <c>ContextMenuStrip</c>;
+/// the AppKit shell implements it over an <c>NSStatusItem</c>: so the lifecycle in
+/// <see cref="BridgeRuntime"/> is written once and tested without either.
+///
+/// Every method is called ON the shell's UI thread: the runtime marshals through its
+/// <see cref="IDispatcher"/> before it touches the view, so an implementation never needs a
+/// thread check of its own.
+/// </summary>
+public interface ITrayView
+{
+    /// <summary>Render the at-a-glance state: the menu header line, the icon and the tooltip.
+    /// The runtime suppresses re-renders of the status already showing, so an implementation
+    /// may apply this unconditionally.</summary>
+    void ShowStatus(StatusView status);
+
+    /// <summary>Surface a transient message (a Windows balloon, an AppKit notification).</summary>
+    void ShowNotice(string title, string message, NoticeKind kind);
+
+    /// <summary>Enable or disable the two meeting commands. Both false is a legitimate state:
+    /// a meeting that is ending, or a pipeline in flight.</summary>
+    void SetMenuState(bool canStart, bool canEnd);
+}
