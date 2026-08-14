@@ -100,14 +100,18 @@ public class BridgeRuntimeQuitTests
         await RuntimeHarness.StartSettledAsync(runtime);
 
         runtime.End();
+        // The anti-vacuity guard: the loop really was running when the quit arrived.
         await Poll.UntilAsync(
             () => server.PollCount > 0, TimeSpan.FromSeconds(10), "the pipeline to start polling");
 
         await runtime.QuitAsync();
-        await RuntimeHarness.EndSettledAsync(runtime);
 
-        int polled = server.PollCount;
-        await Task.Delay(50);
-        Assert.Equal(polled, server.PollCount); // the loop really stopped, rather than settling late
+        // The claim, with no clock in it: the flow TERMINATES. Against a script that never
+        // reaches a terminal state an uncancelled loop polls this server for as long as the
+        // process lives, so settling at all is the observable, and the bounded wait inside
+        // EndSettledAsync is what fails if the token never reached the controller. Counting
+        // polls after the fact would be a race instead: a request already on the wire still
+        // reaches the server after the task it belonged to has been cancelled.
+        await RuntimeHarness.EndSettledAsync(runtime);
     }
 }

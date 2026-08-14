@@ -128,13 +128,13 @@ public class BridgeRuntimePastMeetingsTests
         harness.AfterFirstPost = () => harness.View.Windows[0].Close();
 
         runtime.OpenPastMeeting(Record("meet-open"));
+        // Settling at all is the claim, and it needs no clock: an uncancelled loop polls a
+        // never-terminal script for as long as the process lives, so the bounded wait in here
+        // is what fails when nothing consumes IMeetingWindow.Closed.
         await RuntimeHarness.PastMeetingSettledAsync(runtime);
 
         FakeMeetingWindow window = Assert.Single(harness.View.Windows);
         Assert.True(window.Rendered.Count > 0, "nothing was ever rendered, so this proves nothing");
         Assert.NotEqual(PipelinePhase.Failed, window.Last!.Phase);
-        int polled = server.PollCount;
-        await Task.Delay(50);
-        Assert.Equal(polled, server.PollCount); // the loop really stopped, rather than settling late
     }
 }
