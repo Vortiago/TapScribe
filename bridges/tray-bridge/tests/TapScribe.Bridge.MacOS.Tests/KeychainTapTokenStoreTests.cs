@@ -36,4 +36,13 @@ public class KeychainTapTokenStoreTests
 
         Assert.Equal(secret, store.Read(null));
     }
+
+    [Fact]
+    public void Read_WithNothingSaved_IsNoToken()
+    {
+        // First launch: there is no item yet, which is an ordinary answer and not a
+        // failure. "" is the word the seam uses for it, and it is what the dialog shows as
+        // an empty field; a null would travel on into BridgeSettings.Token.
+        Assert.Equal("", new KeychainTapTokenStore(new FakeKeychain()).Read(null));
+    }
 }

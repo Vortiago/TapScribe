@@ -30,7 +30,7 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
     /// </summary>
     public string Read(string? atRest)
     {
-        _items.Copy(ServiceName, AccountName, out string? secret);
-        return secret!;
+        int status = _items.Copy(ServiceName, AccountName, out string? secret);
+        return status == KeychainStatus.ItemNotFound ? "" : secret!;
     }
 }
