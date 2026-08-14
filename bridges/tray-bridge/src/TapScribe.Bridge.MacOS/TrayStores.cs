@@ -1,3 +1,5 @@
+using TapScribe.Bridge.Core;
+
 namespace TapScribe.Bridge.MacOS;
 
 /// <summary>
@@ -33,4 +35,15 @@ public static class TrayStores
     /// for a migration reason this platform has no share in.
     /// </summary>
     public const string SettingsFileName = "macos-tray-bridge.json";
+
+    /// <summary>Connection settings + device selection, with the tap token in the Keychain
+    /// rather than in the file.</summary>
+    public static BridgeSettingsStore Settings { get; } =
+        new(new KeychainTapTokenStore(), BridgeAppData.Directory, SettingsFileName);
+
+    /// <summary>The active meeting, for restart-resume (#107).</summary>
+    public static MeetingStateStore MeetingState { get; } = new(BridgeAppData.Directory);
+
+    /// <summary>The local Past-meetings list (#168).</summary>
+    public static MeetingHistoryStore MeetingHistory { get; } = new(BridgeAppData.Directory);
 }

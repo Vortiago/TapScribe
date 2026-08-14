@@ -1,3 +1,5 @@
+using TapScribe.Bridge.Core;
+
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
@@ -35,5 +37,23 @@ public class TrayStoresTests
         // one is stuck saying "windows-tray-bridge" for a migration reason this platform has
         // no share in, and the two folders never meet anyway.
         Assert.Equal("macos-tray-bridge.json", TrayStores.SettingsFileName);
+    }
+
+    [Fact]
+    public void TheThreeStores_AllLiveInTheApplicationSupportFolder()
+    {
+        // Settings, restart-resume state and Past-meetings history: three files, one folder,
+        // and the folder is the only thing the platform contributes to the last two. The
+        // filenames come from the stores that own them rather than being retyped, so this
+        // asserts the wiring and not a copy of their contracts.
+        Assert.Equal(
+            Path.Join(BridgeAppData.Directory, TrayStores.SettingsFileName),
+            TrayStores.Settings.FilePath);
+        Assert.Equal(
+            Path.Join(BridgeAppData.Directory, MeetingStateStore.StateFileName),
+            TrayStores.MeetingState.FilePath);
+        Assert.Equal(
+            Path.Join(BridgeAppData.Directory, MeetingHistoryStore.HistoryFileName),
+            TrayStores.MeetingHistory.FilePath);
     }
 }

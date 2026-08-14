@@ -27,6 +27,12 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
 
     private readonly IKeychainItems _items;
 
+    /// <summary>A store backed by this Mac's login Keychain.</summary>
+    public KeychainTapTokenStore()
+        : this(new SecKeychainItems())
+    {
+    }
+
     internal KeychainTapTokenStore(IKeychainItems items) => _items = items;
 
     /// <summary>Null, always: the secret went to the Keychain, so nothing about it belongs
