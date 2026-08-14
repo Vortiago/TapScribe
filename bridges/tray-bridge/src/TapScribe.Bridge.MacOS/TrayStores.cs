@@ -18,3 +18,19 @@ internal static class BridgeAppData
         "Application Support",
         "TapScribe");
 }
+
+/// <summary>
+/// The macOS wiring of the portable storage layer. Everything platform-specific about where
+/// the tray's files live and how its one secret is protected is decided here and nowhere
+/// else; the stores themselves are OS-agnostic.
+/// </summary>
+public static class TrayStores
+{
+    /// <summary>
+    /// The on-disk settings filename, an operator-facing contract: a change orphans every
+    /// operator's saved settings, so it needs a migration rather than a rename. Its own
+    /// name rather than the Windows file's, which is stuck saying "windows-tray-bridge"
+    /// for a migration reason this platform has no share in.
+    /// </summary>
+    public const string SettingsFileName = "macos-tray-bridge.json";
+}

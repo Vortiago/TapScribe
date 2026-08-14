@@ -25,4 +25,15 @@ public class TrayStoresTests
         Assert.Equal(expected, BridgeAppData.Directory);
         Assert.DoesNotContain(".config", BridgeAppData.Directory);
     }
+
+    [Fact]
+    public void SettingsFileName_StaysTheOnDiskContract()
+    {
+        // Every operator's saved settings live under this exact name in
+        // ~/Library/Application Support/TapScribe, so a change here orphans them all and
+        // needs a migration rather than an edit. Its own name, not the Windows file's: that
+        // one is stuck saying "windows-tray-bridge" for a migration reason this platform has
+        // no share in, and the two folders never meet anyway.
+        Assert.Equal("macos-tray-bridge.json", TrayStores.SettingsFileName);
+    }
 }
