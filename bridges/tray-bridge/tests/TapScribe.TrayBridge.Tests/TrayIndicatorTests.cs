@@ -121,4 +121,37 @@ public class TrayIndicatorTests
         // The runtime exists and has resumed the meeting the previous session left behind.
         Assert.Contains("Resuming", tray.StatusHeader, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void AClickBeforeTheLoopsFirstTurn_DoesNothing_RatherThanThrowing()
+    {
+        // The other side of the deferral above, and a real window rather than a theoretical
+        // one: the icon goes visible in the indicator's constructor and the menu is built
+        // before Application.Run, while the runtime is built from a one-shot 200 ms timer. So
+        // the tray is on screen and clickable for about a fifth of a second with no runtime
+        // behind it. Throwing there surfaces an unhandled-exception dialog out of a click
+        // handler; doing nothing matches what the operator already believes, which is that they
+        // clicked a tray that had not finished starting.
+        using var sta = new StaShell();
+        using var harness = new TrayHarness();
+        var scheduled = new List<Action>();
+        TrayDependencies deps = harness.Dependencies with { ScheduleOnLoopStart = scheduled.Add };
+
+        TrayContext tray = sta.Build(harness, deps); // the kick is held, so there is no runtime
+
+        sta.Run(() =>
+        {
+            tray.StartItem.PerformClick();
+            tray.EndItem.PerformClick();
+            tray.RebuildPastMeetingsMenu();
+        });
+
+        // Nothing happened, and nothing pretended to: the menu is exactly as it was built.
+        Assert.True(tray.StartItem.Enabled, "a click with no runtime behind it moved the menu");
+        Assert.False(tray.EndItem.Enabled);
+        Assert.Equal("○ Idle", tray.StatusHeader);
+        // The submenu still rebuilds, from an empty history rather than from a null runtime.
+        ToolStripItem placeholder = Assert.Single(tray.PastMeetingsItem.DropDownItems.Cast<ToolStripItem>());
+        Assert.False(placeholder.Enabled);
+    }
 }

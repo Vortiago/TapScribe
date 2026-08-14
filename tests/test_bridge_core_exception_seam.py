@@ -33,8 +33,11 @@ _COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 
 # rglob, not glob: a gate that stops covering the moment Core grows a subdirectory is
 # worse than no gate, because it still reports green. The assert is the other half of
-# that: an empty parametrize also passes.
-SOURCES = sorted(CORE.rglob("*.cs"))
+# that: an empty parametrize also passes. `bin`/`obj` are dropped because a local build
+# leaves generated sources there, which would make the case list depend on whether the
+# tree happens to have been built.
+_BUILD_DIRS = {"bin", "obj"}
+SOURCES = sorted(p for p in CORE.rglob("*.cs") if _BUILD_DIRS.isdisjoint(p.parts))
 assert SOURCES, f"no C# sources under {CORE}: the gate is pointed at the wrong path"
 
 

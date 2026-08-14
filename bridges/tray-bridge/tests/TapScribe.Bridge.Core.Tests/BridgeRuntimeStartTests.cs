@@ -141,6 +141,79 @@ public class BridgeRuntimeStartTests
     }
 
     [Fact]
+    public async Task Start_WhenOpeningADeviceThrowsUnexpectedly_ReleasesTheCapturesAlreadyOpened()
+    {
+        // The pre-handoff window: the runtime opens one capture per resolved device into a plain
+        // local and hands the set to StartAll. Nothing else can reach them in that window, so if
+        // the finally releases only the enumerator, an unexpected throw between the two strands
+        // every capture already opened for the process lifetime: an endpoint held "in use" with
+        // nothing able to let go of it.
+        using var harness = new RuntimeHarness();
+        harness.AddDevice("mic", DeviceFlow.Capture);
+        harness.AddDevice("system", DeviceFlow.Render);
+        // The default pair resolves capture-first, so the mic is open by the time this fires.
+        // IOException is deliberately outside BOTH filters: the per-device skip in TryAddSpec,
+        // which would make this a surfaced-and-skipped device, and the start's own
+        // classification, which would make the finally the only owner left.
+        harness.Enumerator.FailOpen("system", new IOException("the endpoint went away"));
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+
+        // It really did escape the runtime's own classification, which is what leaves the
+        // finally as the captures' only owner.
+        await Assert.ThrowsAsync<IOException>(() => RuntimeHarness.StartSettledAsync(runtime));
+
+        // A capture is handed out NOT started (a TapSession starts it, and StartAll is never
+        // reached here), so "was it opened" is the enumerator's record, never capture.Started.
+        FakeAudioCapture stranded = Assert.Single(harness.Enumerator.Opened);
+        Assert.False(stranded.Started, "StartAll was reached, so this is no longer the pre-handoff path");
+
+        Assert.True(stranded.Disposed, "a capture the runtime opened was stranded with no owner");
+        Assert.Equal(1, stranded.Disposals); // released once, not double-released
+        Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded too");
+        // ...and in the right order: the enumerator handed its endpoint to the capture, so it
+        // has to outlive it.
+        Assert.True(harness.Enumerator.CapturesReleasedFirst);
+    }
+
+    [Fact]
+    public async Task Start_WhenAPostFailsAfterThePublish_LeavesTheLiveMeetingsControlsAlone()
+    {
+        // A failure to RENDER must never be classified as a failure to START. Everything after
+        // the publish is presentation, and the start's catch filter includes the
+        // InvalidOperationException a dead marshalling seam raises: catch it there and the
+        // runtime rolls a live, streaming meeting back to idle, re-enabling Start and greying
+        // out End, which leaves the operator no way to end the meeting that is still recording.
+        using var harness = new RuntimeHarness();
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        harness.AddDevice("system", DeviceFlow.Render);
+        BridgeRuntime runtime = harness.Build();
+        // No audio is emitted, so no utterance opens and no per-device callback ever posts: the
+        // publish render IS the first thing this start posts, which is what makes the injection
+        // land in the one window this test is about.
+        harness.Dispatcher.ThrowOnNextPost = true;
+
+        runtime.Start();
+        // The escape is the anti-vacuity guard: with the render below the catch the failed post
+        // leaves this fire-and-forget task, which is exactly what being classified would have
+        // prevented. WHICH of the two happened is the bug, and it is asserted below through what
+        // the operator would see.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RuntimeHarness.StartSettledAsync(runtime));
+
+        Assert.True(mic.Started, "the meeting never started, so this proves nothing");
+        Assert.False(mic.Disposed, "the meeting is supposed to still be streaming");
+
+        // The harm: Start live again over a meeting that is recording, an error in the header,
+        // and a "could not start meeting" notice about a meeting that did start.
+        Assert.False(harness.View.CanStart, "Start was re-enabled while a meeting is streaming");
+        Assert.NotEqual(TrayIcon.Error, harness.View.LastStatus!.Icon);
+        Assert.Empty(harness.View.Notices);
+
+        await runtime.QuitAsync(); // the meeting really is live: tear it down before leaving
+    }
+
+    [Fact]
     public async Task Start_WhileAnotherStartIsInFlight_IsRefused()
     {
         // A meeting exists from the operator's first click, not from the moment it is

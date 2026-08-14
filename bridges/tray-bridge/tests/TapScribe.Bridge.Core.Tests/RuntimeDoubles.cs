@@ -161,6 +161,13 @@ internal sealed class FakeMeetingWindow : IMeetingWindow
 /// </summary>
 internal sealed class InlineDispatcher(Action? afterFirstPost = null) : IDispatcher
 {
+    // A real dispatcher is one UI thread, so posted work never overlaps. Running inline on the
+    // POSTING thread would drop that: a meeting's per-device callbacks are raised from one
+    // TapStream pump each, so N devices post concurrently, and what they touch is written for
+    // a single thread (DeviceTally says so on the tin). Serializing here keeps the double
+    // honest about the one guarantee the seam exists to give. Re-entrant by construction: a
+    // posted action that posts again is the runtime's normal shape.
+    private readonly object _gate = new();
     private bool _posted;
 
     /// <summary>Whether control is currently inside a <see cref="Post"/>. ITrayView promises
@@ -169,25 +176,40 @@ internal sealed class InlineDispatcher(Action? afterFirstPost = null) : IDispatc
     /// makes the thread itself indistinguishable.</summary>
     public bool InPost { get; private set; }
 
+    /// <summary>Make the next <see cref="Post"/> throw, once: the injection point for
+    /// "something after the meeting was published failed". Once only, because the runtime has
+    /// to survive ONE failed post rather than be crippled by every subsequent one failing too,
+    /// and because the claim under test is about which side of the start's catch the render
+    /// runs on.</summary>
+    public bool ThrowOnNextPost { get; set; }
+
     public void Post(Action action)
     {
         ArgumentNullException.ThrowIfNull(action);
-        bool outer = InPost;
-        InPost = true;
-        try
+        lock (_gate)
         {
-            action();
+            if (ThrowOnNextPost)
+            {
+                ThrowOnNextPost = false;
+                throw new InvalidOperationException("the post failed");
+            }
+            bool outer = InPost;
+            InPost = true;
+            try
+            {
+                action();
+            }
+            finally
+            {
+                InPost = outer;
+            }
+            if (_posted)
+                return;
+            _posted = true;
+            // The hook a test needs to act at the one instant it cannot otherwise reach: the
+            // window closing the moment it has something to show.
+            afterFirstPost?.Invoke();
         }
-        finally
-        {
-            InPost = outer;
-        }
-        if (_posted)
-            return;
-        _posted = true;
-        // The hook a test needs to act at the one instant it cannot otherwise reach: the
-        // window closing the moment it has something to show.
-        afterFirstPost?.Invoke();
     }
 }
 
@@ -266,7 +288,13 @@ internal sealed class RuntimeHarness : IDisposable
 
     private readonly HttpClient _http = new();
 
-    public MeetingStateStore StateStore => _stateStore ??= new MeetingStateStore(_directory);
+    /// <summary>Where the resume-state store writes. Overridden by the test that needs the save
+    /// to FAIL, which is a property of the destination rather than of the state. Set it before
+    /// anything reads <see cref="StateStore"/>, which binds its directory once.</summary>
+    public string? StateStoreDirectory { get; set; }
+
+    public MeetingStateStore StateStore =>
+        _stateStore ??= new MeetingStateStore(StateStoreDirectory ?? _directory);
 
     private MeetingStateStore? _stateStore;
 
@@ -283,6 +311,21 @@ internal sealed class RuntimeHarness : IDisposable
     public void AlsoDelete(string path) => _extraPaths.Add(path);
 
     private readonly List<string> _extraPaths = [];
+
+    /// <summary>
+    /// A directory no process can create a file under: an existing FILE standing where the
+    /// store wants its parent. Portable, and it fails at WRITE time rather than needing
+    /// permissions the runner may or may not have. ONE spelling, because every store fails the
+    /// same way and a second copy would drift. The blocking file is registered for teardown, so
+    /// it does not outlive the run.
+    /// </summary>
+    public string UnwritableDirectory()
+    {
+        string file = Path.Join(Path.GetTempPath(), "tapscribe-blocked-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(file, "not a directory");
+        AlsoDelete(file);
+        return Path.Join(file, "store");
+    }
 
     public BridgeSettingsStore SettingsStore =>
         _settingsStore ??= new BridgeSettingsStore(

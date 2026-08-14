@@ -24,15 +24,20 @@ Recorder, Utterance, Session).
   and Past-meetings state, every view-model, and the on-disk stores
   (settings / meeting state / meeting history) with the tap token's meaning at
   rest behind `ITapTokenStore` — all pure, so a future macOS/Linux shell
-  reuses it.
+  reuses it. The whole meeting lifecycle is `BridgeRuntime`, a UI-free class
+  behind two seams: `ITrayView` (status, notices, menu state, meeting window,
+  shutdown) and `IDispatcher` (marshalling to the shell's UI thread, because
+  .NET installs no `SynchronizationContext` on macOS). A shell implements
+  those two and inherits the lifecycle with its tests.
 - **`src/TapScribe.Bridge.Windows`** (net10.0-windows): WASAPI capture,
   loopback and enumeration (NAudio), plus the Windows half of the storage
   layer — `DpapiTapTokenStore` and the `TrayStores` binding of the Core stores
   to `%APPDATA%\TapScribe`.
-- **`src/TapScribe.TrayBridge`** (net10.0-windows WinForms): the tray runner —
-  event-driven status (idle / streaming / processing / error), Start meeting /
-  End meeting / Past meetings / Settings… / Quit, the 4-tab Settings dialog,
-  and the per-meeting summary window with Copy.
+- **`src/TapScribe.TrayBridge`** (net10.0-windows WinForms): the tray shell,
+  which is Core's `ITrayView` over a `NotifyIcon` and a `ContextMenuStrip`.
+  Widgets only: the menu (Start meeting / End meeting / Past meetings /
+  Settings… / Quit), the 4-tab Settings dialog, and the per-meeting summary
+  window with Copy. What a meeting DOES is `BridgeRuntime`'s.
 - **`src/TapScribe.Bridge.MacOS`** (net10.0): the Mac platform layer. Today
   just the macOS 14.4 floor and the sysctl that reads this Mac's version;
   Core Audio process-tap capture, device enumeration and Keychain storage

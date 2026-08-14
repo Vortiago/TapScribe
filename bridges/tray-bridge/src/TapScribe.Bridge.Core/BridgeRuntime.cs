@@ -71,9 +71,15 @@ public sealed class BridgeRuntime
         BridgeSettings settings;
         lock (_gate)
         {
-            // Already running, already starting (the mint is a round-trip long), or on the
-            // way out.
-            if (_meeting is not null || _startTask is { IsCompleted: false } || _quitting)
+            // Already running, already starting (the mint is a round-trip long), still closing
+            // the last one (an End or a resumed pipeline), or on the way out. The flow guard is
+            // the same claim as the start one: a meeting exists in this runtime's own model
+            // from the click, not from the moment it is published, and a greyed-out menu item
+            // is the shell's business rather than the model's.
+            if (_meeting is not null
+                || _startTask is { IsCompleted: false }
+                || _endTask is { IsCompleted: false }
+                || _quitting)
                 return;
             settings = _settings;
         }
@@ -94,6 +100,17 @@ public sealed class BridgeRuntime
     private async Task StartAsync(BridgeSettings settings)
     {
         IAudioDeviceEnumerator? enumerator = null;
+        // Captures opened but not yet handed to the orchestrator. Nothing else can reach them,
+        // so a throw in that window strands every one of them for the process lifetime: an
+        // endpoint held "in use" with nothing able to release it. The finally below is their
+        // only owner until StartAll takes over.
+        List<PipelineSpec>? unowned = null;
+        // Non-null once the meeting is published, which is the LAST thing the try does.
+        // Everything left to render then happens BELOW the catch, where it cannot reach
+        // FailToIdle: a throw while noticing a skipped device would otherwise be classified as
+        // a failed START and roll a live, streaming meeting back to idle, with Start re-enabled,
+        // End greyed out and no way left to end the meeting that is still recording.
+        StartedMeeting? started = null;
         try
         {
             // 1) Resolve the operator's selection against what is present RIGHT NOW
@@ -124,6 +141,7 @@ public sealed class BridgeRuntime
             //    order, so options[i] pairs with Resolved[i].
             IReadOnlyList<TapConnectionOptions> perDevice = resolution.ToTapOptions(sessionId, baseOptions);
             var specs = new List<PipelineSpec>();
+            unowned = specs;
             for (int i = 0; i < resolution.Resolved.Count; i++)
             {
                 ResolvedDevice resolved = resolution.Resolved[i];
@@ -143,10 +161,11 @@ public sealed class BridgeRuntime
             var tally = new DeviceTally(specs.Count);
             // Ownership of the enumerator transfers AT THE CALL, exactly as the specs' does:
             // StartAll releases everything it was given on every exit that is not a handed-back
-            // orchestrator, so the local is cleared first and the finally below has nothing
+            // orchestrator, so both locals are cleared first and the finally below has nothing
             // left to release on the paths that throw from inside it.
             IAudioDeviceEnumerator opening = enumerator;
             enumerator = null;
+            unowned = null;
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 specs,
                 onConnected: id => _dispatcher.Post(() => ApplyStatus(tally.Connected(id).Status)),
@@ -185,19 +204,7 @@ public sealed class BridgeRuntime
                 return;
             }
 
-            // Devices that did not resolve are a non-fatal warning: the meeting runs on the
-            // ones that did, and the operator is told which it is missing.
-            IReadOnlyList<DeviceSelection> missing = resolution.Missing;
-            _dispatcher.Post(() =>
-            {
-                ShowMeetingRunning();
-                ApplyStatus(tally.Status);
-                if (missing.Count > 0)
-                    _view.ShowNotice(
-                        "Some devices unavailable",
-                        $"Skipped: {string.Join(", ", missing.Select(DescribeSelection))}",
-                        NoticeKind.Warning);
-            });
+            started = new StartedMeeting(tally, resolution.Missing); // the meeting is live from here
         }
         catch (Exception ex) when (
             ex is HttpRequestException
@@ -218,13 +225,45 @@ public sealed class BridgeRuntime
         }
         finally
         {
+            // Captures FIRST, then the enumerator that opened them: an enumerator hands its
+            // endpoint over to each capture it opens, so it has to outlive them. These are the
+            // ones opened but never handed over, which nothing else can reach. Both locals are
+            // null from the StartAll call onwards, which releases what it refuses, so a running
+            // meeting keeps its devices and a refused set is never released twice. Dispose is
+            // contract-bound not to throw.
+            if (unowned is not null)
+                foreach (PipelineSpec spec in unowned)
+                    spec.Capture.Dispose();
             // Released on every exit that did not get as far as handing it over: the non-Ok
-            // early return, or a throw from the resolve or the mint. Null from the StartAll
-            // call onwards, so a running meeting keeps its devices and a refused set has
-            // already had them released by the orchestrator.
+            // early return, or a throw from the resolve, the mint, or a device open.
             enumerator?.Dispose();
         }
+
+        if (started is null)
+            return; // the catch, or the non-Ok early return, already surfaced the failure
+
+        // From here the meeting IS streaming and everything left is presentation. It sits below
+        // the catch on purpose: a failure to RENDER must never be classified as a failure to
+        // START, which would re-enable Start and grey out End over a meeting that is still
+        // recording. Devices that did not resolve are a non-fatal warning: the meeting runs on
+        // the ones that did, and the operator is told which it is missing.
+        StartedMeeting live = started;
+        _dispatcher.Post(() =>
+        {
+            ShowMeetingRunning();
+            ApplyStatus(live.Tally.Status);
+            if (live.Missing.Count > 0)
+                _view.ShowNotice(
+                    "Some devices unavailable",
+                    $"Skipped: {string.Join(", ", live.Missing.Select(DescribeSelection))}",
+                    NoticeKind.Warning);
+        });
     }
+
+    /// <summary>A published, streaming meeting's presentation state: the live
+    /// <see cref="DeviceTally"/> and the selections that did not resolve. Its non-nullness is
+    /// what tells <see cref="StartAsync"/> the meeting reached the point of no return.</summary>
+    private sealed record StartedMeeting(DeviceTally Tally, IReadOnlyList<DeviceSelection> Missing);
 
     /// <summary>
     /// Open one resolved device behind the capture seam and add a pipeline for it.
@@ -240,8 +279,11 @@ public sealed class BridgeRuntime
     {
         try
         {
-            into.Add(new PipelineSpec(
-                enumerator.Open(resolved.Device), options, resolved.Gate.ToGateOptions()));
+            // The gate is resolved BEFORE the device is opened. Argument evaluation is
+            // left to right, so building it inline after the Open would leave an out-of-range
+            // tuning throwing with a capture already open and no list entry to release it by.
+            GateOptions gate = resolved.Gate.ToGateOptions();
+            into.Add(new PipelineSpec(enumerator.Open(resolved.Device), options, gate));
         }
         catch (Exception ex) when (
             ex is ExternalException or NotSupportedException or ArgumentException or InvalidOperationException)
@@ -422,7 +464,7 @@ public sealed class BridgeRuntime
         // failed write never breaks the drain.
         if (process)
         {
-            _deps.StateStore.Save(new MeetingState { SessionId = sessionId });
+            SaveResumeState(sessionId);
             _deps.HistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = meeting.StartedAt });
         }
         return RunPipelineFlowAsync(
@@ -438,6 +480,31 @@ public sealed class BridgeRuntime
             // and a teardown that fails part-way still releases what it can (see
             // EndMeetingAsync).
             drainAsync: () => meeting.Orchestrator.EndMeetingAsync());
+    }
+
+    /// <summary>
+    /// Persist the resume state, best-effort, which is the half of that promise the store does
+    /// not keep for itself: <see cref="MeetingHistoryStore.Append"/> swallows its own write
+    /// failures and <see cref="MeetingStateStore.Save"/> does not. End has already DETACHED the
+    /// meeting by the time this runs, so a throw here escapes into the shell's click handler
+    /// with nobody left holding the orchestrator: the taps would stream on undisposed, the
+    /// detached session would stay open on the Recorder, and both commands would stay disabled
+    /// until the shell was restarted. What is lost instead is the resume across a restart, which
+    /// is worth far less than the drain, and the summary stays re-fetchable by session id.
+    /// </summary>
+    private void SaveResumeState(string sessionId)
+    {
+        try
+        {
+            _deps.StateStore.Save(new MeetingState { SessionId = sessionId });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The state directory could not be written (permissions, full disk, a file standing
+            // where the directory should be). Nothing to surface mid-End: the operator cannot
+            // act on it, the meeting still drains and still runs its pipeline, and the only
+            // consequence is that a restart before the pipeline finishes will not resume it.
+        }
     }
 
     // Build the controller, wire its emissions to the UI thread, run the flow (End or Resume),
@@ -649,6 +716,12 @@ public sealed class BridgeRuntime
         }
         flow?.Cancel();
 
+        // Both commands off for the whole teardown. Without it End stays live while the wait
+        // below runs, and End and this method race for the same meeting through TakeMeeting:
+        // whichever loses sees nothing to take, so an End that wins hands the shell its
+        // Shutdown while its own drain is still running.
+        ShowBusy();
+
         // Let a start that is mid-flight settle. Until it publishes, TakeMeeting below sees
         // nothing to take, so without this the captures would keep streaming, the meeting would
         // go undisposed and the detached session would stay open on the Recorder, all the way
@@ -668,12 +741,21 @@ public sealed class BridgeRuntime
         Meeting? meeting = TakeMeeting();
 
         // Tear every pipeline down and release the enumerator behind them: the orchestrator
-        // drains and closes them CONCURRENTLY, each bounded, and DisposeAsync is throw-free, so
-        // this stays about one drain budget rather than N of them. The cap is a backstop; a
-        // sub-second tail may drop on a hard quit.
+        // drains and closes them CONCURRENTLY, each bounded, so this stays about one drain
+        // budget rather than N of them. A sub-second tail may drop on a hard quit.
+        //
+        // The cap is RACED, not enforced with WaitAsync, and this is the same shape as the
+        // start-settle wait above for the same reason: overrunning it is an expected outcome
+        // rather than an error, and WaitAsync turns it into a TimeoutException that skips the
+        // Shutdown below. Out of a fire-and-forget click handler nothing would report that, and
+        // _quitting is already latched, so the operator would be left with a tray refusing to
+        // start a meeting and refusing to exit. A teardown that faults is deliberately not
+        // observed here for the same reason: whether the taps closed cleanly is not the thing
+        // standing between the operator and a shell that goes away.
         if (meeting is not null)
-            await meeting.Orchestrator.DisposeAsync().AsTask()
-                .WaitAsync(_budgets.QuitTeardownCap)
+            await Task.WhenAny(
+                    meeting.Orchestrator.DisposeAsync().AsTask(),
+                    Task.Delay(_budgets.QuitTeardownCap))
                 .ConfigureAwait(false);
 
         // Marshalled like every other view touch. Both awaits above are ConfigureAwait(false),

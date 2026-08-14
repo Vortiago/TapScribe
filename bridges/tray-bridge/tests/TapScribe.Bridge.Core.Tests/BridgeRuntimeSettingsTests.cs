@@ -73,7 +73,7 @@ public class BridgeRuntimeSettingsTests
     public void ApplySettings_WhenTheSaveFails_KeepsTheEditForThisSessionAndSaysItWontPersist()
     {
         using var harness = new RuntimeHarness();
-        harness.SettingsStoreDirectory = UnwritablePath(harness);
+        harness.SettingsStoreDirectory = harness.UnwritableDirectory();
         BridgeRuntime runtime = harness.Build();
 
         BridgeSettings updated = new() { Host = "recorder.example", Port = 9999, Devices = [] };
@@ -87,16 +87,5 @@ public class BridgeRuntimeSettingsTests
         (string title, _, NoticeKind kind) = Assert.Single(harness.View.Notices);
         Assert.Equal("Settings not saved", title);
         Assert.Equal(NoticeKind.Warning, kind);
-    }
-
-    // A path no process can create a file under: an existing FILE standing where the settings
-    // store wants a directory. Portable, and it fails at write time rather than needing
-    // permissions the test runner may or may not have.
-    private static string UnwritablePath(RuntimeHarness harness)
-    {
-        string file = Path.Join(Path.GetTempPath(), "tapscribe-blocked-" + Guid.NewGuid().ToString("N"));
-        File.WriteAllText(file, "not a directory");
-        harness.AlsoDelete(file); // the harness owns temp cleanup; this must not outlive the run
-        return Path.Join(file, "settings");
     }
 }

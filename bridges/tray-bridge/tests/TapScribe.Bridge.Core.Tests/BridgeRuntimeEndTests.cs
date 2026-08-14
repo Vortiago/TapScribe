@@ -124,6 +124,30 @@ public class BridgeRuntimeEndTests
     }
 
     [Fact]
+    public async Task End_WhenTheResumeStateCannotBeWritten_StillDrainsTheMeeting()
+    {
+        // The resume state and the Past-meetings entry are both documented best-effort, but only
+        // the history store keeps that promise for itself: MeetingStateStore.Save throws. End has
+        // already DETACHED the meeting by the time it runs, so an unguarded throw escapes into
+        // the shell's click handler with nobody left holding the orchestrator: the taps stream on
+        // undisposed, the detached session stays open on the Recorder, and both commands stay
+        // disabled until the shell is restarted. Losing the resume is the far cheaper failure.
+        using var harness = new RuntimeHarness();
+        harness.StateStoreDirectory = harness.UnwritableDirectory();
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        runtime.End();
+        await RuntimeHarness.EndSettledAsync(runtime);
+
+        Assert.True(mic.Stopped && mic.Disposed, "the drain never ran: the taps are still streaming");
+        Assert.True(harness.Enumerator.Disposed, "the device enumerator outlived the meeting");
+        Assert.True(harness.View.CanStart, "both commands were left disabled by a failed state write");
+    }
+
+    [Fact]
     public void End_WithNoMeetingRunning_IsANoOp()
     {
         using var harness = new RuntimeHarness();

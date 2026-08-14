@@ -160,7 +160,29 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
         if (StopError is not null)
             throw StopError;
     }
-    public void Dispose() => Interlocked.Increment(ref _disposals);
+    /// <summary>When set, <see cref="Dispose"/> blocks until it is released: a device that HANGS
+    /// closing, which is what a teardown cap is a backstop against. It sits on Dispose rather
+    /// than on Stop deliberately: Stop runs before <see cref="TapSession.DisposeAsync"/>'s only
+    /// await, so holding there would block the caller instead of leaving the teardown TASK
+    /// outstanding, and a caller that is blocked never reaches the cap at all. Bounded, so a
+    /// regression that puts the release back on the caller's thread is a slow failure rather
+    /// than a hung run.</summary>
+    public ManualResetEventSlim? DisposeHold { get; init; }
+
+    /// <summary>Set once <see cref="Dispose"/> has been reached and is waiting on
+    /// <see cref="DisposeHold"/>: the anti-vacuity guard for a test that needs the teardown to
+    /// still be in flight.</summary>
+    public ManualResetEventSlim DisposeReached { get; } = new(false);
+
+    public void Dispose()
+    {
+        if (DisposeHold is not null)
+        {
+            DisposeReached.Set();
+            DisposeHold.Wait(TimeSpan.FromSeconds(10));
+        }
+        Interlocked.Increment(ref _disposals);
+    }
 
     public void Emit(byte[] pcm) => _data?.Invoke(this, new AudioCapturedEventArgs(pcm));
 

@@ -47,6 +47,82 @@ public class BridgeRuntimeQuitTests
     }
 
     [Fact]
+    public async Task QuitAsync_WhenTheTeardownOutlivesItsCap_StillLetsTheShellGo()
+    {
+        // The cap is a BACKSTOP, so overrunning it is an expected outcome rather than an error:
+        // a device that hangs closing, or a drain waiting on a Recorder that accepted the
+        // connection and went quiet.
+        //
+        // Enforcing the cap with Task.WaitAsync turns that expected outcome into a
+        // TimeoutException, which skips the Shutdown at the end of the teardown. The shell's
+        // Quit is a fire-and-forget click handler with nothing to report that, and _quitting is
+        // already latched, so the operator is left with a tray that refuses to start a meeting
+        // AND never exits.
+        using var hold = new ManualResetEventSlim(false);
+        var mic = new FakeAudioCapture(Fixtures.RecorderFormat) { DisposeHold = hold };
+        using var harness = new RuntimeHarness
+        {
+            Budgets = new RuntimeBudgets
+            {
+                PollInterval = TimeSpan.FromMilliseconds(10),
+                StartSettleTimeout = TimeSpan.FromSeconds(5),
+                QuitTeardownCap = TimeSpan.FromMilliseconds(50),
+            },
+        };
+        harness.AddDevice("mic", DeviceFlow.Capture, mic);
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+        Assert.True(harness.View.CanEnd, "no meeting was running, so this proves nothing");
+        // An open Utterance, so the session's teardown has a drain to await and the hung release
+        // below lands on a continuation rather than on the quit's own thread. Without it the
+        // whole teardown runs inline and the cap is never consulted.
+        mic.Emit(Fixtures.Loud(40));
+
+        try
+        {
+            await runtime.QuitAsync();
+
+            // The claim: the shell is told it may go while the teardown is still out there.
+            Assert.True(harness.View.ShutdownCalled, "an overrun teardown kept the shell alive forever");
+            // ...and the anti-vacuity guard for it. The tail still closing behind the Shutdown
+            // is exactly what "a sub-second tail may drop on a hard quit" means, and it is what
+            // says the cap was reached at all rather than the teardown simply finishing in time.
+            Assert.False(
+                harness.View.CapturesReleasedBeforeShutdown,
+                "the teardown finished inside the cap, so the overrun path was never taken");
+        }
+        finally
+        {
+            hold.Set(); // let the held teardown finish rather than leaving a pool thread parked
+        }
+    }
+
+    [Fact]
+    public async Task QuitAsync_WhenTheTeardownFaults_StillLetsTheShellGo()
+    {
+        // The other way the bounded teardown does not finish cleanly: a capture whose endpoint
+        // was invalidated by the time its owner let go, which FAULTS the teardown rather than
+        // overrunning it. Whether the taps closed cleanly is not the thing standing between the
+        // operator and a shell that goes away, and the orchestrator releases what it can either
+        // way.
+        using var harness = new RuntimeHarness();
+        harness.AddDevice(
+            "mic", DeviceFlow.Capture,
+            new FakeAudioCapture(Fixtures.RecorderFormat) { DetachError = new IOException("endpoint invalidated") });
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        await runtime.QuitAsync();
+
+        Assert.True(harness.View.ShutdownCalled, "a faulted teardown kept the shell alive forever");
+        Assert.True(harness.Enumerator.Disposed, "the enumerator was stranded by the failed teardown");
+    }
+
+    [Fact]
     public async Task QuitAsync_WhileAStartIsStillMinting_TearsThatMeetingDownInsteadOfPublishingIt()
     {
         using var harness = new RuntimeHarness { HoldMint = true };
