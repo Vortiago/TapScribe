@@ -68,4 +68,46 @@ public class BridgeRuntimeQuitTests
         Assert.True(harness.Enumerator.Disposed);
         Assert.False(harness.View.CanEnd, "an abandoned start published a meeting into a dead shell");
     }
+
+    [Fact]
+    public async Task QuitAsync_CancelsTheInFlightEndFlow_SoItStopsTalkingToTheRecorder()
+    {
+        // The End flow's poll loop used to run on CancellationToken.None: quitting ended the
+        // shell and left it polling the Recorder and rendering into a view that was gone, for as
+        // long as the process lingered. The script never reaches a terminal state, so the loop
+        // would poll forever; the cancellation is what has to stop it.
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            pollScript:
+            [
+                (200, "{\"ok\":true,\"state\":\"running\",\"stage\":\"strip\",\"status\":\"x\"," +
+                      "\"current\":0,\"total\":0,\"current_file\":null}"),
+            ]);
+        using var harness = new RuntimeHarness
+        {
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = server.Port,
+                Identity = "alice",
+                Name = "Alice",
+                Token = "tok-abc",
+                Devices = [],
+            },
+        };
+        harness.AddDevice("mic", DeviceFlow.Capture);
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        runtime.End();
+        await Poll.UntilAsync(
+            () => server.PollCount > 0, TimeSpan.FromSeconds(10), "the pipeline to start polling");
+
+        await runtime.QuitAsync();
+        await RuntimeHarness.EndSettledAsync(runtime);
+
+        int polled = server.PollCount;
+        await Task.Delay(50);
+        Assert.Equal(polled, server.PollCount); // the loop really stopped, rather than settling late
+    }
 }

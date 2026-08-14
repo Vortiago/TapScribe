@@ -299,10 +299,17 @@ internal sealed class RuntimeHarness : IDisposable
         Devices = [],
     };
 
-    /// <summary>Register a device the enumerator will report and hand out a capture for.</summary>
-    public FakeAudioCapture AddDevice(string id, DeviceFlow flow, bool isDefault = true)
+    /// <summary>Register a device the enumerator will report and hand out a capture for.
+    /// <paramref name="capture"/> is for a test that needs a scripted one (a start that throws,
+    /// a detach that throws) rather than the plain one built here.</summary>
+    public FakeAudioCapture AddDevice(
+        string id, DeviceFlow flow, FakeAudioCapture? capture = null, bool isDefault = true)
     {
-        FakeAudioCapture capture = Enumerator.Add(new CaptureDevice(id, id, flow, isDefault), Fixtures.RecorderFormat);
+        var device = new CaptureDevice(id, id, flow, isDefault);
+        if (capture is null)
+            capture = Enumerator.Add(device, Fixtures.RecorderFormat);
+        else
+            Enumerator.Add(device, capture);
         _opened.Add(capture);
         // Teach the view what "everything is released" means, so it can latch the ordering at
         // the moment the shell is told to shut down.

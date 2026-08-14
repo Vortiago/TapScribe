@@ -58,6 +58,71 @@ public class BridgeRuntimeEndTests
         Assert.True(harness.Enumerator.Disposed, "the device enumerator outlived the meeting");
     }
 
+    /// <summary>Record-only: End drains and closes the taps but fires no pipeline, so the
+    /// teardown is exercised with no Recorder in the picture at all.</summary>
+    private static BridgeSettings RecordOnly()
+    {
+        BridgeSettings settings = new RuntimeHarness().Settings;
+        settings.ProcessOnEnd = false;
+        return settings;
+    }
+
+    [Fact]
+    public async Task End_RecordOnly_ReleasesTheDevices_AndReturnsToIdle()
+    {
+        // The guardrail for the test below: the healthy record-only End lands on released
+        // devices and a usable menu, so "returns the commands" cannot pass by never taking them
+        // away, and "releases the devices" cannot pass by a teardown that never runs.
+        using var harness = new RuntimeHarness { Settings = RecordOnly() };
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        harness.AddDevice("system", DeviceFlow.Render);
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        runtime.End();
+        await RuntimeHarness.EndSettledAsync(runtime);
+
+        Assert.True(mic.Stopped && mic.Disposed, "End must stop and release the capture");
+        Assert.True(harness.Enumerator.Disposed);
+        Assert.True(harness.Enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
+        Assert.True(harness.View.CanStart);
+        Assert.False(harness.View.CanEnd);
+        Assert.Contains(harness.View.Notices, n => n.Title == "Recording saved");
+    }
+
+    [Fact]
+    public async Task End_WhenTheDrainThrowsUnexpectedly_ReturnsTheCommandsToTheOperator()
+    {
+        // A failure OUTSIDE the flow's catch filter escapes a fire-and-forget task that nobody
+        // observes, and both commands are disabled with the header stuck on "Ending meeting…":
+        // a tray that has to be restarted. The exception is still not this flow's to classify,
+        // so it propagates; what the flow owes the operator is a usable menu on the way out.
+        using var harness = new RuntimeHarness { Settings = RecordOnly() };
+        harness.AddDevice(
+            "mic", DeviceFlow.Capture,
+            new FakeAudioCapture(RecorderFormat) { DetachError = new IOException("endpoint invalidated") });
+        harness.AddDevice("system", DeviceFlow.Render);
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        runtime.End();
+        // The escape is the anti-vacuity guard: the flow really took the path outside its catch
+        // filter, which is the one that used to leave the menu stranded. The busy state in
+        // between is not observable here, and that is the harness rather than the runtime: the
+        // drain faults without yielding and the tests' dispatcher runs the recovery inline, so
+        // both have happened by the time End returns.
+        await Assert.ThrowsAsync<IOException>(() => RuntimeHarness.EndSettledAsync(runtime));
+
+        Assert.True(harness.View.CanStart,
+            "both commands were left disabled: the shell is unusable until it is restarted");
+        Assert.False(harness.View.CanEnd);
+        Assert.Equal(TrayIcon.Error, harness.View.LastStatus!.Icon);
+        Assert.DoesNotContain("Ending meeting", harness.View.LastStatus.Header, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void End_WithNoMeetingRunning_IsANoOp()
     {

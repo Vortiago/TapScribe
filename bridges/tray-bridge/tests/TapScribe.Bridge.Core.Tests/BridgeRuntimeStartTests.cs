@@ -139,4 +139,76 @@ public class BridgeRuntimeStartTests
         Assert.Equal("Could not open system", title);
         Assert.Equal(NoticeKind.Warning, kind);
     }
+
+    [Fact]
+    public async Task Start_WhileAnotherStartIsInFlight_IsRefused()
+    {
+        // A meeting exists from the operator's first click, not from the moment it is
+        // published, and the mint is a network round-trip long. With only the published meeting
+        // as a guard, that whole span was unguarded in the runtime's own model and a greyed-out
+        // menu item was the only thing between a second click and a second meeting.
+        using var harness = new RuntimeHarness { HoldMint = true };
+        harness.AddDevice("mic", DeviceFlow.Capture);
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await harness.MintReached;
+        Task first = runtime.StartTask!;
+
+        runtime.Start(); // a second click, mid-mint
+
+        Assert.Same(first, runtime.StartTask); // no second start was ever launched
+        harness.CompleteMint();
+        await RuntimeHarness.StartSettledAsync(runtime);
+        await runtime.QuitAsync();
+    }
+
+    [Fact]
+    public async Task Start_AfterQuit_IsRefused()
+    {
+        using var harness = new RuntimeHarness();
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        BridgeRuntime runtime = harness.Build();
+
+        await runtime.QuitAsync();
+        runtime.Start();
+
+        Assert.Null(runtime.StartTask);
+        Assert.False(mic.Started, "a meeting was started on a shell that is already gone");
+    }
+
+    [Fact]
+    public async Task ADeviceThatKeepsDropping_NoticesOnce_AndKeepsSayingSoInTheStatus()
+    {
+        // A dropped device reports once per Utterance for the rest of the meeting. The status
+        // line has to say so throughout, but the operator must be TOLD once: a notice is a real
+        // 4-second toast on Windows, so the naive wiring toasts every utterance until the
+        // meeting ends. The device is named by the IDENTITY its tap streams under, which is what
+        // the Recorder attributes its recordings to, not by the endpoint's device name.
+        const string micIdentity = "Alice";
+        BridgeSettings settings = new RuntimeHarness().Settings;
+        settings.Devices =
+        [
+            new DeviceSelection.FollowDefault(DeviceFlow.Capture, micIdentity, micIdentity),
+            new DeviceSelection.FollowDefault(DeviceFlow.Render, "System audio", "System audio"),
+        ];
+        using var harness = new RuntimeHarness { Settings = settings };
+        FakeAudioCapture mic = harness.AddDevice("mic-endpoint", DeviceFlow.Capture);
+        harness.AddDevice("system-endpoint", DeviceFlow.Render);
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+        int before = harness.View.Notices.Count;
+
+        mic.RaiseFailed(new IOException("endpoint gone"));
+        mic.RaiseFailed(new IOException("endpoint gone")); // the next utterance says the same
+        mic.RaiseFailed(new IOException("endpoint gone")); // ...and the next
+
+        (string title, _, _) = Assert.Single(harness.View.Notices.Skip(before));
+        Assert.Equal($"{micIdentity} stopped", title);
+        // The status still says it, though: that is what the header is for.
+        Assert.Contains($"{micIdentity} stopped", harness.View.LastStatus!.Header, StringComparison.Ordinal);
+        Assert.Equal(TrayIcon.Error, harness.View.LastStatus.Icon);
+
+        await runtime.QuitAsync();
+    }
 }
