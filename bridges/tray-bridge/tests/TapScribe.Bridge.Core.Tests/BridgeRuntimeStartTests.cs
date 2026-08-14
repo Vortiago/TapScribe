@@ -1,4 +1,5 @@
 using System.Net;
+using System.Runtime.InteropServices;
 
 namespace TapScribe.Bridge.Core.Tests;
 
@@ -110,5 +111,32 @@ public class BridgeRuntimeStartTests
             StartFailure.Classify(harness.MintError!, harness.Settings.Host, harness.Settings.Port).Kind);
         Assert.Equal(TrayIcon.Error, harness.View.LastStatus!.Icon);
         Assert.True(harness.View.CanStart);
+    }
+
+    [Fact]
+    public async Task Start_WhenOneDeviceCannotBeOpened_RecordsTheMeetingOnTheRest()
+    {
+        using var harness = new RuntimeHarness();
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        harness.AddDevice("system", DeviceFlow.Render);
+        // The endpoint the platform refuses: in use by an exclusive-mode client, or gone
+        // between List and Open. ExternalException is the capture seam's declared native
+        // failure, so this is the shape every backend raises.
+        harness.Enumerator.FailOpen("system", new ExternalException("endpoint in use"));
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        // A dead loopback must not stop the mic from recording: that is the whole reason
+        // opening is best-effort per device rather than a set that succeeds or fails together.
+        Assert.True(mic.Started, "the surviving device never started");
+        Assert.True(harness.View.CanEnd, "the meeting was not published");
+        Assert.Equal(StatusView.For(new TrayStatus.Streaming(0, 1)), harness.View.LastStatus);
+
+        // ...and the operator is told which device dropped out, by name.
+        (string title, _, NoticeKind kind) = Assert.Single(harness.View.Notices);
+        Assert.Equal("Could not open system", title);
+        Assert.Equal(NoticeKind.Warning, kind);
     }
 }

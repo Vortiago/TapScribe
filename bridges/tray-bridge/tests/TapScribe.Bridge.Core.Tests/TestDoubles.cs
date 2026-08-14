@@ -184,12 +184,29 @@ internal sealed class FakeAudioDeviceEnumerator : IAudioDeviceEnumerator
         return capture;
     }
 
+    /// <summary>Make <see cref="Open"/> throw for one device: the endpoint is in use, gone, or
+    /// offers no format the pipeline can take. Registered per device rather than per call
+    /// ordinal, because a test about "the OTHER device still records" has to name which one
+    /// died for its assertion to mean anything.</summary>
+    public void FailOpen(string deviceId, Exception error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        _openErrors[deviceId] = error;
+    }
+
+    private readonly Dictionary<string, Exception> _openErrors = new(StringComparer.Ordinal);
+
     public IReadOnlyList<CaptureDevice> List() => _devices.ToList();
 
-    public IAudioCapture Open(CaptureDevice device) =>
-        _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
+    public IAudioCapture Open(CaptureDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        if (_openErrors.TryGetValue(device.Id, out Exception? error))
+            throw error;
+        return _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
             ? capture
             : throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+    }
 
     /// <summary>Records the release. There are no handles behind this fake, but the seam
     /// declares one, so the double answers it rather than leaving a real backend's obligation

@@ -120,8 +120,7 @@ public sealed class BridgeRuntime
             for (int i = 0; i < resolution.Resolved.Count; i++)
             {
                 ResolvedDevice resolved = resolution.Resolved[i];
-                specs.Add(new PipelineSpec(
-                    enumerator.Open(resolved.Device), perDevice[i], resolved.Gate.ToGateOptions()));
+                TryAddSpec(specs, enumerator, resolved, perDevice[i]);
             }
 
             // Which devices are actually streaming, and what that means for the status line, is
@@ -181,6 +180,31 @@ public sealed class BridgeRuntime
             // or a throw. Once the meeting owns it the local is null and this is a no-op, so a
             // running meeting keeps its devices.
             enumerator?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Open one resolved device behind the capture seam and add a pipeline for it.
+    /// Best-effort: a device that fails to OPEN is surfaced and skipped, so a dead loopback
+    /// does not stop the mic from recording. Opening is the runtime's own stage, which is why
+    /// <see cref="CaptureOrchestrator"/> cannot own it; the orchestrator owns the symmetric
+    /// START-failure half, capture.Start throwing inside TapSession.Begin. The filter names
+    /// the enumerator seam's declared failures.
+    /// </summary>
+    private void TryAddSpec(
+        List<PipelineSpec> into, IAudioDeviceEnumerator enumerator,
+        ResolvedDevice resolved, TapConnectionOptions options)
+    {
+        try
+        {
+            into.Add(new PipelineSpec(
+                enumerator.Open(resolved.Device), options, resolved.Gate.ToGateOptions()));
+        }
+        catch (Exception ex) when (
+            ex is ExternalException or NotSupportedException or ArgumentException or InvalidOperationException)
+        {
+            _dispatcher.Post(() =>
+                _view.ShowNotice($"Could not open {resolved.Device.Name}", ex.Message, NoticeKind.Warning));
         }
     }
 
