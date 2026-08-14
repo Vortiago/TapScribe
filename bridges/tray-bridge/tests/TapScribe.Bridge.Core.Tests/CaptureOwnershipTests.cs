@@ -17,9 +17,138 @@ namespace TapScribe.Bridge.Core.Tests;
 /// <see cref="DeviceSelection.Resolve"/> takes the base identity and so returns
 /// <see cref="SelectionVerdict.DuplicateIdentity"/> before any device is opened. It stays
 /// because the core cannot assume its caller resolved through that path.
+///
+/// The enumerator is the same claim one level up. It hands its endpoint over to each capture
+/// it opens, so it has to outlive them: an ordering that was a rule stated in prose at every
+/// teardown path and re-implemented at each, precisely because no single object owned both.
+/// <see cref="CaptureSet"/> holds both and <see cref="CaptureOrchestrator.StartAll"/> takes the
+/// set, so "released, after the captures, exactly once" is one implementation and the tests
+/// below are about it rather than about each caller's memory.
 /// </summary>
 public class CaptureOwnershipTests
 {
+    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
+
+    [Fact]
+    public void Release_ReleasesTheEnumeratorAfterTheCaptures()
+    {
+        // A set nobody has taken yet, which is where the shell's start stands between opening
+        // the devices and handing them over. Releasing it keeps the same ordering every
+        // teardown does, because it is the same claim about the same two things.
+        var enumerator = new FakeAudioDeviceEnumerator();
+        FakeAudioCapture mic = enumerator.Add(
+            new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), RecorderFormat);
+        FakeAudioCapture system = enumerator.Add(
+            new CaptureDevice("system", "system", DeviceFlow.Render, true), RecorderFormat);
+        var opened = new CaptureSet(
+            [
+                Spec(enumerator.Open(enumerator.List()[0]), "mic"),
+                Spec(enumerator.Open(enumerator.List()[1]), "system"),
+            ],
+            enumerator);
+
+        opened.Release();
+
+        Assert.Equal(1, mic.Disposals);
+        Assert.Equal(1, system.Disposals);
+        Assert.True(enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
+        Assert.Equal(1, enumerator.Disposals);
+    }
+
+    [Fact]
+    public void StartAll_WhenItRefusesTheSpecs_ReleasesTheEnumeratorAfterTheCaptures()
+    {
+        // The unwind: every device fails to START, so the core releases each and then refuses
+        // to hand back a meeting with zero pipelines. The caller has no handle left on the
+        // enumerator either, having passed ownership with the specs, so anything left here is
+        // held for the process lifetime.
+        var transport = new FakeTapTransport();
+        var enumerator = new FakeAudioDeviceEnumerator();
+        FakeAudioCapture mic = Doomed();
+        FakeAudioCapture system = Doomed();
+        enumerator.Add(new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), mic);
+        enumerator.Add(new CaptureDevice("system", "system", DeviceFlow.Render, true), system);
+        IAudioCapture[] opened =
+        [
+            enumerator.Open(enumerator.List()[0]),
+            enumerator.Open(enumerator.List()[1]),
+        ];
+
+        Assert.Throws<InvalidOperationException>(() => CaptureOrchestrator.StartAll(
+            new CaptureSet([Spec(opened[0], "mic"), Spec(opened[1], "system")], enumerator),
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
+
+        Assert.True(enumerator.Disposed, "the enumerator was stranded by the unwind");
+        Assert.Equal(1, enumerator.Disposals);
+        Assert.True(enumerator.CapturesReleasedFirst,
+            "the enumerator was released while a capture it opened was still live");
+    }
+
+    [Fact]
+    public async Task DisposeAsync_ReleasesTheEnumeratorAfterTheCaptures_AndOnlyOnce()
+    {
+        var transport = new FakeTapTransport();
+        var enumerator = new FakeAudioDeviceEnumerator();
+        enumerator.Add(new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), RecorderFormat);
+        IAudioCapture mic = enumerator.Open(enumerator.List()[0]);
+        CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
+            new CaptureSet([Spec(mic, "mic")], enumerator),
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
+
+        await orchestrator.DisposeAsync().AsTask().WaitAsync(Wait);
+        // A second teardown is reachable in production: an abandoned start disposes the
+        // meeting it built and the shell's own teardown may reach the same orchestrator.
+        await orchestrator.DisposeAsync().AsTask().WaitAsync(Wait);
+
+        Assert.True(enumerator.CapturesReleasedFirst,
+            "the enumerator was released while the capture it opened was still live");
+        Assert.Equal(1, enumerator.Disposals);
+    }
+
+    [Fact]
+    public async Task EndMeetingAsync_WhenTheDrainThrows_StillReleasesTheEnumerator()
+    {
+        // The drain faults at its very first step (DrainAllAsync detaches before it awaits),
+        // which used to skip the dispose entirely: the endpoints AND the enumerator stayed open
+        // for the process lifetime, and the shell's End path carried its own finally to make up
+        // for it. The failure still reaches the caller, since whether the taps flushed is its
+        // business, but the devices are released either way.
+        var transport = new FakeTapTransport();
+        var enumerator = new FakeAudioDeviceEnumerator();
+        var mic = new FakeAudioCapture(RecorderFormat)
+        {
+            DetachError = new IOException("endpoint invalidated"),
+        };
+        enumerator.Add(new CaptureDevice("mic", "mic", DeviceFlow.Capture, true), mic);
+        CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
+            new CaptureSet([Spec(enumerator.Open(enumerator.List()[0]), "mic")], enumerator),
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
+
+        await Assert.ThrowsAsync<IOException>(() => orchestrator.EndMeetingAsync().WaitAsync(Wait));
+
+        Assert.True(enumerator.Disposed, "the enumerator was stranded by the failed drain");
+        Assert.Equal(1, enumerator.Disposals);
+        // Deliberately NOT asserting the ordering here, which the clean teardown above does.
+        // Captures-before-enumerator holds everywhere the teardown SUCCEEDS; this is the path
+        // where it throws part-way, and the release is sequenced in a finally precisely so a
+        // failed teardown cannot strand the endpoints' owner for the process lifetime. The
+        // capture the throw skipped is still live, which is the leak the caller can still act
+        // on; holding the ordering here would mean skipping the release instead.
+        Assert.False(mic.Disposed, "the failing device released after all, so this proves nothing");
+    }
+
+    /// <summary>A capture whose Start throws the way an endpoint that is in use or already
+    /// gone does, which is what makes the core refuse a set of specs it has already taken
+    /// ownership of.</summary>
+    private static FakeAudioCapture Doomed() => new(RecorderFormat)
+    {
+        StartError = new InvalidOperationException("device open failed"),
+    };
+
     [Fact]
     public void StartAll_WhenAnUnfilteredThrowEscapes_ReleasesEveryCaptureAndSession()
     {
@@ -36,13 +165,14 @@ public class CaptureOwnershipTests
         var untouched = new FakeAudioCapture(RecorderFormat);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => CaptureOrchestrator.StartAll(
+            new CaptureSet(
             [
                 Spec(begun, "mic"),
                 Spec(doomed, "system", gate: new GateOptions { OpenThreshold = -1 }),
                 Spec(untouched, "line-in"),
-            ],
+            ]),
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), FastStream(), transport.Create));
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
         // The first pipeline really did begin, so the unwind below is a statement about a
         // path that was taken.
@@ -62,9 +192,9 @@ public class CaptureOwnershipTests
         var b = new FakeAudioCapture(RecorderFormat);
 
         Assert.Throws<ArgumentException>(() => CaptureOrchestrator.StartAll(
-            [Spec(a, "system"), Spec(b, "system")],
+            new CaptureSet([Spec(a, "system"), Spec(b, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), FastStream(), transport.Create));
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
         // Still refused before any device is opened...
         Assert.False(a.Started);

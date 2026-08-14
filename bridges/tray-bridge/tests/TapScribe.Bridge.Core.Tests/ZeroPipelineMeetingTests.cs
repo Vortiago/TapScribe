@@ -32,10 +32,10 @@ public class ZeroPipelineMeetingTests
         var failures = new List<string>();
 
         Assert.Throws<InvalidOperationException>(() => CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { },
             onFailed: (id, _) => failures.Add(id),
-            FastGate(), FastStream(), transport.Create));
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
         // The refusal sits ON TOP of the per-device best-effort path, not instead of it:
         // each device still surfaced its own failure (the shell balloons them) and each

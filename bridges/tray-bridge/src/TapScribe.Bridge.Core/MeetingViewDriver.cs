@@ -15,7 +15,7 @@ public interface IMeetingView
 
 /// <summary>
 /// Drives an <see cref="IMeetingView"/> from a <see cref="MeetingController"/>'s emissions,
-/// marshalled to the UI thread via the supplied <see cref="SynchronizationContext"/>, and
+/// marshalled to the UI thread via the supplied <see cref="IDispatcher"/>, and
 /// surfaces a clear "couldn't load" state when the Recorder is unreachable. This is the
 /// testable heart of opening a past meeting (#168): it owns NO network / settings / window
 /// lifecycle (the caller builds the <see cref="ControlClient"/> + controller and owns the
@@ -25,16 +25,21 @@ public interface IMeetingView
 /// </summary>
 public static class MeetingViewDriver
 {
-    /// <summary>Subscribe the view to the controller's poll emissions (marshalled to
-    /// <paramref name="ui"/>), then ride <see cref="MeetingController.ResumeAsync"/> to the
-    /// terminal summary / failure. A transient-or-unreachable error renders a clear failure in
-    /// the view instead of leaving it on "Loading…".</summary>
+    /// <summary>Subscribe the view to the controller's poll emissions (marshalled through
+    /// <paramref name="dispatcher"/>), then ride <see cref="MeetingController.ResumeAsync"/> to
+    /// the terminal summary / failure. A transient-or-unreachable error renders a clear failure
+    /// in the view instead of leaving it on "Loading…".</summary>
     public static async Task DriveAsync(MeetingController controller, IMeetingView view,
-        SynchronizationContext ui, CancellationToken cancellationToken)
+        IDispatcher dispatcher, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(controller);
+        ArgumentNullException.ThrowIfNull(view);
+        ArgumentNullException.ThrowIfNull(dispatcher);
+
         // Marshal a render to the UI thread, guarding IsDisposed: a poll emission posted just
         // before the window closed must not touch disposed controls.
-        void RenderSafe(PipelineView? poll) => ui.Post(_ => { if (!view.IsDisposed) view.Render(poll); }, null);
+        void RenderSafe(PipelineView? poll) =>
+            dispatcher.Post(() => { if (!view.IsDisposed) view.Render(poll); });
         controller.Updated += poll => RenderSafe(poll);
 
         try

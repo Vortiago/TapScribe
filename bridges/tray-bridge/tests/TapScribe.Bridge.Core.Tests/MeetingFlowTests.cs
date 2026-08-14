@@ -41,7 +41,7 @@ public class MeetingFlowTests
         var mic = new FakeAudioCapture(RecorderFormat);
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [new PipelineSpec(mic, Tap(rec.Port, "mic", session)), new PipelineSpec(system, Tap(rec.Port, "system", session))],
+            new CaptureSet([new PipelineSpec(mic, Tap(rec.Port, "mic", session)), new PipelineSpec(system, Tap(rec.Port, "system", session))]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream());
 
@@ -80,7 +80,7 @@ public class MeetingFlowTests
         string session = await control.CreateDetachedSessionAsync();
         var mic = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [new PipelineSpec(mic, Tap(rec.Port, "mic", session))],
+            new CaptureSet([new PipelineSpec(mic, Tap(rec.Port, "mic", session))]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: FastGate(), stream: FastStream());
 

@@ -97,10 +97,10 @@ public class RealRecorderMeetingE2ETests
             PreRoll = TimeSpan.Zero,
         };
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [
+            new CaptureSet([
                 new PipelineSpec(nora, Tap(rec.Port, "Nora", session)),
                 new PipelineSpec(ed, Tap(rec.Port, "Ed", session)),
-            ],
+            ]),
             onConnected: _ => { }, onFailed: (_, _) => { },
             gate: gate, stream: FastStream());
 

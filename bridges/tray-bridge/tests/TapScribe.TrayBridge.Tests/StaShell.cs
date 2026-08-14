@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 
 namespace TapScribe.TrayBridge.Tests;
@@ -70,9 +69,10 @@ internal sealed class StaShell : IDisposable
 
     private void Loop()
     {
-        // The shell reads SynchronizationContext.Current when Start / End / OpenPastMeeting
-        // run, exactly as it reads the WinForms one in production. Installed here, by the
-        // thread that owns it, rather than marshalled in.
+        // The shell reads SynchronizationContext.Current once, on the message loop's first
+        // turn, exactly as it reads the WinForms one in production, and wraps it in the one
+        // dispatcher its runtime marshals through. Installed here, by the thread that owns it,
+        // rather than marshalled in.
         SynchronizationContext.SetSynchronizationContext(_context);
         _ready.SetResult(); // publishes the line above to the constructor's thread
 
@@ -136,41 +136,39 @@ internal sealed class StaShell : IDisposable
     }
 
     /// <summary>
-    /// Build the tray shell on the STA thread and take responsibility for releasing it there
-    /// — including when the test FAILS. WinForms objects built on this apartment must not be
-    /// left to a finalizer that runs after the apartment is gone, and a test that asserts its
-    /// way out early would otherwise leave exactly that behind.
+    /// Build the tray shell on the STA thread, give it the message loop's first turn, and take
+    /// responsibility for releasing it there, INCLUDING when the test fails. WinForms objects
+    /// built on this apartment must not be left to a finalizer that runs after the apartment is
+    /// gone, and a test that asserts its way out early would otherwise leave exactly that
+    /// behind.
+    ///
+    /// Running the loop-start kick is not a convenience: the shell builds its runtime there,
+    /// because that is the first moment SynchronizationContext.Current is the one every
+    /// marshalled callback goes through. A shell that never got that turn has no runtime, which
+    /// is the state the scheduling test is about and no other test wants.
     /// </summary>
-    /// <param name="dependencies">Overrides the harness's own — for a test that varies one
-    /// port of the outside world and still wants the STA construction and the
-    /// release-on-failure that come with building through here.</param>
+    /// <param name="dependencies">Overrides the harness's own, for a test that varies one port
+    /// of the outside world and still wants the STA construction and the release-on-failure
+    /// that come with building through here. Its kicks are then the caller's to run: only the
+    /// harness's are known here.</param>
     public TrayContext Build(TrayHarness harness, TrayDependencies? dependencies = null)
     {
         ArgumentNullException.ThrowIfNull(harness);
         _built = Get(() => new TrayContext(harness.Settings, dependencies ?? harness.Dependencies));
+        foreach (Action kick in harness.Kicks)
+            Run(kick.Invoke);
         return _built;
     }
 
-    /// <summary>Build the shell and run a Start to completion, draining what it posted — the
-    /// opener every tray test shares. Asserts only that the start SETTLED; whether it
-    /// succeeded is the caller's subject, and several tests are about starts that don't.</summary>
-    public TrayContext BuildAndStart(TrayHarness harness)
+    /// <summary>Quit the way the operator's click does, and let the teardown land: the runtime
+    /// tears the meeting down and then marshals <c>Shutdown</c> BACK to this thread, so the
+    /// shell releases its UI on a drained callback rather than inside the quit itself.</summary>
+    public void Quit(TrayContext tray)
     {
-        TrayContext tray = Build(harness);
-        Run(tray.Start);
-        Assert.True(tray.StartTask!.Wait(CallTimeout), "the start never settled");
+        ArgumentNullException.ThrowIfNull(tray);
+        Task quit = Get(tray.QuitAsync);
+        Assert.True(quit.Wait(CallTimeout), "the quit never settled");
         _ = Drain();
-        return tray;
-    }
-
-    /// <summary>Take a meeting all the way to streaming — the precondition the End-path tests
-    /// share, asserted here so a test that needs a live meeting fails on THAT rather than
-    /// misattributing it to its own subject.</summary>
-    public TrayContext StartMeeting(TrayHarness harness)
-    {
-        TrayContext tray = BuildAndStart(harness);
-        Assert.True(tray.EndItem.Enabled, "the meeting was never published as running");
-        return tray;
     }
 
     /// <summary>
@@ -217,27 +215,6 @@ internal sealed class StaShell : IDisposable
     /// <summary>How many callbacks the shell has posted and not yet had drained.</summary>
     public int Pending => _context.Pending;
 
-    /// <summary>Make the next <c>Post</c> throw, once — the injection point for "something
-    /// after the meeting was published failed". Once only: the shell has to survive one
-    /// failure, not be crippled by every subsequent post failing too.</summary>
-    public void ThrowOnNextPost() => _context.ThrowOnNextPost = true;
-
-    /// <summary>Spin until <paramref name="predicate"/> holds. Bounded, and it polls a real
-    /// state change rather than sleeping for an interval — the same shape as the core
-    /// suite's Poll.UntilAsync.</summary>
-    public static void SpinUntil(Func<bool> predicate, string what)
-    {
-        ArgumentNullException.ThrowIfNull(predicate);
-        var elapsed = Stopwatch.StartNew();
-        while (elapsed.Elapsed < CallTimeout)
-        {
-            if (predicate())
-                return;
-            Thread.Sleep(5);
-        }
-        throw new TimeoutException($"timed out waiting for {what}");
-    }
-
     public void Dispose()
     {
         TrayContext? built = _built;
@@ -278,8 +255,6 @@ internal sealed class StaShell : IDisposable
         private readonly object _lock = new();
         private readonly List<(SendOrPostCallback Callback, object? State)> _posted = [];
 
-        public bool ThrowOnNextPost { get; set; }
-
         public int Pending
         {
             get { lock (_lock) return _posted.Count; }
@@ -288,14 +263,7 @@ internal sealed class StaShell : IDisposable
         public override void Post(SendOrPostCallback d, object? state)
         {
             lock (_lock)
-            {
-                if (ThrowOnNextPost)
-                {
-                    ThrowOnNextPost = false;
-                    throw new InvalidOperationException("the post failed");
-                }
                 _posted.Add((d, state));
-            }
         }
 
         public override void Send(SendOrPostCallback d, object? state) =>

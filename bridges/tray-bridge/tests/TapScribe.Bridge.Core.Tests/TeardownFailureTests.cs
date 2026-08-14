@@ -34,9 +34,9 @@ public class TeardownFailureTests
         };
         var system = new FakeAudioCapture(RecorderFormat);
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(mic, "mic"), Spec(system, "system")],
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         mic.Emit(Loud(40));
         system.Emit(Loud(40));
