@@ -45,6 +45,13 @@ internal sealed partial class SecKeychainItems : IKeychainItems
         if (status != KeychainStatus.Success)
             return status;
 
+        // A success with nothing attached is not a shape this query should be able to
+        // produce, since it asks for kSecReturnData. It is guarded anyway because the two
+        // calls below take the process down rather than failing on a null, and an item with
+        // no data (one another tool wrote) would be an odd way to lose the whole tray.
+        if (data == IntPtr.Zero)
+            return KeychainStatus.ItemNotFound;
+
         // Copy-rule: SecItemCopyMatching hands back an owned CFData, and it is not the
         // scope's because it was not created here.
         try
