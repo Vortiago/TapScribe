@@ -537,6 +537,79 @@ public sealed class BridgeRuntime
         }
     }
 
+    /// <summary>
+    /// The local Past-meetings history (#168), newest first. Read from the store on every call
+    /// rather than snapshotted, because the menu rebuilds its submenu from this each time it
+    /// opens and has to reflect meetings ended since it was last shown. An unreadable history
+    /// degrades to empty in the store, so this never throws and the menu shows its placeholder.
+    /// </summary>
+    public IReadOnlyList<MeetingRecord> PastMeetings() => _deps.HistoryStore.Load().Meetings;
+
+    /// <summary>The most recently opened past meeting's poll, so a test can await the real one.
+    /// Each open is independent (a window apiece), so this is the latest rather than all of
+    /// them: nothing in the runtime waits on it.</summary>
+    public Task? PastMeetingTask
+    {
+        get { lock (_gate) return _pastMeetingTask; }
+    }
+
+    private Task? _pastMeetingTask;
+
+    /// <summary>
+    /// Open a past meeting (#168) in a window of its OWN, isolated from the status line and the
+    /// Start/End commands: re-opening last week's notes must never disturb a live meeting. The
+    /// window shows its loading state immediately, then a <see cref="MeetingController"/> ride
+    /// takes it to the summary (or to a "no longer available" failure). Read-only: it never
+    /// drains and never re-triggers, so opening one alongside a live meeting, or alongside that
+    /// meeting's own End, is safe.
+    /// </summary>
+    public void OpenPastMeeting(MeetingRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        BridgeSettings settings;
+        lock (_gate)
+            settings = _settings;
+
+        IMeetingWindow window = _view.OpenMeetingWindow();
+        // Never disposed, deliberately, and this is the considered answer to CodeQL's
+        // cs/local-not-disposed here, not an oversight.
+        //
+        // Two parties hold it: the window, which cancels on close, and the poll loop, which
+        // reads its token until it returns. Their lifetimes end in EITHER order, so every
+        // disposal point is wrong for one of them: dispose on close and the loop is left holding
+        // a dead source; dispose when the loop ends and a later close calls Cancel on a disposed
+        // one, which throws, out of a fire-and-forget task with nothing to report it. Disposal
+        // can be made safe (unhook the close handler first, on the UI thread both run on), but
+        // only by reinstating the arbitration protocol this replaced, and there is nothing on
+        // the other side of that trade: a CancellationTokenSource with no linked source, no
+        // timer and no observed WaitHandle holds nothing unmanaged, so Dispose is an
+        // optimisation and the question does not arise. The behaviour it protects, that the loop
+        // always holds a live token so closing the window stops it quietly rather than rendering
+        // a failure, is pinned in MeetingViewDriverTests.
+        var cancellation = new CancellationTokenSource();
+        window.Closed += cancellation.Cancel;
+
+        Task open = OpenPastMeetingAsync(settings, record.SessionId, window, cancellation.Token);
+        lock (_gate)
+            _pastMeetingTask = open;
+    }
+
+    private async Task OpenPastMeetingAsync(
+        BridgeSettings settings, string sessionId, IMeetingWindow window,
+        CancellationToken cancellationToken)
+    {
+        using var control = new ControlClient(
+            settings.Host, settings.Port, settings.Tls, settings.Token,
+            allowSelfSignedCert: settings.AllowSelfSignedCert);
+        var controller = new MeetingController(
+            control, sessionId, pollDelay: ct => Task.Delay(_budgets.PollInterval, ct));
+        // The render-marshalling and the ride to the summary are MeetingViewDriver's; this
+        // supplies the ControlClient, the dispatcher and the window.
+        await MeetingViewDriver
+            .DriveAsync(controller, window, _dispatcher, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private void FailPipeline(string reason, string? stage = null) =>
         Failed(
             new TrayStatus.PipelineFailed(reason),

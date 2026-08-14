@@ -206,7 +206,17 @@ internal sealed class RuntimeHarness : IDisposable
 
     public FakeAudioDeviceEnumerator Enumerator { get; } = new();
     public FakeTrayView View { get; } = new();
-    public InlineDispatcher Dispatcher { get; } = new();
+
+    /// <summary>Runs once, the first time the runtime posts anything. Set by a test that has to
+    /// act at an instant it cannot otherwise reach: the operator closing a meeting window the
+    /// moment it has something to show, while the poll behind it is still running. Read through
+    /// the dispatcher rather than passed to it, so a test can set it AFTER the harness (and the
+    /// window it needs to close) exists.</summary>
+    public Action? AfterFirstPost { get; set; }
+
+    public InlineDispatcher Dispatcher => _dispatcher ??= new InlineDispatcher(() => AfterFirstPost?.Invoke());
+
+    private InlineDispatcher? _dispatcher;
 
     public const string SessionId = "2026-08-14T09-00-00";
 
@@ -368,6 +378,15 @@ internal sealed class RuntimeHarness : IDisposable
         Task? end = runtime.EndTask;
         Assert.NotNull(end);
         await end.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    /// <summary>Await the most recently opened past meeting's poll, on the same terms.</summary>
+    public static async Task PastMeetingSettledAsync(BridgeRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        Task? open = runtime.PastMeetingTask;
+        Assert.NotNull(open);
+        await open.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
     }
 
     public void Dispose()
