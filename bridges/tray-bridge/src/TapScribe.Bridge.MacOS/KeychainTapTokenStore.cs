@@ -47,6 +47,12 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
         _items.Delete(ServiceName, AccountName);
         if (!string.IsNullOrEmpty(token))
             _items.Add(ServiceName, AccountName, token);
+
+        // A Keychain that refuses the add leaves the operator believing a token was saved,
+        // and this seam has nowhere to say otherwise: the return value is the at-rest value,
+        // and throwing would fail BridgeSettingsStore.Save outright, losing every other
+        // setting over a secret the tray can still be handed by hand. Reporting it needs a
+        // channel the dialog can show, which is a later slice's job.
         return null;
     }
 
