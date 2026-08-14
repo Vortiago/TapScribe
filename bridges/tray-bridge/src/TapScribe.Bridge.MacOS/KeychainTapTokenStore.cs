@@ -32,12 +32,18 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
         return null;
     }
 
-    /// <summary>The plaintext from the Keychain. <paramref name="atRest"/> is ignored: the
-    /// macOS settings file has never carried a token, which is what Write's null means.
-    /// </summary>
+    /// <summary>The plaintext from the Keychain, or "" when there is none to be had.
+    /// <paramref name="atRest"/> is ignored: the macOS settings file has never carried a
+    /// token, which is what Write's null means.</summary>
     public string Read(string? atRest)
     {
-        int status = _items.Copy(ServiceName, AccountName, out string? secret);
-        return status == KeychainStatus.ItemNotFound ? "" : secret!;
+        // Every status that is not a secret in hand is "no token": not found is first
+        // launch, and the refusals (a locked keychain, a dismissed unlock prompt, an
+        // authorisation the operator revoked) are all things the tray cannot fix and must
+        // not fail to launch over. What is lost is the saved token for this launch; the
+        // operator re-enters it in the dialog, and a save overwrites the unread item.
+        return _items.Copy(ServiceName, AccountName, out string? secret) == KeychainStatus.Success
+            ? secret ?? ""
+            : "";
     }
 }

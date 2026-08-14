@@ -59,4 +59,17 @@ public class KeychainTapTokenStoreTests
 
         Assert.Equal("", store.Read(null));
     }
+
+    [Fact]
+    public void Read_AKeychainThatRefuses_DegradesToNoToken()
+    {
+        // A locked keychain, or an operator dismissing the unlock prompt. The tray has to
+        // launch with the rest of its settings and an empty token field, so a refusal reads
+        // exactly like nothing saved. BridgeSettingsStore does catch a throwing token store,
+        // but a dismissed prompt is ordinary, not exceptional, so it never gets that far.
+        var store = new KeychainTapTokenStore(
+            new FakeKeychain { Refuses = KeychainStatus.InteractionNotAllowed });
+
+        Assert.Equal("", store.Read(null));
+    }
 }
