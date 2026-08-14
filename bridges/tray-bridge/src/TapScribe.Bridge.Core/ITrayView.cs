@@ -38,4 +38,23 @@ public interface ITrayView
     /// <summary>Enable or disable the two meeting commands. Both false is a legitimate state:
     /// a meeting that is ending, or a pipeline in flight.</summary>
     void SetMenuState(bool canStart, bool canEnd);
+
+    /// <summary>
+    /// Open a window for one meeting's notes and hand it back for the runtime to render into.
+    /// Each call is a NEW window: a finished meeting and a re-opened past one are independent,
+    /// and neither may disturb the live status line or the Start/End commands.
+    /// </summary>
+    IMeetingWindow OpenMeetingWindow();
+}
+
+/// <summary>
+/// A per-meeting window: an <see cref="IMeetingView"/> the runtime renders poll emissions
+/// into, plus the one thing the runtime needs back from it. <see cref="Closed"/> is what lets
+/// the runtime stop polling the instant the operator closes the window, so a re-opened past
+/// meeting does not keep talking to the Recorder for as long as the process lives.
+/// </summary>
+public interface IMeetingWindow : IMeetingView
+{
+    /// <summary>Raised on the UI thread when the operator closes the window.</summary>
+    event Action? Closed;
 }

@@ -35,10 +35,19 @@ public sealed class BridgeRuntime
     private Task? _startTask;
     private DateTimeOffset _startedAt;           // wall-clock start, for the Past-meetings history (#168)
 
+    private Task? _endTask;
+    // The in-flight End/Resume flow's cancellation, published so teardown can stop it and
+    // cleared when the flow ends. Never disposed: see the construction site for why that is
+    // the simplification and not the leak.
+    private CancellationTokenSource? _flowCancellation;
+
     private TrayStatus? _lastStatus;             // what the view is currently showing
 
+    private readonly RuntimeBudgets _budgets;
+
     public BridgeRuntime(
-        ITrayView view, IDispatcher dispatcher, BridgeDependencies dependencies, BridgeSettings settings)
+        ITrayView view, IDispatcher dispatcher, BridgeDependencies dependencies, BridgeSettings settings,
+        RuntimeBudgets? budgets = null)
     {
         ArgumentNullException.ThrowIfNull(view);
         ArgumentNullException.ThrowIfNull(dispatcher);
@@ -48,6 +57,7 @@ public sealed class BridgeRuntime
         _dispatcher = dispatcher;
         _deps = dependencies;
         _settings = settings;
+        _budgets = budgets ?? new RuntimeBudgets();
     }
 
     /// <summary>The in-flight Start, so a test can await the real one instead of polling.</summary>
@@ -229,6 +239,209 @@ public sealed class BridgeRuntime
             ApplyStatus(new TrayStatus.Error(message));
             _view.ShowNotice(title, message, NoticeKind.Warning);
         });
+
+    /// <summary>The in-flight End (or Resume) flow, so a test can await the real one.</summary>
+    public Task? EndTask
+    {
+        get { lock (_gate) return _endTask; }
+    }
+
+    /// <summary>
+    /// End meeting (issue #107): close every open tap, drain it, and then run the
+    /// end-of-meeting pipeline, showing progress and the finished summary. Detaches the
+    /// running meeting atomically so nothing else can race it; with nothing running there is
+    /// nothing to end.
+    /// </summary>
+    public void End()
+    {
+        (CaptureOrchestrator? orchestrator, IAudioDeviceEnumerator? enumerator,
+            string? sessionId, DateTimeOffset startedAt) = TakeMeeting();
+        if (orchestrator is null || sessionId is null)
+            return;
+
+        BridgeSettings settings;
+        lock (_gate)
+            settings = _settings;
+
+        // Busy guard: both commands disabled for the whole pipeline, so a second End cannot
+        // fire a second one.
+        _view.SetMenuState(canStart: false, canEnd: false);
+        ApplyStatus(new TrayStatus.Ending());
+        Task end = EndAsync(settings, sessionId, startedAt, orchestrator, enumerator);
+        lock (_gate)
+            _endTask = end;
+    }
+
+    private Task EndAsync(BridgeSettings settings, string sessionId, DateTimeOffset startedAt,
+        CaptureOrchestrator orchestrator, IAudioDeviceEnumerator? enumerator)
+    {
+        bool process = settings.ProcessOnEnd;
+        // Persist the resume state and the Past-meetings entry only when a pipeline will
+        // actually run: a record-only meeting has no pipeline to resume across a restart and
+        // no summary to re-open, so it stays out of both. Both writes are best-effort, and a
+        // failed write never breaks the drain.
+        if (process)
+        {
+            _deps.StateStore.Save(new MeetingState { SessionId = sessionId });
+            _deps.HistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
+        }
+        return RunPipelineFlowAsync(
+            settings, sessionId,
+            // Record-only (ProcessOnEnd == false) still drains below but skips the
+            // trigger/poll, ending at a terminal Saved view; the default runs the full
+            // pipeline (issue #107).
+            run: (controller, ct) => controller.EndAsync(triggerPipeline: process, cancellationToken: ct),
+            // Close every open tap (gate close + Drain) BEFORE the pipeline strips; the
+            // controller awaits this to completion before it triggers.
+            drainAsync: async () =>
+            {
+                try
+                {
+                    // End-meeting teardown is ONE call, drain then stop+dispose, so it cannot
+                    // be reduced to a drain that leaks the devices and lets them stream past
+                    // the barrier (see EndMeetingAsync).
+                    await orchestrator.EndMeetingAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    // Release the endpoints even if the teardown above failed. Sequenced after
+                    // the await it would be skipped on a throw, and nothing else holds this
+                    // enumerator once End has detached the meeting, so the devices would stay
+                    // open until the process exited.
+                    enumerator?.Dispose();
+                }
+            });
+    }
+
+    // Build the controller, wire its emissions to the UI thread, run the flow (End or Resume),
+    // and always clear the persisted state when it terminates. The one place the End and
+    // Resume paths share: they differ only in the run delegate and the drain.
+    private async Task RunPipelineFlowAsync(BridgeSettings settings, string sessionId,
+        Func<MeetingController, CancellationToken, Task> run, Func<Task>? drainAsync)
+    {
+        using var control = new ControlClient(
+            settings.Host, settings.Port, settings.Tls, settings.Token,
+            allowSelfSignedCert: settings.AllowSelfSignedCert);
+        var controller = new MeetingController(
+            control, sessionId,
+            pollDelay: ct => Task.Delay(_budgets.PollInterval, ct), drainAsync: drainAsync);
+        controller.Updated += view => _dispatcher.Post(() => RenderPipeline(view));
+        controller.OperatorNotice += message =>
+            _dispatcher.Post(() => _view.ShowNotice("Meeting", message, NoticeKind.Warning));
+
+        // The flow's poll loop would otherwise run uncancellable: teardown ends the shell and
+        // leaves it polling into a dead UI. Publish a source teardown can cancel. Never
+        // disposed, deliberately: a CancellationTokenSource with no linked source, no timer and
+        // no observed WaitHandle holds nothing unmanaged, so Dispose is an optimisation, while
+        // Cancel-after-Dispose throws. Not disposing removes the race rather than arbitrating
+        // it.
+        var cancellation = new CancellationTokenSource();
+        lock (_gate)
+            _flowCancellation = cancellation;
+
+        bool handled = false;
+        try
+        {
+            await run(controller, cancellation.Token).ConfigureAwait(false);
+            handled = true;
+        }
+        catch (Exception ex) when (
+            ex is HttpRequestException or OperationCanceledException or InvalidOperationException)
+        {
+            // The Recorder is unreachable / timed out / refused the trigger after the taps
+            // drained: classify it and surface a clear error so the shell does not wedge on a
+            // processing state. The filter keeps this off CodeQL's catch-all radar.
+            StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
+            _dispatcher.Post(() => FailPipeline(failure.Message));
+            handled = true;
+        }
+        finally
+        {
+            _deps.StateStore.Clear();
+            lock (_gate)
+                if (ReferenceEquals(_flowCancellation, cancellation))
+                    _flowCancellation = null; // this flow is over; teardown has nothing to cancel
+            if (!handled)
+                // An exception OUTSIDE the filter above is escaping this fire-and-forget task.
+                // Nobody observes it, and both commands are disabled with the header stuck on
+                // "Ending meeting…": the shell is unusable until it is restarted. The exception
+                // still propagates (it is not this method's to classify); this only returns the
+                // menu to a usable state on its way out.
+                _dispatcher.Post(() => FailPipeline("The meeting could not be completed."));
+        }
+    }
+
+    // Render a MeetingController emission: the status line tracks the pipeline phase, and the
+    // terminal phases open the summary window / surface the failure.
+    private void RenderPipeline(PipelineView view)
+    {
+        switch (view.Phase)
+        {
+            case PipelinePhase.Ending:
+                ApplyStatus(new TrayStatus.Ending());
+                break;
+            case PipelinePhase.Running:
+                ApplyStatus(new TrayStatus.Processing(view.Progress ?? "Processing…"));
+                break;
+            case PipelinePhase.Done:
+                ApplyStatus(new TrayStatus.SummaryReady());
+                _view.ShowNotice(
+                    "Meeting summary ready", "Your meeting notes are ready.", NoticeKind.Information);
+                _view.OpenMeetingWindow().Render(view); // opened straight at the finished summary (#107)
+                _view.SetMenuState(canStart: true, canEnd: false);
+                break;
+            case PipelinePhase.Failed:
+                FailPipeline(view.FailureReason ?? "The end-of-meeting pipeline failed.", view.FailureStage);
+                break;
+            case PipelinePhase.Saved:
+                // Record-only End (ProcessOnEnd == false): the taps drained and the recordings
+                // are saved on the Recorder, but nothing was transcribed or summarized. A brief
+                // cue and straight back to idle: there is no summary window to open.
+                _view.ShowNotice(
+                    "Recording saved",
+                    "The meeting was recorded. Transcribe or summarize it from the dashboard.",
+                    NoticeKind.Information);
+                ResetIdle();
+                break;
+            default:
+                // Idle / Recording: a resumed session with no live pipeline; back to idle.
+                ResetIdle();
+                break;
+        }
+    }
+
+    private void FailPipeline(string reason, string? stage = null)
+    {
+        ApplyStatus(new TrayStatus.PipelineFailed(reason));
+        _view.ShowNotice(
+            "Meeting summary failed", stage is null ? reason : $"{stage}: {reason}", NoticeKind.Warning);
+        _view.SetMenuState(canStart: true, canEnd: false);
+    }
+
+    private void ResetIdle()
+    {
+        _view.SetMenuState(canStart: true, canEnd: false);
+        ApplyStatus(new TrayStatus.Idle());
+    }
+
+    // Atomically detach the running meeting's orchestrator + enumerator + session id, leaving
+    // all of them null. Shared by End (which drains and triggers the pipeline) and teardown
+    // (which tears down without touching the menu, since it is exiting).
+    private (CaptureOrchestrator?, IAudioDeviceEnumerator?, string?, DateTimeOffset) TakeMeeting()
+    {
+        lock (_gate)
+        {
+            CaptureOrchestrator? orchestrator = _orchestrator;
+            IAudioDeviceEnumerator? enumerator = _enumerator;
+            string? sessionId = _sessionId;
+            DateTimeOffset startedAt = _startedAt;
+            _orchestrator = null;
+            _enumerator = null;
+            _sessionId = null;
+            _startedAt = default; // cleared with the rest: there is no active meeting
+            return (orchestrator, enumerator, sessionId, startedAt);
+        }
+    }
 
     /// <summary>
     /// Apply a status to the view, skipping the one already showing: at the one point that

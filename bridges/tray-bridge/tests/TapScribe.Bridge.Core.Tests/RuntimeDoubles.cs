@@ -58,6 +58,61 @@ internal sealed class FakeTrayView : ITrayView
             _canEnd = canEnd;
         }
     }
+
+    /// <summary>Every meeting window opened, in order. A window per call is the contract, so
+    /// the count is how a test says "the summary opened once" or "re-opening a past meeting
+    /// did not reuse the live one's window".</summary>
+    public IReadOnlyList<FakeMeetingWindow> Windows
+    {
+        get { lock (_lock) return [.. _windows]; }
+    }
+
+    private readonly List<FakeMeetingWindow> _windows = [];
+
+    public IMeetingWindow OpenMeetingWindow()
+    {
+        var window = new FakeMeetingWindow();
+        lock (_lock) _windows.Add(window);
+        return window;
+    }
+}
+
+/// <summary>A meeting window that records what was rendered into it instead of drawing it,
+/// and can be closed the way an operator would.</summary>
+internal sealed class FakeMeetingWindow : IMeetingWindow
+{
+    private readonly object _lock = new();
+    private readonly List<PipelineView?> _rendered = [];
+
+    public event Action? Closed;
+
+    public bool IsDisposed { get; private set; }
+
+    /// <summary>Everything rendered, in order. A null entry is the pre-first-poll loading
+    /// state, which is a render like any other.</summary>
+    public IReadOnlyList<PipelineView?> Rendered
+    {
+        get { lock (_lock) return [.. _rendered]; }
+    }
+
+    /// <summary>The last thing rendered, or null if nothing was.</summary>
+    public PipelineView? Last
+    {
+        get { lock (_lock) return _rendered.Count == 0 ? null : _rendered[^1]; }
+    }
+
+    public void Render(PipelineView? view)
+    {
+        lock (_lock) _rendered.Add(view);
+    }
+
+    /// <summary>Close the window the way the operator does: the runtime is expected to stop
+    /// polling, and a render after this must not reach a disposed window.</summary>
+    public void Close()
+    {
+        IsDisposed = true;
+        Closed?.Invoke();
+    }
 }
 
 /// <summary>
@@ -109,6 +164,33 @@ internal sealed class RuntimeHarness : IDisposable
 
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
 
+    /// <summary>
+    /// A live Recorder to run against, instead of the refused port. Set it and the mint goes
+    /// through a real <see cref="ControlClient"/>, so End drains real taps, triggers the real
+    /// end-of-meeting pipeline and polls it to a real summary. The End path is the one that
+    /// genuinely has to talk to a Recorder: faking the control client there would leave every
+    /// step of it unexercised. Pair with <see cref="RecorderSettings"/>.
+    /// </summary>
+    public FakeRecorder? Recorder { get; init; }
+
+    /// <summary>The settings that reach <see cref="Recorder"/>: its port and the token it was
+    /// started with.</summary>
+    public static BridgeSettings RecorderSettings(FakeRecorder recorder)
+    {
+        ArgumentNullException.ThrowIfNull(recorder);
+        return new BridgeSettings
+        {
+            Host = "127.0.0.1",
+            Port = recorder.Port,
+            Identity = "alice",
+            Name = "Alice",
+            Token = "tok-abc",
+            Devices = [],
+        };
+    }
+
+    private readonly HttpClient _http = new();
+
     public MeetingStateStore StateStore => _stateStore ??= new MeetingStateStore(_directory);
 
     private MeetingStateStore? _stateStore;
@@ -142,11 +224,20 @@ internal sealed class RuntimeHarness : IDisposable
 
     public BridgeDependencies Dependencies => _dependencies ??= new BridgeDependencies(
         () => Enumerator,
-        async (_, cancellationToken) =>
+        async (settings, cancellationToken) =>
         {
             _mintReached.TrySetResult();
             if (MintError is not null)
                 throw MintError;
+            if (Recorder is not null)
+            {
+                using var control = new ControlClient(
+                    settings.Host, settings.Port, settings.Tls, settings.Token, _http);
+                SessionIdInUse =
+                    await control.CreateDetachedSessionAsync(cancellationToken).ConfigureAwait(false);
+                return SessionIdInUse;
+            }
+            SessionIdInUse = SessionId;
             if (!HoldMint)
                 return SessionId;
             return await _mint.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -157,7 +248,21 @@ internal sealed class RuntimeHarness : IDisposable
 
     private BridgeDependencies? _dependencies;
 
-    public BridgeRuntime Build() => new(View, Dispatcher, Dependencies, Settings);
+    /// <summary>The detached session the running meeting taps into, as the mint handed it out.
+    /// Null until a Start reaches the mint.</summary>
+    public string? SessionIdInUse { get; private set; }
+
+    /// <summary>Budgets short enough that a flow settles inside a test's patience. The values
+    /// are backstops in production, so shortening them changes no behaviour: what a test must
+    /// never do is wait out the shipped 1.5 s poll interval per pipeline tick.</summary>
+    public RuntimeBudgets Budgets { get; init; } = new()
+    {
+        PollInterval = TimeSpan.FromMilliseconds(10),
+        StartSettleTimeout = TimeSpan.FromSeconds(5),
+        QuitTeardownCap = TimeSpan.FromSeconds(5),
+    };
+
+    public BridgeRuntime Build() => new(View, Dispatcher, Dependencies, Settings, Budgets);
 
     /// <summary>Await the in-flight Start. Asserts only that it SETTLED: whether it succeeded
     /// is the caller's subject, and several tests are about starts that do not.</summary>
@@ -169,8 +274,18 @@ internal sealed class RuntimeHarness : IDisposable
         await start.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
     }
 
+    /// <summary>Await the in-flight End (or Resume) flow, on the same terms.</summary>
+    public static async Task EndSettledAsync(BridgeRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        Task? end = runtime.EndTask;
+        Assert.NotNull(end);
+        await end.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
     public void Dispose()
     {
+        _http.Dispose();
         try
         {
             if (Directory.Exists(_directory))
