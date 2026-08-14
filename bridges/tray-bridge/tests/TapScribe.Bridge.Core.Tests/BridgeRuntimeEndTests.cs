@@ -62,7 +62,7 @@ public class BridgeRuntimeEndTests
     /// teardown is exercised with no Recorder in the picture at all.</summary>
     private static BridgeSettings RecordOnly()
     {
-        BridgeSettings settings = new RuntimeHarness().Settings;
+        BridgeSettings settings = RuntimeHarness.DefaultSettings();
         settings.ProcessOnEnd = false;
         return settings;
     }

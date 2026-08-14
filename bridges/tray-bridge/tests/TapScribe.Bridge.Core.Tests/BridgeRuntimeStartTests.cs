@@ -185,7 +185,7 @@ public class BridgeRuntimeStartTests
         // meeting ends. The device is named by the IDENTITY its tap streams under, which is what
         // the Recorder attributes its recordings to, not by the endpoint's device name.
         const string micIdentity = "Alice";
-        BridgeSettings settings = new RuntimeHarness().Settings;
+        BridgeSettings settings = RuntimeHarness.DefaultSettings();
         settings.Devices =
         [
             new DeviceSelection.FollowDefault(DeviceFlow.Capture, micIdentity, micIdentity),

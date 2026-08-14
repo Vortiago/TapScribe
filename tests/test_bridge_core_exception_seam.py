@@ -31,7 +31,14 @@ CORE = Path(__file__).resolve().parent.parent / "bridges" / "tray-bridge" / "src
 _COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 
 
-@pytest.mark.parametrize("source", sorted(CORE.glob("*.cs")), ids=lambda p: p.name)
+# rglob, not glob: a gate that stops covering the moment Core grows a subdirectory is
+# worse than no gate, because it still reports green. The assert is the other half of
+# that: an empty parametrize also passes.
+SOURCES = sorted(CORE.rglob("*.cs"))
+assert SOURCES, f"no C# sources under {CORE}: the gate is pointed at the wrong path"
+
+
+@pytest.mark.parametrize("source", SOURCES, ids=lambda p: p.name)
 def test_bridge_core_names_no_windows_specific_exception_type(source: Path) -> None:
     code = _COMMENT_RE.sub("", source.read_text(encoding="utf-8"))
     assert "COMException" not in code, (

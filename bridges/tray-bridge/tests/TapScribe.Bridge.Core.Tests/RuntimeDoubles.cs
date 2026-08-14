@@ -248,16 +248,21 @@ internal sealed class RuntimeHarness : IDisposable
     public static BridgeSettings RecorderSettings(FakeRecorder recorder)
     {
         ArgumentNullException.ThrowIfNull(recorder);
-        return new BridgeSettings
-        {
-            Host = "127.0.0.1",
-            Port = recorder.Port,
-            Identity = "alice",
-            Name = "Alice",
-            Token = "tok-abc",
-            Devices = [],
-        };
+        return RecorderSettings(recorder.Port);
     }
+
+    /// <summary>The same, for a scripted server that is not a whole <see cref="FakeRecorder"/>.
+    /// Taking the port rather than the fake is what keeps this ONE spelling: both fakes expose
+    /// a port and nothing else here is about which of them is answering.</summary>
+    public static BridgeSettings RecorderSettings(int port) => new()
+    {
+        Host = "127.0.0.1",
+        Port = port,
+        Identity = "alice",
+        Name = "Alice",
+        Token = "tok-abc",
+        Devices = [],
+    };
 
     private readonly HttpClient _http = new();
 
@@ -290,7 +295,12 @@ internal sealed class RuntimeHarness : IDisposable
     /// nothing listens on: a loopback connect there is refused immediately, so any request a
     /// pipeline DOES make fails fast and deterministically: no server, no timeout, and no
     /// wall-clock in any assertion.</summary>
-    public BridgeSettings Settings { get; init; } = new()
+    public BridgeSettings Settings { get; init; } = DefaultSettings();
+
+    /// <summary>The same defaults, without a harness. A test that only wants to vary one field
+    /// reaches for this rather than constructing (and abandoning) a whole disposable harness to
+    /// read one property off it.</summary>
+    public static BridgeSettings DefaultSettings() => new()
     {
         Host = "127.0.0.1",
         Port = 9, // discard/unassigned: connection refused, instantly

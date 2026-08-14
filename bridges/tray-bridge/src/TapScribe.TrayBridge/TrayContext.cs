@@ -52,9 +52,12 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         _initialSettings = settings;
         _deps = dependencies;
 
-        _statusItem = new ToolStripMenuItem("○ Idle") { Enabled = false };
-        _startItem = new ToolStripMenuItem("Start meeting", null, (_, _) => Runtime.Start());
-        _endItem = new ToolStripMenuItem("End meeting", null, (_, _) => Runtime.End()) { Enabled = false };
+        // The idle header from the same StatusView every later change comes through, rather
+        // than a hand-copy of its output: nothing renders a status until the operator acts,
+        // so this string IS the menu header on a normal launch.
+        _statusItem = new ToolStripMenuItem(StatusView.For(new TrayStatus.Idle()).Header) { Enabled = false };
+        _startItem = new ToolStripMenuItem("Start meeting", null, (_, _) => OnRuntime(r => r.Start()));
+        _endItem = new ToolStripMenuItem("End meeting", null, (_, _) => OnRuntime(r => r.End())) { Enabled = false };
         // Past meetings (#168): rebuilt from the persisted history each time it opens, so it
         // reflects meetings ended since it was last shown. Each item opens that meeting's
         // own window; the submenu never touches the live status line or Start/End controls.
@@ -98,12 +101,23 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         runtime.Startup(); // resume a pipeline a previous tray session left running
     }
 
-    /// <summary>The runtime behind every command. It exists from the message loop's first turn,
-    /// and a menu item cannot be clicked before that, so a missing one is a wiring bug rather
-    /// than a state a command has to tolerate. <see cref="QuitAsync"/> is the one exception, and
-    /// says so.</summary>
-    private BridgeRuntime Runtime => _runtime
-        ?? throw new InvalidOperationException("The tray's runtime is built when the message loop starts.");
+    /// <summary>
+    /// Run a command against the runtime, or do nothing if it does not exist yet.
+    ///
+    /// That window is real, not theoretical: the icon goes visible in the indicator's
+    /// constructor and the menu is built before <c>Application.Run</c>, while the runtime is
+    /// built from a 200 ms one-shot timer (the earliest point
+    /// <c>SynchronizationContext.Current</c> is the WinForms one). So the tray is on screen and
+    /// clickable for about a fifth of a second with no runtime behind it. Throwing there would
+    /// surface an unhandled-exception dialog out of a click handler; doing nothing matches what
+    /// the operator already believes, which is that they clicked a tray that had not finished
+    /// starting.
+    /// </summary>
+    private void OnRuntime(Action<BridgeRuntime> command)
+    {
+        if (_runtime is { } runtime)
+            command(runtime);
+    }
 
     // ---- Test-visible state (read-only) -------------------------------------------------
     // The tray's observable surface, so TapScribe.TrayBridge.Tests can assert on what the
@@ -189,7 +203,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         foreach (ToolStripItem item in previous)
             item.Dispose();
 
-        IReadOnlyList<MeetingRecord> meetings = Runtime.PastMeetings();
+        IReadOnlyList<MeetingRecord> meetings = _runtime?.PastMeetings() ?? [];
         if (meetings.Count == 0)
         {
             _pastMeetingsItem.DropDownItems.Add(new ToolStripMenuItem("(No past meetings)") { Enabled = false });
@@ -197,7 +211,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         }
         foreach (MeetingRecord record in meetings)
             _pastMeetingsItem.DropDownItems.Add(
-                new ToolStripMenuItem(record.MenuLabel(), null, (_, _) => Runtime.OpenPastMeeting(record)));
+                new ToolStripMenuItem(record.MenuLabel(), null, (_, _) => OnRuntime(r => r.OpenPastMeeting(record))));
     }
 
     private void OpenSettings()
@@ -209,16 +223,20 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         // The dialog's live level meters (#152) open a second, display-only shared-mode capture
         // per device; this enumerator opens them and outlives those captures (the form disposes
         // them on close). Declared before the form so it disposes AFTER it, captures first.
-        using var meterEnumerator = new WasapiDeviceEnumerator();
-        using var form = new SettingsForm(Runtime.Settings, ListDevices, meterEnumerator.Open);
+        // Before the loop's first turn there is no runtime and so no settings to edit; the
+        // dialog would seed itself from nothing.
+        if (_runtime is not { } runtime)
+            return;
+        using IAudioDeviceEnumerator meterEnumerator = _deps.Bridge.OpenEnumerator();
+        using var form = new SettingsForm(runtime.Settings, ListDevices, meterEnumerator.Open);
         if (form.ShowDialog() != DialogResult.OK)
             return;
-        Runtime.ApplySettings(form.Result);
+        OnRuntime(r => r.ApplySettings(form.Result));
     }
 
-    private static IReadOnlyList<CaptureDevice> ListDevices()
+    private IReadOnlyList<CaptureDevice> ListDevices()
     {
-        using var enumerator = new WasapiDeviceEnumerator();
+        using IAudioDeviceEnumerator enumerator = _deps.Bridge.OpenEnumerator();
         return enumerator.List();
     }
 

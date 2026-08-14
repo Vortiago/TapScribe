@@ -54,3 +54,7 @@ Thumbs.db
 config/summarizer.json
 .bench-da-no.json
 .tapscribe-install-warnings.json
+
+# `dotnet test --logger trx` drops these beside the test project. Build output, and a
+# 4000-line one lands in `git add -A` if it is not ignored.
+TestResults/
