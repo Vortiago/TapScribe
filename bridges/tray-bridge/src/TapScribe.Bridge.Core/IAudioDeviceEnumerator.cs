@@ -15,8 +15,9 @@ namespace TapScribe.Bridge.Core;
 /// <see cref="IDisposable"/> is part of the seam because every real backend holds
 /// native handles for the device tree it walks. Disposal releases those handles, and
 /// nothing else: the captures it handed out have their own owners. An enumerator hands
-/// its endpoint over to each capture it opens, so it must OUTLIVE them - dispose the
-/// captures first, then the enumerator. Same contract as
+/// its endpoint over to each capture it opens, so it must OUTLIVE them - which is why
+/// <see cref="CaptureOrchestrator.StartAll"/> takes it and releases it after the captures on
+/// every path, rather than each caller sequencing that for itself. Same contract as
 /// <see cref="IAudioCapture"/>'s release: it must not throw, since every caller reaches
 /// it from a finally that has no other owner to fall back on.
 /// </summary>

@@ -51,7 +51,7 @@ public class DrainBarrierTests
         await using var orchestrator = CaptureOrchestrator.StartAll(
             [Spec(capture, "mic")],
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), HeldDrainStream(), transport.Create);
+            gate: FastGate(), stream: HeldDrainStream(), connectionFactory: transport.Create);
 
         capture.Emit(Loud(40));                       // opens an utterance; the pump connects and blocks on the send
         await transport.SendReached.WaitAsync(Wait);  // a send is now in flight and held
@@ -81,7 +81,7 @@ public class DrainBarrierTests
         await using var orchestrator = CaptureOrchestrator.StartAll(
             [Spec(capture, "mic")],
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), HeldDrainStream(), transport.Create);
+            gate: FastGate(), stream: HeldDrainStream(), connectionFactory: transport.Create);
 
         capture.Emit(Loud(40));
         await transport.SendReached.WaitAsync(Wait);
@@ -117,7 +117,7 @@ public class DrainBarrierTests
         await using var orchestrator = CaptureOrchestrator.StartAll(
             [Spec(mic, "mic"), Spec(system, "system")],
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         mic.Emit(Loud(40));
         system.Emit(Loud(40));
@@ -144,7 +144,7 @@ public class DrainBarrierTests
         await using var orchestrator = CaptureOrchestrator.StartAll(
             [Spec(capture, "mic")],
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         capture.Emit(Loud(40));
         await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the pipeline to stream");
@@ -178,7 +178,7 @@ public class DrainBarrierTests
         await using var orchestrator = CaptureOrchestrator.StartAll(
             [Spec(capture, "mic")],
             onConnected: _ => { }, onFailed: (_, _) => { },
-            FastGate(), HeldDrainStream(), transport.Create);
+            gate: FastGate(), stream: HeldDrainStream(), connectionFactory: transport.Create);
 
         capture.Emit(Loud(40));                       // utterance #1; its send blocks on the hold
         await transport.SendReached.WaitAsync(Wait);

@@ -35,7 +35,7 @@ public class ZeroPipelineMeetingTests
             [Spec(mic, "mic"), Spec(system, "system")],
             onConnected: _ => { },
             onFailed: (id, _) => failures.Add(id),
-            FastGate(), FastStream(), transport.Create));
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create));
 
         // The refusal sits ON TOP of the per-device best-effort path, not instead of it:
         // each device still surfaced its own failure (the shell balloons them) and each

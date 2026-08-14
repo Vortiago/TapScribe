@@ -41,7 +41,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     // its updates by). Identities are unique here: StartAll rejects collisions up front.
     private readonly Dictionary<string, TapSession> _sessions;
 
-    private CaptureOrchestrator(Dictionary<string, TapSession> sessions) => _sessions = sessions;
+    // The enumerator those sessions' endpoints came out of, released after them and exactly
+    // once. Cleared on release rather than checked against a flag, so a second teardown call
+    // cannot release it twice: IDisposable is contract-bound to be throw-free, never to be
+    // idempotent.
+    private IAudioDeviceEnumerator? _enumerator;
+
+    private CaptureOrchestrator(Dictionary<string, TapSession> sessions, IAudioDeviceEnumerator? enumerator)
+    {
+        _sessions = sessions;
+        _enumerator = enumerator;
+    }
 
     /// <summary>
     /// Start one pipeline per spec. <paramref name="onConnected"/> /
@@ -52,10 +62,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     /// lives on the spec — ADR-0007). <paramref name="connectionFactory"/> defaults to a
     /// real <see cref="TapClient"/>; tests inject a fake.
     /// </summary>
+    /// <param name="enumerator">The device enumerator the specs' captures were opened from,
+    /// where there is one. Ownership passes AT THE CALL, exactly as the specs' does, and it is
+    /// released AFTER every capture on every path: an enumerator hands its endpoint over to
+    /// each capture it opens, so it has to outlive them. Holding both here is what makes that
+    /// ordering unwritable to get wrong; it used to be a rule each caller restated in prose and
+    /// re-implemented per teardown path.</param>
     public static CaptureOrchestrator StartAll(
         IReadOnlyList<PipelineSpec> specs,
         Action<string> onConnected,
         Action<string, Exception> onFailed,
+        IAudioDeviceEnumerator? enumerator = null,
         GateOptions? gate = null,
         TapStreamOptions? stream = null,
         Func<TapConnectionOptions, ITapConnection>? connectionFactory = null)
@@ -129,7 +146,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                 throw new InvalidOperationException("No selected device could be started.");
 
             handedOver = true;
-            return new CaptureOrchestrator(sessions);
+            return new CaptureOrchestrator(sessions, enumerator);
         }
         finally
         {
@@ -144,14 +161,16 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
             // the process lifetime: an endpoint held "in use", and any session already begun
             // still streaming PCM with nothing able to stop it.
             if (!handedOver)
-                Abandon(specs, considered, sessions);
+                Abandon(specs, considered, sessions, enumerator);
         }
     }
 
     // Release everything a failed StartAll is still holding: the captures of specs it never
-    // got to (the one it threw on, and every one after it), then the sessions that did begin.
+    // got to (the one it threw on, and every one after it), then the sessions that did begin,
+    // then the enumerator all of them came out of.
     private static void Abandon(
-        IReadOnlyList<PipelineSpec> specs, int considered, Dictionary<string, TapSession> sessions)
+        IReadOnlyList<PipelineSpec> specs, int considered, Dictionary<string, TapSession> sessions,
+        IAudioDeviceEnumerator? enumerator)
     {
         for (int i = considered; i < specs.Count; i++)
             specs[i].Capture.Dispose();
@@ -161,8 +180,13 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
         // that hangs in teardown, not a wait this path expects to pay. DisposeAsync stops
         // and releases each capture, which is the whole point: a begun session owns its
         // capture, so disposing the capture directly here would leave the session live.
-        if (sessions.Count > 0)
-            new CaptureOrchestrator(sessions).DisposeAsync().AsTask().Wait(AbandonTeardownCap);
+        //
+        // The enumerator rides that same teardown rather than being released beside it, even
+        // with no session to tear down, so the unwind releases it after the captures on the
+        // one ordering the success path uses. A teardown that overruns the cap defers the
+        // release rather than skipping it: the task still runs, and releasing the endpoints'
+        // owner out from under a capture that is still closing is the failure worth avoiding.
+        new CaptureOrchestrator(sessions, enumerator).DisposeAsync().AsTask().Wait(AbandonTeardownCap);
     }
 
     /// <summary>How many pipelines are currently running.</summary>
@@ -202,20 +226,35 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
         await Task.WhenAll(_sessions.Values.Select(s => s.DrainAllAsync())).ConfigureAwait(false);
 
     /// <summary>
-    /// Tear down every pipeline. Sessions are disposed <em>concurrently</em> — each
-    /// <see cref="TapSession.DisposeAsync"/> is already bounded (drains within its
-    /// own budget), so fanning them out keeps total teardown ~one budget instead of
-    /// N×budget. That matters when the Recorder is unreachable: the tray's Quit must
-    /// not stall for N devices' worth of serialized drain give-ups.
+    /// Tear down every pipeline and then release the enumerator they came out of. Sessions
+    /// are disposed <em>concurrently</em>: each <see cref="TapSession.DisposeAsync"/> is
+    /// already bounded (drains within its own budget), so fanning them out keeps total
+    /// teardown ~one budget instead of N×budget. That matters when the Recorder is
+    /// unreachable: the shell's quit must not stall for N devices' worth of serialized drain
+    /// give-ups. Idempotent, and throw-free by the seams it calls.
     /// </summary>
-    public async ValueTask DisposeAsync() =>
-        await Task.WhenAll(_sessions.Values.Select(s => s.DisposeAsync().AsTask())).ConfigureAwait(false);
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await Task.WhenAll(_sessions.Values.Select(s => s.DisposeAsync().AsTask())).ConfigureAwait(false);
+        }
+        finally
+        {
+            // After the captures, never beside them, and exactly once however many teardowns
+            // run. In a finally rather than after the await, because a session teardown that
+            // faults must not strand the endpoints' owner for the process lifetime: the
+            // capture that throw skipped is then still live, which is the lesser of the two
+            // leaks and the only one the caller can still do something about.
+            Interlocked.Exchange(ref _enumerator, null)?.Dispose();
+        }
+    }
 
     /// <summary>
     /// End-of-meeting teardown: <see cref="DrainAllAsync"/> every tap to completion
     /// (no 2 s Quit cap) and THEN <see cref="DisposeAsync"/> — stopping capture and
-    /// releasing the devices. Exposed as ONE call so the tray's End path can't drain
-    /// without disposing: dropping the dispose leaks the WASAPI capture devices and
+    /// releasing the devices and their enumerator. Exposed as ONE call so the End path can't
+    /// drain without disposing: dropping the dispose leaks the capture devices and
     /// lets them keep streaming PCM into the session past the barrier, so the pipeline
     /// strips/transcribes audio captured after "End meeting". The pipeline trigger
     /// fires only after this returns. (Quit stays on the 2 s-bounded
@@ -223,7 +262,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     /// </summary>
     public async Task EndMeetingAsync()
     {
-        await DrainAllAsync().ConfigureAwait(false);
-        await DisposeAsync().ConfigureAwait(false);
+        try
+        {
+            await DrainAllAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            // A drain that faults must not strand the endpoints for the process lifetime, so
+            // the release is sequenced in a finally rather than after the await. The drain's
+            // own failure still propagates: whether the taps flushed is the caller's business,
+            // and it is not this method's to classify.
+            await DisposeAsync().ConfigureAwait(false);
+        }
     }
 }

@@ -141,6 +141,12 @@ public sealed class BridgeRuntime
             // the core's DeviceTally. Touched from the dispatcher only (both callbacks marshal
             // first), which is the tally's contract.
             var tally = new DeviceTally(specs.Count);
+            // Ownership of the enumerator transfers AT THE CALL, exactly as the specs' does:
+            // StartAll releases everything it was given on every exit that is not a handed-back
+            // orchestrator, so the local is cleared first and the finally below has nothing
+            // left to release on the paths that throw from inside it.
+            IAudioDeviceEnumerator opening = enumerator;
+            enumerator = null;
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 specs,
                 onConnected: id => _dispatcher.Post(() => ApplyStatus(tally.Connected(id).Status)),
@@ -153,7 +159,8 @@ public sealed class BridgeRuntime
                     // the whole meeting.
                     if (report.Transition)
                         _view.ShowNotice($"{id} stopped", ex.Message, NoticeKind.Warning);
-                }));
+                }),
+                opening);
                 // No shared gate arg: each spec already carries its own per-device gate.
 
             bool abandoned;
@@ -166,17 +173,14 @@ public sealed class BridgeRuntime
                 // TakeMeeting uses, so exactly one of the two runs it.
                 abandoned = _quitting;
                 if (!abandoned)
-                {
                     // DateTimeOffset.Now is the meeting's wall-clock start, for the
                     // Past-meetings history (#168).
-                    _meeting = new Meeting(orchestrator, enumerator, sessionId, DateTimeOffset.Now);
-                    enumerator = null; // ownership transferred; the finally must not release it
-                }
+                    _meeting = new Meeting(orchestrator, sessionId, DateTimeOffset.Now);
             }
             if (abandoned)
             {
-                // The bounded teardown, the same one QuitAsync uses; the finally then releases
-                // the enumerator, after the captures it opened.
+                // The bounded teardown, the same one QuitAsync uses, which releases the
+                // enumerator after the captures it opened.
                 await orchestrator.DisposeAsync().ConfigureAwait(false);
                 return;
             }
@@ -214,9 +218,10 @@ public sealed class BridgeRuntime
         }
         finally
         {
-            // Released on every exit that did not publish a meeting: the non-Ok early return,
-            // or a throw. Once the meeting owns it the local is null and this is a no-op, so a
-            // running meeting keeps its devices.
+            // Released on every exit that did not get as far as handing it over: the non-Ok
+            // early return, or a throw from the resolve or the mint. Null from the StartAll
+            // call onwards, so a running meeting keeps its devices and a refused set has
+            // already had them released by the orchestrator.
             enumerator?.Dispose();
         }
     }
@@ -427,25 +432,12 @@ public sealed class BridgeRuntime
             // pipeline (issue #107).
             run: (controller, ct) => controller.EndAsync(triggerPipeline: process, cancellationToken: ct),
             // Close every open tap (gate close + Drain) BEFORE the pipeline strips; the
-            // controller awaits this to completion before it triggers.
-            drainAsync: async () =>
-            {
-                try
-                {
-                    // End-meeting teardown is ONE call, drain then stop+dispose, so it cannot
-                    // be reduced to a drain that leaks the devices and lets them stream past
-                    // the barrier (see EndMeetingAsync).
-                    await meeting.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
-                }
-                finally
-                {
-                    // Release the endpoints even if the teardown above failed. Sequenced after
-                    // the await it would be skipped on a throw, and nothing else holds this
-                    // enumerator once End has detached the meeting, so the devices would stay
-                    // open until the process exited.
-                    meeting.Enumerator.Dispose();
-                }
-            });
+            // controller awaits this to completion before it triggers. End-meeting teardown is
+            // ONE call, drain then stop+dispose then release the enumerator, so it cannot be
+            // reduced to a drain that leaks the devices and lets them stream past the barrier,
+            // and a teardown that fails part-way still releases what it can (see
+            // EndMeetingAsync).
+            drainAsync: () => meeting.Orchestrator.EndMeetingAsync());
     }
 
     // Build the controller, wire its emissions to the UI thread, run the flow (End or Resume),
@@ -602,16 +594,14 @@ public sealed class BridgeRuntime
 
         Meeting? meeting = TakeMeeting();
 
-        // Tear every pipeline down: the orchestrator drains and closes them CONCURRENTLY, each
-        // bounded, and DisposeAsync is throw-free, so this stays about one drain budget rather
-        // than N of them. The cap is a backstop; a sub-second tail may drop on a hard quit.
+        // Tear every pipeline down and release the enumerator behind them: the orchestrator
+        // drains and closes them CONCURRENTLY, each bounded, and DisposeAsync is throw-free, so
+        // this stays about one drain budget rather than N of them. The cap is a backstop; a
+        // sub-second tail may drop on a hard quit.
         if (meeting is not null)
-        {
             await meeting.Orchestrator.DisposeAsync().AsTask()
                 .WaitAsync(_budgets.QuitTeardownCap)
                 .ConfigureAwait(false);
-            meeting.Enumerator.Dispose();
-        }
 
         // Marshalled like every other view touch. Both awaits above are ConfigureAwait(false),
         // so by here we are on a thread-pool thread: calling straight through would break the
@@ -622,15 +612,14 @@ public sealed class BridgeRuntime
     }
 
     /// <summary>
-    /// A streaming meeting: the pipelines, the enumerator whose endpoints they hold, the
-    /// detached session they tap into, and when it began. ONE value rather than four fields,
-    /// because they are only ever published together and only ever detached together: split
-    /// apart, every consumer had to re-derive "is a meeting running" from two of them, and
-    /// clearing was four assignments that had to stay in step.
+    /// A streaming meeting: the pipelines (which hold the enumerator their endpoints came out
+    /// of), the detached session they tap into, and when it began. ONE value rather than three
+    /// fields, because they are only ever published together and only ever detached together:
+    /// split apart, every consumer had to re-derive "is a meeting running" from two of them,
+    /// and clearing was three assignments that had to stay in step.
     /// </summary>
     private sealed record Meeting(
         CaptureOrchestrator Orchestrator,
-        IAudioDeviceEnumerator Enumerator,
         string SessionId,
         DateTimeOffset StartedAt);
 
