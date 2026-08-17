@@ -1,7 +1,7 @@
 namespace TapScribe.Bridge.MacOS;
 
 /// <summary>
-/// The three Keychain calls <see cref="KeychainTapTokenStore"/> makes, as a seam. It exists
+/// The four Keychain calls <see cref="KeychainTapTokenStore"/> makes, as a seam. It exists
 /// for one reason: a test cannot make the real Keychain refuse, and refusing (a locked
 /// keychain, an operator dismissing the unlock prompt) is exactly the case the store's
 /// policy is about. With the raw calls behind this, the policy is tested on any OS through
@@ -43,7 +43,8 @@ internal static class KeychainStatus
     public const int ItemNotFound = -25300;
 
     /// <summary>errSecDuplicateItem: an item with this service and account already exists.
-    /// SecItemAdd refuses rather than replacing, which is why a save deletes first.</summary>
+    /// SecItemAdd refuses rather than replacing, which is why a save that finds one goes on
+    /// to Update it.</summary>
     public const int DuplicateItem = -25299;
 
     /// <summary>errSecInteractionNotAllowed: the Keychain would have to prompt and may not

@@ -40,7 +40,11 @@ public sealed class KeychainTapTokenStore : ITapTokenStore
     public string? Write(string token)
     {
         // An empty token is the operator blanking the field, where removing the item IS the
-        // job. A missing item makes it a no-op, which is why the status is not inspected.
+        // job, and a missing item makes that a no-op. The status still goes unread, which is
+        // the sharpest edge of the missing failure channel below rather than a free pass: a
+        // Keychain that REFUSES the delete leaves the item alive, so the next Load reads back
+        // a token the operator asked to revoke and the tray keeps connecting with it. Nothing
+        // here can say so yet, and the same later slice owns telling them.
         if (string.IsNullOrEmpty(token))
         {
             _items.Delete();

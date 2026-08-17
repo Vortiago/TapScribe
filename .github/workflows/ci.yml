@@ -509,8 +509,9 @@ jobs:
       # The Mac platform layer is net10.0: the floor is Version arithmetic and the
       # version read is a libc P/Invoke, so it needs neither Xcode nor the macos
       # workload. Running it here gates Mac policy on the lane every PR crosses.
-      # The one test that asks THIS host its version carries [RequiresMacOS] and
-      # skips at discovery; the macos job is where it runs.
+      # The tests that ask the running OS itself (this host's version, this
+      # host's login Keychain) carry [RequiresMacOS] and skip at discovery, each
+      # naming the capability it wanted; the macos job is where they run.
       - name: Build + test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 

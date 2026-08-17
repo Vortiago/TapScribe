@@ -33,13 +33,16 @@ Recorder, Utterance, Session).
   event-driven status (idle / streaming / processing / error), Start meeting /
   End meeting / Past meetings / Settings… / Quit, the 4-tab Settings dialog,
   and the per-meeting summary window with Copy.
-- **`src/TapScribe.Bridge.MacOS`** (net10.0): the Mac platform layer. Today
-  just the macOS 14.4 floor and the sysctl that reads this Mac's version;
-  Core Audio process-tap capture, device enumeration and Keychain storage
-  land here next. Everything it asks the OS goes through P/Invoke, never the
-  managed ObjC bindings (`MacOSProductVersion` states that rule and why),
-  which is why the plain TFM is enough and why its tests run on every CI lane
-  rather than only on a Mac.
+- **`src/TapScribe.Bridge.MacOS`** (net10.0): the Mac platform layer. Today the
+  macOS 14.4 floor, the sysctl that reads this Mac's version, and the Mac half
+  of the storage layer: `KeychainTapTokenStore` (the tap token in the login
+  Keychain, so the settings file carries nothing about it) plus the `TrayStores`
+  binding of the Core stores to `~/Library/Application Support/TapScribe`.
+  Core Audio process-tap capture and device enumeration land here next.
+  Everything it asks the OS goes through P/Invoke, never the managed ObjC
+  bindings (`MacOSProductVersion` states that rule and why), which is why the
+  plain TFM is enough and why its tests run on every CI lane rather than only
+  on a Mac.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
   menu-bar shell. Today the bundle, its `Info.plist` (menu-bar only, mic +
   audio-capture permissions, and deliberately no Screen Recording key) and
@@ -105,8 +108,11 @@ dotnet test tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.cspr
 ```
 
 The Mac policy tests take the running macOS version as a parameter, so they
-mean the same thing on any host. The handful that ask THIS host its version
-carry `[RequiresMacOS]` and skip at discovery off a Mac.
+mean the same thing on any host. The handful that ask the running OS itself
+(this Mac's version, this Mac's login Keychain) carry `[RequiresMacOS]` and
+skip at discovery off a Mac, each naming the capability it wanted so the skip
+list says what went unexercised. `[RequiresNonMacOS]` is the mirror, for the
+tests that pin what the Mac layer answers when it is NOT on a Mac.
 
 `TapClientWebSocketTests` covers `/tap` negotiation + binary framing (tokened
 and `--no-auth`) against an in-process Kestrel server, and
