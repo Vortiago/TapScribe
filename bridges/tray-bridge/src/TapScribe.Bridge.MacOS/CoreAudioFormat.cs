@@ -19,6 +19,9 @@ public static class CoreAudioFormat
     public static AudioFormat Classify(CoreAudioStreamFormat stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        return new AudioFormat((int)stream.SampleRate, stream.ChannelsPerFrame, SampleKind.Float32);
+        SampleKind kind = stream.FormatFlags.HasFlag(CoreAudioFormatFlags.IsFloat)
+            ? SampleKind.Float32
+            : SampleKind.Int16;
+        return new AudioFormat((int)stream.SampleRate, stream.ChannelsPerFrame, kind);
     }
 }

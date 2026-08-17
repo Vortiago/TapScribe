@@ -27,4 +27,20 @@ public class CoreAudioFormatTests
 
         Assert.Equal(new AudioFormat(48_000, 2, SampleKind.Float32), CoreAudioFormat.Classify(stream));
     }
+
+    [Fact]
+    public void Classify_A16BitIntegerStream_IsInt16()
+    {
+        // The other layout the resampler reads. Rarer than float on macOS, but a device
+        // that declares a 16-bit integer stream is exactly what the Windows sibling's
+        // WaveFormatEncoding.Pcm arm accepts, and the seam is the same either side.
+        var stream = new CoreAudioStreamFormat(
+            SampleRate: 44_100,
+            ChannelsPerFrame: 1,
+            BitsPerChannel: 16,
+            FormatId: CoreAudioFormatId.LinearPcm,
+            FormatFlags: CoreAudioFormatFlags.IsSignedInteger | CoreAudioFormatFlags.IsPacked);
+
+        Assert.Equal(new AudioFormat(44_100, 1, SampleKind.Int16), CoreAudioFormat.Classify(stream));
+    }
 }
