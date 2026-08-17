@@ -36,4 +36,51 @@ public class MacOSAudioCaptureTests
         Assert.False(capture.IsMuted);
         Assert.Equal(0, muteEvents);
     }
+
+    [Fact]
+    public void Capture_OnADeviceWithMuteSupport_RaisesMuteChangedOnEachTransition()
+    {
+        // Honouring the OS mute turns "muted" into a hard gate-closed, independent of level:
+        // a muted mic still delivers a noise floor and DC offset, which is the recurring
+        // "quiet" tap of #159. The event carries no payload, so IsMuted is the single source
+        // of truth and the assertions read it rather than a captured argument.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<bool> observed = [];
+        capture.MuteChanged += (_, _) => observed.Add(capture.IsMuted);
+
+        Assert.False(capture.IsMuted);
+
+        hal.SetMuted(device.ObjectId, true);
+        Assert.True(capture.IsMuted);
+
+        hal.SetMuted(device.ObjectId, false);
+        Assert.False(capture.IsMuted);
+
+        Assert.Equal([true, false], observed);
+    }
+
+    [Fact]
+    public void Capture_WhenThePropertyFiresWithoutTheMuteStateChanging_RaisesNothing()
+    {
+        // CoreAudio fires the mute property on the device's whole notification set, so a
+        // volume tweak reaches the same listener. Forwarding only true transitions is what
+        // keeps a volume slider from churning the pipeline, which is the same filter the
+        // Windows sibling applies to OnVolumeNotification.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: true);
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        int muteEvents = 0;
+        capture.MuteChanged += (_, _) => muteEvents++;
+
+        // Seeded from the device, so a capture opened against an already-muted mic starts
+        // closed rather than waiting for a transition that may never come.
+        Assert.True(capture.IsMuted);
+
+        hal.FireProperty(device.ObjectId, CoreAudioPropertyKind.Mute);
+
+        Assert.True(capture.IsMuted);
+        Assert.Equal(0, muteEvents);
+    }
 }

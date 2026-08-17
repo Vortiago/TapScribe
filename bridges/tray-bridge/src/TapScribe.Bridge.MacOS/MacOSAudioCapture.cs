@@ -13,13 +13,22 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     private readonly ICoreAudioHal _hal;
     private readonly uint _deviceId;
 
+    // The mute listener, or null when this endpoint carries no mute property. Null is also
+    // what says there is nothing to unsubscribe at teardown.
+    private readonly IDisposable? _muteListener;
+
+    // Cached so a read from the IO thread never re-enters CoreAudio; refreshed from the
+    // property notification. Volatile because the notification arrives on a CoreAudio thread
+    // and the gate reads it on another.
+    private volatile bool _muted;
+
     public AudioFormat Format { get; }
 
     /// <summary>True while the endpoint is muted at the OS level. Permanently false on a
     /// device that carries no mute property, matching the Windows sibling: the mic still
     /// records, it just cannot honour an OS mute, and there the level gate is the only mute
     /// (#159).</summary>
-    public bool IsMuted => false;
+    public bool IsMuted => _muted;
 
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
@@ -41,7 +50,30 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         ArgumentNullException.ThrowIfNull(hal);
         _hal = hal;
         _deviceId = deviceId;
+        // Classify FIRST: an unreadable layout throws, and doing it before anything is
+        // subscribed means the throw leaves this instance owning nothing to release. Same
+        // ordering, for the same reason, as the Windows sibling's ctor.
         Format = CoreAudioFormat.Classify(hal.ReadStreamFormat(deviceId));
+
+        if (hal.TryReadMute(deviceId) is null)
+            return;
+
+        // Subscribe BEFORE seeding, so a toggle during construction is not lost in the gap;
+        // the seed then reads the reconciled current state.
+        _muteListener = hal.AddPropertyListener(deviceId, CoreAudioPropertyKind.Mute, OnMuteProperty);
+        _muted = hal.TryReadMute(deviceId) ?? false;
+    }
+
+    // Fires on a CoreAudio notification thread. The device's whole notification set reaches
+    // one listener, so a volume tweak arrives here too; forward only true mute transitions,
+    // or a volume slider churns the pipeline.
+    private void OnMuteProperty()
+    {
+        bool muted = _hal.TryReadMute(_deviceId) ?? false;
+        if (muted == _muted)
+            return;
+        _muted = muted;
+        MuteChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void Start()
@@ -54,5 +86,9 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Dispose()
     {
+        // Detaching is what stops a late notification landing mid-teardown. The registration
+        // is contract-bound not to throw, so there is nothing to guard here.
+        _muteListener?.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
