@@ -16,12 +16,40 @@ public static class CoreAudioFormat
     /// <param name="stream">The device's current stream description.</param>
     /// <returns>The classified format; the raw bytes are unchanged, only the sample
     /// encoding is named.</returns>
+    /// <exception cref="NotSupportedException">The stream is one the resampler cannot read.
+    /// Not the seam's native-failure type: the device answered, and the answer was
+    /// unusable, which is the distinction <see cref="IAudioDeviceEnumerator.Open"/> declares
+    /// two exceptions for.</exception>
     public static AudioFormat Classify(CoreAudioStreamFormat stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        SampleKind kind = stream.FormatFlags.HasFlag(CoreAudioFormatFlags.IsFloat)
-            ? SampleKind.Float32
-            : SampleKind.Int16;
-        return new AudioFormat((int)stream.SampleRate, stream.ChannelsPerFrame, kind);
+
+        CoreAudioFormatFlags flags = stream.FormatFlags;
+        bool readable =
+            stream.FormatId == CoreAudioFormatId.LinearPcm
+            && stream.SampleRate > 0
+            && stream.ChannelsPerFrame > 0
+            // Packed, or the sample stride is wider than the sample and every read after the
+            // first lands mid-word. Little-endian, or every sample reads byte-reversed.
+            && flags.HasFlag(CoreAudioFormatFlags.IsPacked)
+            && !flags.HasFlag(CoreAudioFormatFlags.IsBigEndian)
+            // A mono stream has nothing to interleave with, so the flag describes nothing and
+            // the bytes are the same either way; above one channel it means separate buffers,
+            // and the seam hands on one interleaved run.
+            && (!flags.HasFlag(CoreAudioFormatFlags.IsNonInterleaved) || stream.ChannelsPerFrame == 1);
+
+        SampleKind? kind = (readable, flags.HasFlag(CoreAudioFormatFlags.IsFloat), stream.BitsPerChannel) switch
+        {
+            (true, true, 32) => SampleKind.Float32,
+            (true, false, 16) when flags.HasFlag(CoreAudioFormatFlags.IsSignedInteger) => SampleKind.Int16,
+            _ => null,
+        };
+
+        return kind is null
+            ? throw new NotSupportedException(
+                $"Unsupported capture format: {stream.BitsPerChannel}-bit, {stream.ChannelsPerFrame} channel(s) " +
+                $"at {stream.SampleRate:0.##} Hz, flags [{flags}]. Expected packed little-endian interleaved " +
+                "linear PCM, either 32-bit float or 16-bit signed integer.")
+            : new AudioFormat((int)stream.SampleRate, stream.ChannelsPerFrame, kind.Value);
     }
 }
