@@ -41,4 +41,25 @@ public class MacOSAudioDeviceEnumeratorTests
         Assert.Equal(device.Uid, listed.Id);
         Assert.NotEqual(device.ObjectId.ToString(System.Globalization.CultureInfo.InvariantCulture), listed.Id);
     }
+
+    [Fact]
+    public void List_FlagsTheSystemDefaultInput_AndOffersNoOutputDevice()
+    {
+        // Two claims that only mean something together. The HAL reports every device scope,
+        // including outputs, each carrying its OWN default flag; a default output reaching the
+        // list would put an endpoint in the picker that this backend cannot open, because
+        // capturing system audio on macOS is a process tap rather than a device (#420) and is
+        // not this slice. Filtering to inputs is what leaves exactly one flagged default for
+        // the follow-default rule to find.
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        hal.AddDevice(Devices.Input(57, "Yeti Nano", isDefault: true));
+        hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers", isDefault: true));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        IReadOnlyList<CaptureDevice> devices = enumerator.List();
+
+        Assert.Equal(["Built-in Microphone", "Yeti Nano"], devices.Select(d => d.Name));
+        Assert.Equal("Yeti Nano", CaptureDevice.DefaultFor(devices, DeviceFlow.Capture)?.Name);
+    }
 }
