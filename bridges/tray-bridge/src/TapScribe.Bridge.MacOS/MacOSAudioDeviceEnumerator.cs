@@ -59,5 +59,20 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
         return new MacOSAudioCapture(_hal, found.ObjectId);
     }
 
-    public void Dispose() => _hal.Dispose();
+    public void Dispose()
+    {
+        try
+        {
+            _hal.Dispose();
+        }
+        catch (CoreAudioException)
+        {
+            // CoreAudio refused to give a handle back, which is what a hardware layer already
+            // torn down under us does. Swallowed because the seam binds this not to throw:
+            // every caller reaches it from a finally with no other owner to fall back on, so a
+            // throw here strands whatever the enumerator still holds for the process lifetime.
+            // What is lost is the report, and there is nothing a caller could do with it: the
+            // handles are gone either way.
+        }
+    }
 }

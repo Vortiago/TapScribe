@@ -122,4 +122,43 @@ public class MacOSAudioDeviceEnumeratorTests
         Assert.Contains(device.Id, thrown.Message, StringComparison.Ordinal);
         Assert.False(string.IsNullOrWhiteSpace(why));
     }
+
+    [Fact]
+    public void Dispose_ReleasesTheHalOnce_AndNotTheCapturesItHandedOut()
+    {
+        // The seam's ownership rule: an enumerator hands its endpoint over to each capture it
+        // opens and so must OUTLIVE them, which means releasing the captures is somebody
+        // else's job. Counted rather than flagged, because an owner fixing a leak must not
+        // turn it into a double release: disposal is bound to be throw-free, never idempotent.
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        var enumerator = new MacOSAudioDeviceEnumerator(hal);
+        IAudioCapture capture = enumerator.Open(Assert.Single(enumerator.List()));
+        capture.Start();
+
+        enumerator.Dispose();
+
+        Assert.Equal(1, hal.Disposals);
+        // Still running, because nothing here released it. Had the enumerator disposed the
+        // captures it opened, the IOProc would be gone and the capture's real owner would be
+        // releasing something already released.
+        Assert.Equal(1, hal.RunningIoProcs);
+    }
+
+    [Fact]
+    public void Dispose_WhenThePlatformRefusesTheRelease_DoesNotThrow()
+    {
+        // Every caller reaches Dispose from a finally with no other owner to fall back on, so
+        // the seam binds it not to throw. This is the only way to show that line is held: the
+        // enumerator cannot verify it of a HAL it does not own, so it survives one that
+        // misbehaves.
+        var hal = new FakeCoreAudioHal
+        {
+            DisposeError = new CoreAudioException("removing the device-list listener", -66748),
+        };
+        var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        Assert.Null(Record.Exception(enumerator.Dispose));
+        Assert.Equal(1, hal.Disposals);
+    }
 }
