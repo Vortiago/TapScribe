@@ -39,7 +39,24 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
     public IAudioCapture Open(CaptureDevice device)
     {
         ArgumentNullException.ThrowIfNull(device);
-        throw new NotImplementedException();
+
+        // Re-listed rather than remembered from the last List(): the picker's rows can be
+        // minutes old, and the object id behind a UID changes on a replug, so a cached map
+        // would open the wrong device or a dead one.
+        CoreAudioDevice? found = _hal.ListDevices().FirstOrDefault(
+            d => d.Flow == device.Flow
+                && d.Flow == DeviceFlow.Capture
+                && string.Equals(d.Uid, device.Id, StringComparison.Ordinal));
+
+        // ArgumentException, the seam's clause for "the id names no active endpoint of the
+        // requested flow". A vanished mic and an output endpoint are the same fact here:
+        // nothing in the list matches. Not the native failure type, since the platform
+        // answered fine and the callers that skip a dead endpoint filter on that one.
+        if (found is null)
+            throw new ArgumentException(
+                $"no active capture endpoint with UID '{device.Id}' ({device.Name})", nameof(device));
+
+        return new MacOSAudioCapture(_hal, found.ObjectId);
     }
 
     public void Dispose() => _hal.Dispose();

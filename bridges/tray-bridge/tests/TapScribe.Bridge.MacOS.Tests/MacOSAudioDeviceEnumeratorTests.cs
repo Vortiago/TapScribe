@@ -62,4 +62,64 @@ public class MacOSAudioDeviceEnumeratorTests
         Assert.Equal(["Built-in Microphone", "Yeti Nano"], devices.Select(d => d.Name));
         Assert.Equal("Yeti Nano", CaptureDevice.DefaultFor(devices, DeviceFlow.Capture)?.Name);
     }
+
+    [Fact]
+    public void Open_ResolvesTheUidBackToWhateverObjectIdTheDeviceHasNow()
+    {
+        // The round trip List keyed on. The capture reads its format through the HAL, so the
+        // format coming back is the proof it was opened against the RIGHT object id rather
+        // than the first device on the list.
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        hal.AddDevice(Devices.Input(57, "Yeti Nano"), new CoreAudioStreamFormat(
+            SampleRate: 44_100,
+            ChannelsPerFrame: 1,
+            BitsPerChannel: 16,
+            FormatId: CoreAudioFormatId.LinearPcm,
+            FormatFlags: CoreAudioFormatFlags.IsSignedInteger | CoreAudioFormatFlags.IsPacked));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+        CaptureDevice yeti = enumerator.List().Single(d => d.Name == "Yeti Nano");
+
+        using IAudioCapture capture = enumerator.Open(yeti);
+
+        Assert.Equal(new AudioFormat(44_100, 1, SampleKind.Int16), capture.Format);
+    }
+
+    // Both refusals are the seam's ArgumentException clause, "the id names no active endpoint
+    // of the requested flow", because on this backend they are the same fact. An id that
+    // vanished (the mic was unplugged since the picker was drawn, or a saved selection names a
+    // device that is not here) and an id that names an output both come down to: nothing in
+    // the list matches. ExternalException would be wrong for either, since the platform
+    // answered fine, and the callers that skip a dead endpoint filter on that one.
+    public static TheoryData<string, CaptureDevice> UnopenableDevices() => new()
+    {
+        {
+            "a UID no listed device carries",
+            new CaptureDevice("unplugged-since-the-picker-was-drawn:uid", "Ghost", DeviceFlow.Capture, false)
+        },
+        {
+            "an output endpoint, which this backend does not capture",
+            new CaptureDevice("MacBook Pro Speakers:uid", "MacBook Pro Speakers", DeviceFlow.Render, true)
+        },
+        {
+            "a listed input asked for under the wrong flow",
+            new CaptureDevice("Built-in Microphone:uid", "Built-in Microphone", DeviceFlow.Render, false)
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(UnopenableDevices))]
+    public void Open_ADeviceThisBackendCannotHonour_ThrowsArgumentException(
+        string why, CaptureDevice device)
+    {
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers", isDefault: true));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        var thrown = Assert.Throws<ArgumentException>(() => enumerator.Open(device));
+
+        Assert.Contains(device.Id, thrown.Message, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(why));
+    }
 }
