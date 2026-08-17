@@ -475,6 +475,30 @@ jobs:
       - name: Install the macos workload
         run: dotnet workload install macos
 
+      # A dedicated keychain for the [RequiresMacOS] Keychain round trip, because
+      # the runner's login keychain is the wrong thing to bet on twice over: if it
+      # is locked, SecItemAdd answers errSecInteractionNotAllowed and the test
+      # fails for a reason that is about the runner rather than the code, and if
+      # something wants to prompt, the call BLOCKS instead of failing and the job
+      # burns its budget saying nothing. Created unlocked, with -lut so it cannot
+      # re-lock underneath a slow step, and made the default so SecItemAdd lands
+      # in it. The password is a throwaway for a keychain that exists for the
+      # length of one job and holds one test token; it protects nothing.
+      - name: Give the Keychain tests a keychain of their own
+        run: |
+          set -euo pipefail
+          # Read the search list BEFORE anything mutates it: setting the default
+          # keychain rewrites the list as a side effect, so asking afterwards
+          # returns a list that already has the new one in it and loses the
+          # runner's own.
+          existing=$(security list-keychains -d user | tr -d ' "')
+          security create-keychain -p ci-throwaway tapscribe-ci.keychain
+          security set-keychain-settings -lut 7200 tapscribe-ci.keychain
+          security unlock-keychain -p ci-throwaway tapscribe-ci.keychain
+          security default-keychain -s tapscribe-ci.keychain
+          security list-keychains -d user -s tapscribe-ci.keychain $existing
+          security list-keychains
+
       # Also on ubuntu, where [RequiresMacOS] skips. Here it runs.
       - name: Test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
