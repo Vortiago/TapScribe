@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 
 namespace TapScribe.Bridge.MacOS;
@@ -96,6 +97,7 @@ internal sealed partial class SecKeychainItems(string service, string account) :
     // account. Add's value and Copy's return-and-limit flags ride along as extra entries,
     // because in this API the query and the attributes to store are the same kind of thing.
     // Update is the exception and passes none, since what it changes goes in its own.
+    [SupportedOSPlatform("macos")]
     private IntPtr Query(CfScope scope, params (IntPtr Key, IntPtr Value)[] extra) =>
         CfDictionary(
             scope,
@@ -106,6 +108,7 @@ internal sealed partial class SecKeychainItems(string service, string account) :
                 .. extra,
             ]);
 
+    [SupportedOSPlatform("macos")]
     private static IntPtr CfDictionary(CfScope scope, params (IntPtr Key, IntPtr Value)[] entries)
     {
         IntPtr[] keys = [.. entries.Select(entry => entry.Key)];
@@ -121,6 +124,7 @@ internal sealed partial class SecKeychainItems(string service, string account) :
             Globals.TypeDictionaryValueCallBacks));
     }
 
+    [SupportedOSPlatform("macos")]
     private static IntPtr Secret(CfScope scope, string secret)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(secret);
@@ -129,12 +133,14 @@ internal sealed partial class SecKeychainItems(string service, string account) :
 
     // Takes the scope like every other factory here. The one CF object this file created
     // without handing it over was the only leak still writable by forgetting a wrapper.
+    [SupportedOSPlatform("macos")]
     private static IntPtr CfString(CfScope scope, string value) =>
         scope.Keep(CFStringCreateWithCString(IntPtr.Zero, value, EncodingUtf8));
 
     // The length-taking overload, not the NUL-terminated one: a CFData is a byte count and a
     // pointer, with no terminator promised, so reading it as a C string would run past the
     // secret into whatever follows it.
+    [SupportedOSPlatform("macos")]
     private static string Utf8(IntPtr data)
     {
         nint length = CFDataGetLength(data);
@@ -148,6 +154,7 @@ internal sealed partial class SecKeychainItems(string service, string account) :
     /// it: the ones it created, and the ones an API handed it under the copy rule.
     /// Create-and-forget is a leak in this API and there is no finalizer to catch it, so
     /// making the release structural is cheaper than remembering it.</summary>
+    [SupportedOSPlatform("macos")]
     private sealed class CfScope : IDisposable
     {
         private readonly List<IntPtr> _created = [];
@@ -173,6 +180,7 @@ internal sealed partial class SecKeychainItems(string service, string account) :
     /// CFStringRef one has to be dereferenced to get the string. The two callback tables
     /// are structs, so for those the export address IS what the API wants.
     /// </summary>
+    [SupportedOSPlatform("macos")]
     private static class Globals
     {
         // Explicit and empty on purpose: it suppresses beforefieldinit, so these dlopens
@@ -207,24 +215,31 @@ internal sealed partial class SecKeychainItems(string service, string account) :
             Marshal.ReadIntPtr(NativeLibrary.GetExport(library, name));
     }
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(SecurityLibrary)]
     private static partial int SecItemAdd(IntPtr attributes, IntPtr result);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(SecurityLibrary)]
     private static partial int SecItemCopyMatching(IntPtr query, out IntPtr result);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(SecurityLibrary)]
     private static partial int SecItemUpdate(IntPtr query, IntPtr attributesToUpdate);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(SecurityLibrary)]
     private static partial int SecItemDelete(IntPtr query);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationLibrary, StringMarshalling = StringMarshalling.Utf8)]
     private static partial IntPtr CFStringCreateWithCString(IntPtr allocator, string value, uint encoding);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationLibrary)]
     private static partial IntPtr CFDataCreate(IntPtr allocator, [In] byte[] bytes, nint length);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationLibrary)]
     private static partial IntPtr CFDictionaryCreate(
         IntPtr allocator,
@@ -234,12 +249,15 @@ internal sealed partial class SecKeychainItems(string service, string account) :
         IntPtr keyCallBacks,
         IntPtr valueCallBacks);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationLibrary)]
     private static partial nint CFDataGetLength(IntPtr data);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationLibrary)]
     private static partial IntPtr CFDataGetBytePtr(IntPtr data);
 
+    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationLibrary)]
     private static partial void CFRelease(IntPtr cf);
 }
