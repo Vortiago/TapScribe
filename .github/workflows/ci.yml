@@ -451,6 +451,12 @@ jobs:
   dotnet-build-macos:
     name: dotnet build + test (macos)
     runs-on: macos-latest
+    # The one job that talks to a real login Keychain. A Keychain call that needs
+    # to prompt and cannot BLOCKS rather than failing, so without a bound this job
+    # would sit on the priciest runner class for GitHub's 6 hour default before
+    # anyone learned anything. Ten minutes is several times the honest runtime
+    # (workload install included), so hitting this is a diagnosis, not a flake.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -468,6 +474,33 @@ jobs:
 
       - name: Install the macos workload
         run: dotnet workload install macos
+
+      # A dedicated keychain for the [RequiresMacOS] Keychain round trip, because
+      # the runner's login keychain is the wrong thing to bet on twice over: if it
+      # is locked, SecItemAdd answers errSecInteractionNotAllowed and the test
+      # fails for a reason that is about the runner rather than the code, and if
+      # something wants to prompt, the call BLOCKS instead of failing and the job
+      # burns its budget saying nothing. Created unlocked, with -lut so it cannot
+      # re-lock underneath a slow step, and made the default so SecItemAdd lands
+      # in it. The password is a throwaway for a keychain that exists for the
+      # length of one job and holds one test token; it protects nothing.
+      - name: Give the Keychain tests a keychain of their own
+        run: |
+          set -euo pipefail
+          # Read the search list BEFORE anything mutates it: setting the default
+          # keychain rewrites the list as a side effect, so asking afterwards
+          # returns a list that already has the new one in it and loses the
+          # runner's own.
+          existing=$(security list-keychains -d user | tr -d ' "')
+          security create-keychain -p ci-throwaway tapscribe-ci.keychain
+          # No flags is literally "no-timeout": a fresh keychain defaults to
+          # lock-on-sleep with a 300s fuse, which is shorter than this job, and
+          # -l/-u would keep locking enabled rather than turn it off.
+          security set-keychain-settings tapscribe-ci.keychain
+          security unlock-keychain -p ci-throwaway tapscribe-ci.keychain
+          security default-keychain -s tapscribe-ci.keychain
+          security list-keychains -d user -s tapscribe-ci.keychain $existing
+          security list-keychains
 
       # Also on ubuntu, where [RequiresMacOS] skips. Here it runs.
       - name: Test the macOS platform layer
@@ -509,8 +542,10 @@ jobs:
       # The Mac platform layer is net10.0: the floor is Version arithmetic and the
       # version read is a libc P/Invoke, so it needs neither Xcode nor the macos
       # workload. Running it here gates Mac policy on the lane every PR crosses.
-      # The one test that asks THIS host its version carries [RequiresMacOS] and
-      # skips at discovery; the macos job is where it runs.
+      # The tests that ask the running OS itself carry [RequiresMacOS] and skip at
+      # discovery, each naming the capability it wanted in its skip reason; the
+      # macos job is where they run. That skip list is the enumeration, so this
+      # comment deliberately does not keep a second one in prose.
       - name: Build + test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 
