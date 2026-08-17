@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using System.Text;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.MacOS;
@@ -9,7 +8,7 @@ namespace TapScribe.Bridge.MacOS;
 /// The real <see cref="ICoreAudioHal"/>: CoreAudio's HAL, reached by P/Invoke.
 ///
 /// DELIBERATELY WITHOUT LOGIC. Every method is a property read, a registration or a status
-/// check, and the only branches are "did the call succeed" and the not-on-a-Mac guard. Every
+/// check, and the only branch is "did the call succeed". Every
 /// judgement this backend makes (which layouts are readable, what a clean stop means, what a
 /// missing mute property implies, teardown order) lives in <see cref="CoreAudioFormat"/>,
 /// <see cref="MacOSAudioCapture"/> and <see cref="MacOSAudioDeviceEnumerator"/>, which have no
@@ -25,7 +24,15 @@ namespace TapScribe.Bridge.MacOS;
 /// Not thread-safe, and does not need to be: one enumerator owns one of these and drives it
 /// from the tray thread. The native CALLBACKS arrive on CoreAudio threads, but they touch only
 /// their own pinned registration, never the lists here.
+///
+/// The macos platform attribute is on the TYPE, so the "never touch a native symbol off a Mac"
+/// rule is decided once, where this is CONSTRUCTED, and CA1416 proves it at compile time.
+/// Per-method guards were the alternative and were worse three ways: nine of them answered in
+/// three different shapes, nothing executed any of them on any lane, and the shape ListDevices
+/// used (an empty list) told the enumerator "no endpoints" when the truth was "this host
+/// cannot be asked", which is precisely the distinction the layer above pins a test on.
 /// </summary>
+[SupportedOSPlatform("macos")]
 public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 {
     private readonly List<Registration> _listeners = [];
@@ -34,12 +41,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     public IReadOnlyList<CoreAudioDevice> ListDevices()
     {
-        // Not a Mac, so there are no CoreAudio endpoints. The seam reads an empty list as "no
-        // endpoints", which is exactly true here, and the guard is what keeps this assembly
-        // plain net10.0 and runnable on the ubuntu lane.
-        if (!OperatingSystem.IsMacOS())
-            return [];
-
         uint[] ids = ReadUInt32Array(CoreAudioObject.System, Selector.Devices, Scope.Global);
         uint defaultInput = ReadDefaultDevice(Selector.DefaultInputDevice);
         uint defaultOutput = ReadDefaultDevice(Selector.DefaultOutputDevice);
@@ -62,9 +63,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     public CoreAudioStreamFormat ReadStreamFormat(uint deviceId)
     {
-        if (!OperatingSystem.IsMacOS())
-            throw NotOnAMac(nameof(ReadStreamFormat), deviceId);
-
         AudioStreamBasicDescription asbd = default;
         uint size = (uint)sizeof(AudioStreamBasicDescription);
         AudioObjectPropertyAddress address = Address(Selector.StreamFormat, Scope.Input);
@@ -83,10 +81,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     public bool? TryReadMute(uint deviceId)
     {
-        // Null is "the device carries no mute property", and off a Mac no device carries one.
-        if (!OperatingSystem.IsMacOS())
-            return null;
-
         AudioObjectPropertyAddress address = Address(Selector.Mute, Scope.Input);
         if (AudioObjectHasProperty(deviceId, &address) == 0)
             return null;
@@ -103,14 +97,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     public IDisposable AddPropertyListener(uint objectId, CoreAudioPropertyKind kind, Action handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
-        if (!OperatingSystem.IsMacOS())
-            throw NotOnAMac(nameof(AddPropertyListener), objectId);
-
         AudioObjectPropertyAddress address = kind switch
         {
             CoreAudioPropertyKind.Mute => Address(Selector.Mute, Scope.Input),
-            CoreAudioPropertyKind.DefaultInputDevice => Address(Selector.DefaultInputDevice, Scope.Global),
-            CoreAudioPropertyKind.DeviceIsAlive => Address(Selector.DeviceIsAlive, Scope.Global),
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
 
@@ -130,9 +119,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     public CoreAudioIoProcHandle CreateIoProc(uint deviceId, CoreAudioIoCallback callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
-        if (!OperatingSystem.IsMacOS())
-            throw NotOnAMac(nameof(CreateIoProc), deviceId);
-
         var ioProc = new IoProc(deviceId, callback);
         IntPtr procId = IntPtr.Zero;
         int status = AudioDeviceCreateIOProcID(
@@ -151,9 +137,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     public void StartIo(CoreAudioIoProcHandle ioProc)
     {
         IoProc live = Live(ioProc, nameof(StartIo));
-        if (!OperatingSystem.IsMacOS())
-            throw NotOnAMac(nameof(StartIo), live.DeviceId);
-
         int status = AudioDeviceStart(live.DeviceId, live.ProcId);
         if (status != NoError)
             throw new CoreAudioException($"starting the IOProc on device {live.DeviceId}", status);
@@ -162,9 +145,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     public void StopIo(CoreAudioIoProcHandle ioProc)
     {
         IoProc live = Live(ioProc, nameof(StopIo));
-        if (!OperatingSystem.IsMacOS())
-            throw NotOnAMac(nameof(StopIo), live.DeviceId);
-
         int status = AudioDeviceStop(live.DeviceId, live.ProcId);
         if (status != NoError)
             throw new CoreAudioException($"stopping the IOProc on device {live.DeviceId}", status);
@@ -173,9 +153,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     public void DestroyIoProc(CoreAudioIoProcHandle ioProc)
     {
         IoProc live = Live(ioProc, nameof(DestroyIoProc));
-        if (!OperatingSystem.IsMacOS())
-            throw NotOnAMac(nameof(DestroyIoProc), live.DeviceId);
-
         int status = AudioDeviceDestroyIOProcID(live.DeviceId, live.ProcId);
         // Unpinned whatever CoreAudio answered. A failed destroy still means no further
         // callback can be trusted, and keeping the handle pins the callback's target for the
@@ -197,18 +174,16 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         // left who could act on a failure.
         foreach (IoProc ioProc in _ioProcs)
         {
-            if (OperatingSystem.IsMacOS())
-            {
-                AudioDeviceStop(ioProc.DeviceId, ioProc.ProcId);
-                AudioDeviceDestroyIOProcID(ioProc.DeviceId, ioProc.ProcId);
-            }
+            AudioDeviceStop(ioProc.DeviceId, ioProc.ProcId);
+            AudioDeviceDestroyIOProcID(ioProc.DeviceId, ioProc.ProcId);
             ioProc.Unpin();
         }
         _ioProcs.Clear();
 
+        // Copied because Dispose() removes the registration from this list as it goes, which
+        // is also why no Clear() follows: the list is empty by the time the loop ends.
         foreach (Registration registration in _listeners.ToList())
             registration.Dispose();
-        _listeners.Clear();
     }
 
     private IoProc Live(CoreAudioIoProcHandle ioProc, string call)
@@ -219,15 +194,8 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         return live;
     }
 
-    // Off a Mac there is no object with this id, and there never was: ListDevices answered
-    // empty, so any id reaching here came from somewhere else. kAudioHardwareBadObjectError is
-    // the OSStatus that says exactly that, rather than a sentinel invented for the occasion.
-    private static CoreAudioException NotOnAMac(string call, uint objectId) =>
-        new($"{call} on object {objectId} (this host is not a Mac)", BadObjectError);
-
     // ---- property reads, all the same two-call shape: ask the size, then ask again ----
 
-    [SupportedOSPlatform("macos")]
     private static uint[] ReadUInt32Array(uint objectId, uint selector, uint scope)
     {
         AudioObjectPropertyAddress address = Address(selector, scope);
@@ -249,7 +217,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         return values;
     }
 
-    [SupportedOSPlatform("macos")]
     private static uint ReadDefaultDevice(uint selector)
     {
         AudioObjectPropertyAddress address = Address(selector, Scope.Global);
@@ -264,7 +231,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         return status == NoError ? deviceId : 0;
     }
 
-    [SupportedOSPlatform("macos")]
     private static string ReadString(uint objectId, uint selector)
     {
         AudioObjectPropertyAddress address = Address(selector, Scope.Global);
@@ -284,9 +250,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             {
                 if (CFStringGetCString(cfString, target, buffer.Length, EncodingUtf8) == 0)
                     return "";
-                return Encoding.UTF8.GetString(buffer, 0, buffer.AsSpan().IndexOf((byte)0) is var end and >= 0
-                    ? end
-                    : buffer.Length);
+                // CFStringGetCString NUL-terminates on success, which is exactly the shape
+                // PtrToStringUTF8 reads. SecKeychainItems uses the same call for the same job.
+                return Marshal.PtrToStringUTF8((IntPtr)target) ?? "";
             }
         }
         finally
@@ -298,7 +264,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     // How many channels the device carries in this scope, which is how CoreAudio answers "does
     // it have input streams": there is no such flag, only a stream configuration to count.
-    [SupportedOSPlatform("macos")]
     private static uint ChannelCount(uint deviceId, uint scope)
     {
         AudioObjectPropertyAddress address = Address(Selector.StreamConfiguration, scope);
@@ -427,17 +392,14 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         {
             if (_unpinned)
                 return;
-            if (OperatingSystem.IsMacOS())
+            fixed (AudioObjectPropertyAddress* address = &_address)
             {
-                fixed (AudioObjectPropertyAddress* address = &_address)
-                {
-                    // Status ignored: the only failure is a registration CoreAudio no longer
-                    // has, which is the state this call is trying to reach. The seam binds a
-                    // registration's release not to throw, and every caller reaches it from a
-                    // teardown path with nothing to fall back on.
-                    AudioObjectRemovePropertyListener(
-                        _objectId, address, &OnPropertyChanged, GCHandle.ToIntPtr(Pin));
-                }
+                // Status ignored: the only failure is a registration CoreAudio no longer has,
+                // which is the state this call is trying to reach. The seam binds a
+                // registration's release not to throw, and every caller reaches it from a
+                // teardown path with nothing to fall back on.
+                AudioObjectRemovePropertyListener(
+                    _objectId, address, &OnPropertyChanged, GCHandle.ToIntPtr(Pin));
             }
             _hal._listeners.Remove(this);
             Unpin();
@@ -486,8 +448,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     private const int NoError = 0;
 
-    // kAudioHardwareBadObjectError, the four-char code '!obj'.
-    private const int BadObjectError = 560947818;
 
     // kCFStringEncodingUTF8.
     private const uint EncodingUtf8 = 0x08000100;
@@ -515,7 +475,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         public const uint DeviceUid = 0x75696420;           // 'uid '
         public const uint Name = 0x6C6E616D;                // 'lnam'
         public const uint Mute = 0x6D757465;                // 'mute'
-        public const uint DeviceIsAlive = 0x6C69766E;       // 'livn'
     }
 
     /// <summary>The CoreAudio property scopes, as four-char codes.</summary>
@@ -563,7 +522,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     // ---- the native surface, and nothing else below this line ----
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioObjectGetPropertyDataSize(
         uint objectId,
@@ -572,7 +530,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         IntPtr qualifierData,
         uint* dataSize);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioObjectGetPropertyData(
         uint objectId,
@@ -582,11 +539,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         uint* dataSize,
         void* data);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial byte AudioObjectHasProperty(uint objectId, AudioObjectPropertyAddress* address);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioObjectAddPropertyListener(
         uint objectId,
@@ -594,7 +549,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         delegate* unmanaged<uint, uint, IntPtr, IntPtr, int> listener,
         IntPtr clientData);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioObjectRemovePropertyListener(
         uint objectId,
@@ -602,7 +556,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         delegate* unmanaged<uint, uint, IntPtr, IntPtr, int> listener,
         IntPtr clientData);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioDeviceCreateIOProcID(
         uint deviceId,
@@ -610,23 +563,18 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         IntPtr clientData,
         IntPtr* ioProcId);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioDeviceDestroyIOProcID(uint deviceId, IntPtr ioProcId);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioDeviceStart(uint deviceId, IntPtr ioProcId);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioDeviceStop(uint deviceId, IntPtr ioProcId);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationFramework)]
     private static partial byte CFStringGetCString(IntPtr theString, byte* buffer, int bufferSize, uint encoding);
 
-    [SupportedOSPlatform("macos")]
     [LibraryImport(CoreFoundationFramework)]
     private static partial void CFRelease(IntPtr cf);
 }

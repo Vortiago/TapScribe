@@ -24,21 +24,12 @@ public enum CoreAudioPropertyKind
     /// notification carries no state.</summary>
     Mute,
 
-    /// <summary><c>kAudioHardwarePropertyDefaultInputDevice</c> on
-    /// <see cref="CoreAudioObject.System"/>. Fires when the operator changes the system
-    /// default input.</summary>
-    DefaultInputDevice,
-
-    /// <summary><c>kAudioDevicePropertyDeviceIsAlive</c> on a device. Fires when the endpoint
-    /// goes away underneath a running capture (unplugged, disabled), which is the mid-stream
-    /// loss <see cref="IAudioCapture.Failed"/> exists to surface.
-    ///
-    /// Declared here, not yet subscribed: the mid-stream half of <c>Failed</c> is the failure-
-    /// signals slice, and raising it needs a decision this facade cannot make on its own,
-    /// since the notification says the property CHANGED rather than which way. The Windows
-    /// sibling declares the same seam member ahead of raising it, for the same
-    /// reason.</summary>
-    DeviceIsAlive,
+    // Only the one kind, deliberately. Device-is-alive (the mid-stream loss behind Failed) and
+    // default-input-changed both belong to later slices, and a kind declared ahead of its
+    // subscriber costs the ONE class here that no test can reach: each is a hand-typed
+    // four-char selector that nothing on any lane can exercise, in the file whose whole bargain
+    // is being too thin to need more than a symbol check. They go in with the code that
+    // subscribes them.
 }
 
 /// <summary>
