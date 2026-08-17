@@ -15,6 +15,8 @@ namespace TapScribe.Bridge.MacOS.Tests;
 /// refuses, or skip while the guard it covers is live.</summary>
 internal sealed class RequiresMacOSAttribute : FactAttribute
 {
+    /// <summary>Marks the test as needing a real Mac, skipping it at discovery elsewhere.
+    /// </summary>
     /// <param name="capability">What the test needs a Mac FOR, folded into the skip reason.
     /// The ubuntu lane's skip list is the only signal that a piece of P/Invoke went
     /// unexercised there, so it has to name the capability rather than whichever test
@@ -38,6 +40,8 @@ internal sealed class RequiresMacOSAttribute : FactAttribute
 /// read as a pass on the lane that skipped the assertions.</summary>
 internal sealed class RequiresNonMacOSAttribute : FactAttribute
 {
+    /// <summary>Marks the test as needing a host that is NOT a Mac, skipping it at discovery
+    /// on one.</summary>
     /// <param name="contract">What the test pins about being off a Mac, folded into the skip
     /// reason so the macos lane's skip list says which contract went unexercised there.</param>
     public RequiresNonMacOSAttribute(string contract)
