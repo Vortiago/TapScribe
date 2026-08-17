@@ -31,7 +31,13 @@ public enum CoreAudioPropertyKind
 
     /// <summary><c>kAudioDevicePropertyDeviceIsAlive</c> on a device. Fires when the endpoint
     /// goes away underneath a running capture (unplugged, disabled), which is the mid-stream
-    /// loss <see cref="IAudioCapture.Failed"/> exists to surface.</summary>
+    /// loss <see cref="IAudioCapture.Failed"/> exists to surface.
+    ///
+    /// Declared here, not yet subscribed: the mid-stream half of <c>Failed</c> is the failure-
+    /// signals slice, and raising it needs a decision this facade cannot make on its own,
+    /// since the notification says the property CHANGED rather than which way. The Windows
+    /// sibling declares the same seam member ahead of raising it, for the same
+    /// reason.</summary>
     DeviceIsAlive,
 }
 
