@@ -293,10 +293,14 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         return true;
     }
 
-    // Cancel the pump and wait for it to leave, so no DataAvailable can land after the call
-    // that stopped the capture returns. Bounded: the pump's only blocking wait is the one
-    // being cancelled, so it exits promptly or the process is in a state a longer wait would
-    // not fix.
+    // Cancel the pump and wait for it to leave. Cancelling makes its next Wait throw, so it
+    // raises nothing further; a handler already in flight still runs to completion, which is
+    // what the seam's "the buffer is live until the handler returns" requires.
+    //
+    // The join is bounded rather than indefinite: a consumer that blocks forever must not take
+    // the tray's teardown with it. If the cap expires the thread is abandoned, which is safe
+    // because it is a background thread holding only this capture's ring, and because it can
+    // raise at most the one handler it was already inside.
     private void StopPump()
     {
         _pumping?.Cancel();

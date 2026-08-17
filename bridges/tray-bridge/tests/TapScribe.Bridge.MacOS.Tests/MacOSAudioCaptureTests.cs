@@ -120,7 +120,7 @@ public class MacOSAudioCaptureTests
     }
 
     [Fact]
-    public void Capture_WhenAHandlerIsSlow_ReturnsTheIoThreadAnyway()
+    public async Task Capture_WhenAHandlerIsSlow_ReturnsTheIoThreadAnyway()
     {
         // The one property that makes this backend different from the Windows one. NAudio
         // raises DataAvailable on a managed thread it owns, which may allocate and block
@@ -132,9 +132,13 @@ public class MacOSAudioCaptureTests
         // that, so the raise happens off the IO thread and this is what says so.
         var hal = new FakeCoreAudioHal();
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
-        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        // Declared BEFORE the capture so they outlive it: `using` disposes in reverse, and the
+        // pump can still be inside the handler until Stop has joined it. Disposing them first
+        // is an ObjectDisposedException on a background thread, which takes the test host down
+        // rather than failing a test.
         using var handlerEntered = new ManualResetEventSlim();
         using var releaseHandler = new ManualResetEventSlim();
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
         capture.DataAvailable += (_, _) =>
         {
             handlerEntered.Set();
@@ -147,10 +151,11 @@ public class MacOSAudioCaptureTests
         Task push = Task.Run(() => hal.PushAudio(device.ObjectId, [1, 2, 3, 4]));
 
         Assert.True(handlerEntered.Wait(Wait), "the handler never ran");
-        Assert.True(
-            push.Wait(Wait),
-            "the IOProc was still inside the handler: DataAvailable is being raised on the realtime thread");
+        Assert.Same(
+            push,
+            await Task.WhenAny(push, Task.Delay(Wait)));
         releaseHandler.Set();
+        capture.Stop();   // joins the pump, so nothing is inside the handler past here
     }
 
     [Fact]
@@ -163,9 +168,11 @@ public class MacOSAudioCaptureTests
         // guard in a realtime path is worth as much as no guard.
         var hal = new FakeCoreAudioHal();
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
-        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        // Declared before the capture, for the reason spelled out in the test above: the pump
+        // may still be inside the handler until Stop has joined it.
         using var handlerEntered = new ManualResetEventSlim();
         using var releaseHandler = new ManualResetEventSlim();
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
         capture.DataAvailable += (_, _) =>
         {
             handlerEntered.Set();
@@ -182,6 +189,7 @@ public class MacOSAudioCaptureTests
 
         Assert.True(capture.Dropped > 0, "a full ring did not drop anything, so the guard is unreachable");
         releaseHandler.Set();
+        capture.Stop();   // joins the pump, so nothing is inside the handler past here
     }
 
     [Fact]
