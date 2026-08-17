@@ -12,6 +12,10 @@ namespace TapScribe.Bridge.MacOS.Tests;
 /// </summary>
 public class MacOSAudioCaptureTests
 {
+    // A liveness bound, never a timing assertion: every use is "this must happen at all",
+    // generous enough that a slow lane cannot fail it.
+    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
+
     [Fact]
     public void Capture_OnADeviceWithNoMuteProperty_ReportsUnmutedAndWatchesNothing()
     {
@@ -95,16 +99,89 @@ public class MacOSAudioCaptureTests
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
         using var capture = new MacOSAudioCapture(hal, device.ObjectId);
         List<byte[]> received = [];
+        using var bothArrived = new CountdownEvent(2);
         // Copy on receipt: the seam says the buffer may be reused after the handler returns,
         // so retaining the Memory itself would be reading whatever the NEXT buffer holds.
-        capture.DataAvailable += (_, e) => received.Add(e.Data.ToArray());
+        capture.DataAvailable += (_, e) =>
+        {
+            received.Add(e.Data.ToArray());
+            bothArrived.Signal();
+        };
 
         capture.Start();
         hal.PushAudio(device.ObjectId, [1, 2, 3, 4, 5, 6, 7, 8]);
         hal.PushAudio(device.ObjectId, [9, 10]);
 
+        // Waited for rather than read straight after the push: delivery is off the IO thread
+        // by design, so asserting inline would be a race this happens to win on a fast box.
+        Assert.True(bothArrived.Wait(Wait), $"only {received.Count} of 2 buffers arrived");
         Assert.Equal(new AudioFormat(48_000, 2, SampleKind.Float32), capture.Format);
         Assert.Equal([[1, 2, 3, 4, 5, 6, 7, 8], [9, 10]], received);
+    }
+
+    [Fact]
+    public void Capture_WhenAHandlerIsSlow_ReturnsTheIoThreadAnyway()
+    {
+        // The one property that makes this backend different from the Windows one. NAudio
+        // raises DataAvailable on a managed thread it owns, which may allocate and block
+        // freely; CoreAudio calls an IOProc on its realtime IO thread, which must return
+        // inside the device's buffer period (about 10 ms at 48 kHz) or the device drops the
+        // IOProc. The pipeline behind this event was written for the first shape: it
+        // allocates several KB per buffer and takes locks that a threadpool thread and a
+        // notification thread also take. Raising inline hands CoreAudio's deadline to all of
+        // that, so the raise happens off the IO thread and this is what says so.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        using var handlerEntered = new ManualResetEventSlim();
+        using var releaseHandler = new ManualResetEventSlim();
+        capture.DataAvailable += (_, _) =>
+        {
+            handlerEntered.Set();
+            releaseHandler.Wait(Wait);
+        };
+        capture.Start();
+
+        // Driven from another thread only so a regression FAILS rather than deadlocking the
+        // run: an inline raise leaves PushAudio inside the blocked handler forever.
+        Task push = Task.Run(() => hal.PushAudio(device.ObjectId, [1, 2, 3, 4]));
+
+        Assert.True(handlerEntered.Wait(Wait), "the handler never ran");
+        Assert.True(
+            push.Wait(Wait),
+            "the IOProc was still inside the handler: DataAvailable is being raised on the realtime thread");
+        releaseHandler.Set();
+    }
+
+    [Fact]
+    public void Capture_WhenThePumpFallsBehind_DropsBuffersRatherThanStallingTheIoThread()
+    {
+        // The other half of not blocking: a ring that is full has to answer somehow, and the
+        // only two options on this thread are overwrite a slot the pump is reading or drop.
+        // Dropping is the honest one and is counted, so a machine that cannot keep up is a
+        // number rather than a mystery. Nothing else exercises this branch, and an unreachable
+        // guard in a realtime path is worth as much as no guard.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        using var handlerEntered = new ManualResetEventSlim();
+        using var releaseHandler = new ManualResetEventSlim();
+        capture.DataAvailable += (_, _) =>
+        {
+            handlerEntered.Set();
+            releaseHandler.Wait(Wait);
+        };
+        capture.Start();
+
+        // Wedge the pump inside the first buffer, then hand the producer far more than the
+        // ring holds. Every push returns, which is the property under test.
+        hal.PushAudio(device.ObjectId, [1]);
+        Assert.True(handlerEntered.Wait(Wait), "the pump never picked up the first buffer");
+        for (int i = 0; i < 64; i++)
+            hal.PushAudio(device.ObjectId, [(byte)i]);
+
+        Assert.True(capture.Dropped > 0, "a full ring did not drop anything, so the guard is unreachable");
+        releaseHandler.Set();
     }
 
     [Fact]

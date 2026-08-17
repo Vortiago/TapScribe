@@ -25,14 +25,28 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // The running IOProc, or null while stopped.
     private CoreAudioIoProcHandle? _ioProc;
 
-    // One reusable buffer behind every DataAvailable. The HAL hands out a span onto
-    // CoreAudio's own buffer, which is recycled the moment the callback returns, and the seam
-    // takes a ReadOnlyMemory - so exactly one copy is unavoidable, and this is where the
-    // decision to make it a REUSED copy lives. It needs no synchronisation: CoreAudio serves
-    // one device's IOProc from a single IO thread, and the seam declares the buffer reusable
-    // as soon as the handler returns, which is what the reference pipeline honours by
-    // consuming it synchronously.
-    private byte[] _scratch = [];
+    // ---- the hand-off off CoreAudio's realtime thread ----------------------------------
+    //
+    // The IOProc runs on an IO thread with a hard deadline: one device buffer period, about
+    // 10 ms at 48 kHz, and a thread that overruns it repeatedly gets its IOProc dropped.
+    // Everything behind DataAvailable was written for the Windows shape, where NAudio raises
+    // on a managed thread it owns: it allocates several KB per buffer and takes locks that
+    // the tap pump and the mute notification also take, so raising inline would hand
+    // CoreAudio's deadline to a GC pause and to lock contention with non-realtime threads.
+    //
+    // So the IOProc does the one thing it must (copy out of CoreAudio's buffer, which is
+    // recycled the moment it returns) into a pre-allocated slot, publishes the index and
+    // returns. A pump thread raises the event. The producer allocates nothing, waits on
+    // nothing, and its only shared write is one Volatile.Write.
+    private const int RingSlots = 8;
+    private byte[][] _ring = [];
+    private readonly int[] _lengths = new int[RingSlots];
+    private long _written;              // producer-only, published with Volatile.Write
+    private long _read;                 // pump-only, published with Volatile.Write
+    private long _dropped;              // producer-only, diagnostic
+    private SemaphoreSlim? _filled;     // one release per published slot
+    private Thread? _pump;
+    private CancellationTokenSource? _pumping;
 
     public AudioFormat Format { get; }
 
@@ -88,17 +102,63 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         MuteChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    // Runs on the CoreAudio IO thread, once per buffer.
+    /// <summary>Buffers CoreAudio delivered that the pump never got to, because it was still
+    /// behind when the ring filled. Non-zero means the machine could not keep up; the count is
+    /// what a later slice would surface rather than guess at.</summary>
+    internal long Dropped => Interlocked.Read(ref _dropped);
+
+    // Runs on the CoreAudio IO thread, once per buffer. Allocation-free and lock-free by
+    // construction: everything it touches was sized in Start.
     private void OnIoProc(ReadOnlySpan<byte> audio)
     {
-        EventHandler<AudioCapturedEventArgs>? handlers = DataAvailable;
-        if (handlers is null)
+        SemaphoreSlim? filled = _filled;
+        if (filled is null)
             return;
 
-        if (_scratch.Length < audio.Length)
-            _scratch = new byte[audio.Length];
-        audio.CopyTo(_scratch);
-        handlers(this, new AudioCapturedEventArgs(_scratch.AsMemory(0, audio.Length)));
+        // Full ring means the pump is behind. Drop THIS buffer rather than overwrite one the
+        // pump has not read: overwriting would hand it a slot changing underneath it, and
+        // blocking would miss the deadline, which is the one thing this thread must not do.
+        if (_written - Volatile.Read(ref _read) >= RingSlots)
+        {
+            _dropped++;
+            return;
+        }
+
+        int slot = (int)(_written % RingSlots);
+        byte[] target = _ring[slot];
+        // Larger than any buffer Start sized for. Dropping beats allocating on this thread.
+        if (audio.Length > target.Length)
+        {
+            _dropped++;
+            return;
+        }
+
+        audio.CopyTo(target);
+        _lengths[slot] = audio.Length;
+        Volatile.Write(ref _written, _written + 1);
+        filled.Release();
+    }
+
+    // The pump. Raises DataAvailable off the IO thread, one buffer at a time and in order, so
+    // the seam's "the buffer is reusable once the handler returns" still holds: a slot is only
+    // returned to the producer after the handler for it has returned.
+    private void PumpLoop(SemaphoreSlim filled, CancellationToken stopping)
+    {
+        try
+        {
+            while (true)
+            {
+                filled.Wait(stopping);
+                int slot = (int)(_read % RingSlots);
+                DataAvailable?.Invoke(
+                    this, new AudioCapturedEventArgs(_ring[slot].AsMemory(0, _lengths[slot])));
+                Volatile.Write(ref _read, _read + 1);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Stop or Dispose cancelled the wait, which is the only way out of the loop.
+        }
     }
 
     public void Start()
@@ -110,6 +170,31 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         if (_ioProc is not null)
             throw new InvalidOperationException($"device {_deviceId} is already capturing");
 
+        // Everything the IO thread will touch, allocated before it can run. The slot size is
+        // a whole second of this device's format, which no sane buffer period approaches, so
+        // the producer's over-length drop is a guard rather than a working path.
+        _written = 0;
+        _read = 0;
+        _dropped = 0;
+        int slotBytes = Format.SampleRate * Format.BytesPerInterleavedFrame;
+        _ring = new byte[RingSlots][];
+        for (int i = 0; i < RingSlots; i++)
+            _ring[i] = new byte[slotBytes];
+
+        var filled = new SemaphoreSlim(0);
+        var pumping = new CancellationTokenSource();
+        // Started BEFORE the IOProc, so the first buffer has somewhere to go. IsBackground so
+        // a pump nobody stopped cannot hold the process up.
+        var pump = new Thread(() => PumpLoop(filled, pumping.Token))
+        {
+            IsBackground = true,
+            Name = $"tapscribe-capture-{_deviceId}",
+        };
+        _filled = filled;
+        _pumping = pumping;
+        _pump = pump;
+        pump.Start();
+
         CoreAudioIoProcHandle ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
         try
         {
@@ -117,6 +202,7 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         }
         catch
         {
+            StopPump();
             // Registered but not running. Unregister before letting the failure out: the tray
             // retries a device that refused, so keeping it would leak one registration per
             // attempt for the process lifetime. Assigning _ioProc only AFTER the start
@@ -198,8 +284,27 @@ internal sealed class MacOSAudioCapture : IAudioCapture
                 // mask whatever StopIo reported, which is the failure the caller can actually
                 // act on; nothing is lost, since a registration on a dead device dies with it.
             }
+            // After the IOProc is down, never before: the producer writes to the ring and
+            // releases the semaphore, so tearing this down first would leave a live IO thread
+            // publishing into a pump that has gone.
+            StopPump();
         }
 
         return true;
+    }
+
+    // Cancel the pump and wait for it to leave, so no DataAvailable can land after the call
+    // that stopped the capture returns. Bounded: the pump's only blocking wait is the one
+    // being cancelled, so it exits promptly or the process is in a state a longer wait would
+    // not fix.
+    private void StopPump()
+    {
+        _pumping?.Cancel();
+        _filled = null;
+        _pump?.Join(TimeSpan.FromSeconds(2));
+        _pumping?.Dispose();
+        _pumping = null;
+        _pump = null;
+        _ring = [];
     }
 }
