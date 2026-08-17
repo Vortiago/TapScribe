@@ -105,4 +105,69 @@ public class MacOSAudioCaptureTests
         Assert.Equal(new AudioFormat(48_000, 2, SampleKind.Float32), capture.Format);
         Assert.Equal([[1, 2, 3, 4, 5, 6, 7, 8], [9, 10]], received);
     }
+
+    [Fact]
+    public void Capture_OnACleanStop_RaisesFailedWithNoError()
+    {
+        // Failed is how the pipeline learns this device stopped delivering. A clean stop is
+        // one of the ways that happens, and the seam spells it as a null payload precisely so
+        // it does not read as "microphone lost - audio not being captured".
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+
+        capture.Start();
+        capture.Stop();
+
+        Assert.Equal([null], failures);
+        // Stopped AND unregistered. The fake refuses to destroy a running IOProc the way
+        // CoreAudio does, so reaching zero on both counters is also the teardown ORDER.
+        Assert.Equal(0, hal.RunningIoProcs);
+        Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
+    public void Capture_StoppedWhenItWasNeverStarted_RaisesNothing()
+    {
+        // The seam documents Stop as safe to call when not started, and teardown paths do
+        // call it blind. Nothing was delivering, so there is no end-of-stream to announce:
+        // a Failed here would have the pipeline report a device that never ran.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+
+        capture.Stop();
+        capture.Start();
+        capture.Stop();
+        capture.Stop();
+
+        // Exactly one, from the one stop that ended a running stream.
+        Assert.Equal([null], failures);
+    }
+
+    [Fact]
+    public void Capture_DisposedWithoutStopping_ReleasesEverythingAndAnnouncesNothing()
+    {
+        // Dispose is not a stop being reported: by the time an owner releases the capture it
+        // has already let go of the events, so raising Failed there would be a signal with
+        // nobody to act on it. What Dispose owes is the release - the IOProc and the mute
+        // listener - since the seam binds it to leave no handle behind.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        capture.Dispose();
+
+        Assert.Empty(failures);
+        Assert.Equal(0, hal.RunningIoProcs);
+        Assert.Equal(0, hal.LiveIoProcs);
+        Assert.Equal(0, hal.LiveListeners);
+    }
 }

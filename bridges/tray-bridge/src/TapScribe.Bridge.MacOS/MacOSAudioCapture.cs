@@ -109,13 +109,65 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Stop()
     {
+        // Announced only when this call is what ENDED a running stream. A blind Stop from a
+        // teardown path, or a second one, released nothing, so there is no end of stream to
+        // report and a Failed here would have the pipeline announce a device that never ran.
+        if (ReleaseIoProc())
+            Failed?.Invoke(this, null);
     }
 
     public void Dispose()
     {
-        // Detaching is what stops a late notification landing mid-teardown. The registration
-        // is contract-bound not to throw, so there is nothing to guard here.
+        try
+        {
+            ReleaseIoProc();
+        }
+        catch (CoreAudioException)
+        {
+            // The endpoint was invalidated while capture ran (unplugged, disabled, default
+            // switched), so CoreAudio refuses to stop what is already gone. Swallowed because
+            // Dispose is contract-bound not to throw: every teardown path reaches it from a
+            // finally or from the tray's bounded Quit, and a throw here strands the device for
+            // the process lifetime. What is lost is the report, which Stop would have
+            // propagated to an owner that could still act on it.
+        }
+
+        // Detaching is what stops a late notification landing mid-teardown.
         _muteListener?.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    // Stop and unregister the IOProc, in that order: CoreAudio refuses to destroy a running
+    // one. Returns whether there was one to release, which is what tells a clean stop apart
+    // from a stop that stopped nothing. Deliberately does NOT raise Failed: Dispose releases
+    // through here too, and by then the owner has let go of the events, so a signal raised
+    // there has nobody to act on it.
+    private bool ReleaseIoProc()
+    {
+        CoreAudioIoProcHandle? ioProc = _ioProc;
+        if (ioProc is null)
+            return false;
+        _ioProc = null;
+
+        try
+        {
+            _hal.StopIo(ioProc);
+        }
+        finally
+        {
+            try
+            {
+                _hal.DestroyIoProc(ioProc);
+            }
+            catch (CoreAudioException)
+            {
+                // The endpoint is gone, so there is no registration left for CoreAudio to
+                // remove and it says so. Swallowed rather than propagated because it would
+                // mask whatever StopIo reported, which is the failure the caller can actually
+                // act on; nothing is lost, since a registration on a dead device dies with it.
+            }
+        }
+
+        return true;
     }
 }
