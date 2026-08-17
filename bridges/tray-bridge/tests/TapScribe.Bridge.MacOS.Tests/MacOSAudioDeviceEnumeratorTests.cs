@@ -161,4 +161,22 @@ public class MacOSAudioDeviceEnumeratorTests
         Assert.Null(Record.Exception(enumerator.Dispose));
         Assert.Equal(1, hal.Disposals);
     }
+
+    [Fact]
+    public void List_WhenTheDeviceTreeCannotBeWalked_ThrowsRatherThanAnsweringEmpty()
+    {
+        // Green when written, and here to STAY green. The seam is explicit that an empty list
+        // means "no endpoints", never "the question could not be asked", and the tempting
+        // defensive edit is a try/catch that returns [] so the picker does not blow up. That
+        // would tell the operator their mic is gone when the audio service is merely down, and
+        // the callers that survive a failed enumeration filter on this exception to tell those
+        // apart.
+        var hal = new FakeCoreAudioHal
+        {
+            ListDevicesError = new CoreAudioException("walking the device list", -66748),
+        };
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        Assert.IsAssignableFrom<ExternalException>(Record.Exception(() => enumerator.List()));
+    }
 }
