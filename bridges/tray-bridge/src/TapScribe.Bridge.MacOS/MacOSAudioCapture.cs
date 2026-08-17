@@ -103,8 +103,33 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Start()
     {
-        _ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
-        _hal.StartIo(_ioProc);
+        CoreAudioIoProcHandle ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
+        try
+        {
+            _hal.StartIo(ioProc);
+        }
+        catch
+        {
+            // Registered but not running. Unregister before letting the failure out: the tray
+            // retries a device that refused, so keeping it would leak one registration per
+            // attempt for the process lifetime. Assigning _ioProc only AFTER the start
+            // succeeds is the other half - a failed Start leaves this instance holding
+            // nothing, so a later Stop has nothing to release and announces nothing.
+            try
+            {
+                _hal.DestroyIoProc(ioProc);
+            }
+            catch (CoreAudioException)
+            {
+                // The device that just refused to start is refusing this too, which is what a
+                // half-gone endpoint does. Swallowed so it cannot mask the start failure the
+                // caller filters on; what is lost is one registration on a device already
+                // failing, which goes when the device does.
+            }
+            throw;
+        }
+
+        _ioProc = ioProc;
     }
 
     public void Stop()

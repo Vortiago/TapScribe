@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.MacOS.Tests;
@@ -169,5 +170,45 @@ public class MacOSAudioCaptureTests
         Assert.Equal(0, hal.RunningIoProcs);
         Assert.Equal(0, hal.LiveIoProcs);
         Assert.Equal(0, hal.LiveListeners);
+    }
+
+    [Fact]
+    public void Capture_WhenTheDeviceRefusesToStart_ThrowsExternalExceptionAndLeavesNoIoProc()
+    {
+        // kAudioHardwareNotRunningError: the device is there but will not run, which is what
+        // an endpoint already held exclusively answers. ExternalException is the seam's
+        // declared failure type for a native error, and it is not decoration:
+        // CaptureOrchestrator.StartAll filters on exactly it to skip a dead device without
+        // sinking the meeting, so a platform-specific type leaking here sinks it.
+        var hal = new FakeCoreAudioHal
+        {
+            StartIoError = new CoreAudioException("starting the IOProc on device 41", -66780),
+        };
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+
+        Assert.Throws<CoreAudioException>(capture.Start);
+        Assert.IsAssignableFrom<ExternalException>(
+            Record.Exception(capture.Start));
+
+        // The registration is made before the start, so a device that refuses would otherwise
+        // leak one per attempt, and the tray retries. Both attempts above cleaned up.
+        Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
+    public void Capture_WhenTheDeviceRefusesTheIoProc_ThrowsExternalException()
+    {
+        // The other native call Start makes. Same declared type, because the caller's question
+        // is "did the platform refuse this endpoint", not "at which call".
+        var hal = new FakeCoreAudioHal
+        {
+            CreateIoProcError = new CoreAudioException("creating an IOProc on device 41", -66748),
+        };
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+
+        Assert.IsAssignableFrom<ExternalException>(Record.Exception(capture.Start));
+        Assert.Equal(0, hal.LiveIoProcs);
     }
 }
