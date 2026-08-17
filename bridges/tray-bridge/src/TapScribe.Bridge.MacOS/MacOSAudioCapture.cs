@@ -22,6 +22,18 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // and the gate reads it on another.
     private volatile bool _muted;
 
+    // The running IOProc, or null while stopped.
+    private CoreAudioIoProcHandle? _ioProc;
+
+    // One reusable buffer behind every DataAvailable. The HAL hands out a span onto
+    // CoreAudio's own buffer, which is recycled the moment the callback returns, and the seam
+    // takes a ReadOnlyMemory - so exactly one copy is unavoidable, and this is where the
+    // decision to make it a REUSED copy lives. It needs no synchronisation: CoreAudio serves
+    // one device's IOProc from a single IO thread, and the seam declares the buffer reusable
+    // as soon as the handler returns, which is what the reference pipeline honours by
+    // consuming it synchronously.
+    private byte[] _scratch = [];
+
     public AudioFormat Format { get; }
 
     /// <summary>True while the endpoint is muted at the OS level. Permanently false on a
@@ -76,8 +88,23 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         MuteChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    // Runs on the CoreAudio IO thread, once per buffer.
+    private void OnIoProc(ReadOnlySpan<byte> audio)
+    {
+        EventHandler<AudioCapturedEventArgs>? handlers = DataAvailable;
+        if (handlers is null)
+            return;
+
+        if (_scratch.Length < audio.Length)
+            _scratch = new byte[audio.Length];
+        audio.CopyTo(_scratch);
+        handlers(this, new AudioCapturedEventArgs(_scratch.AsMemory(0, audio.Length)));
+    }
+
     public void Start()
     {
+        _ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
+        _hal.StartIo(_ioProc);
     }
 
     public void Stop()

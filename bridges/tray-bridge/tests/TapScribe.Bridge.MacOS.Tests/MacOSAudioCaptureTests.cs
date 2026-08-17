@@ -83,4 +83,26 @@ public class MacOSAudioCaptureTests
         Assert.True(capture.IsMuted);
         Assert.Equal(0, muteEvents);
     }
+
+    [Fact]
+    public void Capture_WhileStarted_SurfacesIoProcAudioAsDataAvailable()
+    {
+        // The whole point of the backend. The fake refuses to deliver into a device with no
+        // RUNNING IOProc, so this also pins that Start actually created and started one
+        // rather than leaving the callback wired to nothing.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<byte[]> received = [];
+        // Copy on receipt: the seam says the buffer may be reused after the handler returns,
+        // so retaining the Memory itself would be reading whatever the NEXT buffer holds.
+        capture.DataAvailable += (_, e) => received.Add(e.Data.ToArray());
+
+        capture.Start();
+        hal.PushAudio(device.ObjectId, [1, 2, 3, 4, 5, 6, 7, 8]);
+        hal.PushAudio(device.ObjectId, [9, 10]);
+
+        Assert.Equal(new AudioFormat(48_000, 2, SampleKind.Float32), capture.Format);
+        Assert.Equal([[1, 2, 3, 4, 5, 6, 7, 8], [9, 10]], received);
+    }
 }
