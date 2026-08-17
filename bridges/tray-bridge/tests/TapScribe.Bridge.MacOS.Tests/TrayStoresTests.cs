@@ -13,11 +13,11 @@ public class TrayStoresTests
     [Fact]
     public void BridgeAppData_IsTheApplicationSupportFolder()
     {
-        // ~/Library/Application Support/TapScribe, built from the home directory and Apple's
-        // own path. Deliberately NOT SpecialFolder.ApplicationData, which every other
-        // platform layer here reaches for: .NET follows the XDG spec on Unix and resolves
-        // that to ~/.config, so a mirrored Windows line would ship the wrong folder with a
-        // perfectly green test.
+        // ~/Library/Application Support/TapScribe on every host, which is the point: this
+        // assembly's tests run on the ubuntu lane too, and SpecialFolder.ApplicationData
+        // answers ~/.config there (it does answer the path below on a Mac, so the Windows
+        // sibling's line is not wrong, just not lane-independent). Composing the path is
+        // what lets this assertion run without [RequiresMacOS].
         string expected = Path.Join(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             "Library",
@@ -25,7 +25,6 @@ public class TrayStoresTests
             "TapScribe");
 
         Assert.Equal(expected, BridgeAppData.Directory);
-        Assert.DoesNotContain(".config", BridgeAppData.Directory);
     }
 
     [Fact]

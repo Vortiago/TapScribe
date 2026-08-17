@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>A <see cref="FactAttribute"/> that skips the test at discovery unless the host
@@ -9,16 +7,21 @@ namespace TapScribe.Bridge.MacOS.Tests;
 ///
 /// Sets the standard <c>Skip</c> property, which every runner honours (xunit v2's
 /// dynamic-skip token is NOT recognised by <c>dotnet test</c>), so the ubuntu lane skips
-/// these cleanly instead of failing.</summary>
+/// these cleanly instead of failing.
+///
+/// Gates on <c>OperatingSystem.IsMacOS()</c>, the same predicate the guards under test use.
+/// The two are not interchangeable (Mac Catalyst is where they part), and a test gated on
+/// one while asserting about the other is a test that can run against a library that
+/// refuses, or skip while the guard it covers is live.</summary>
 internal sealed class RequiresMacOSAttribute : FactAttribute
 {
     /// <param name="capability">What the test needs a Mac FOR, folded into the skip reason.
     /// The ubuntu lane's skip list is the only signal that a piece of P/Invoke went
     /// unexercised there, so it has to name the capability rather than whichever test
     /// happened to be written first.</param>
-    public RequiresMacOSAttribute(string capability = "answer for itself")
+    public RequiresMacOSAttribute(string capability)
     {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        if (!OperatingSystem.IsMacOS())
             Skip = $"not running macOS, so this host cannot {capability}";
     }
 }
@@ -37,9 +40,9 @@ internal sealed class RequiresNonMacOSAttribute : FactAttribute
 {
     /// <param name="contract">What the test pins about being off a Mac, folded into the skip
     /// reason so the macos lane's skip list says which contract went unexercised there.</param>
-    public RequiresNonMacOSAttribute(string contract = "behave as a non-Mac host")
+    public RequiresNonMacOSAttribute(string contract)
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        if (OperatingSystem.IsMacOS())
             Skip = $"running macOS, so this host cannot {contract}";
     }
 }

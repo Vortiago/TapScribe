@@ -493,7 +493,10 @@ jobs:
           # runner's own.
           existing=$(security list-keychains -d user | tr -d ' "')
           security create-keychain -p ci-throwaway tapscribe-ci.keychain
-          security set-keychain-settings -lut 7200 tapscribe-ci.keychain
+          # No flags is literally "no-timeout": a fresh keychain defaults to
+          # lock-on-sleep with a 300s fuse, which is shorter than this job, and
+          # -l/-u would keep locking enabled rather than turn it off.
+          security set-keychain-settings tapscribe-ci.keychain
           security unlock-keychain -p ci-throwaway tapscribe-ci.keychain
           security default-keychain -s tapscribe-ci.keychain
           security list-keychains -d user -s tapscribe-ci.keychain $existing
@@ -539,9 +542,10 @@ jobs:
       # The Mac platform layer is net10.0: the floor is Version arithmetic and the
       # version read is a libc P/Invoke, so it needs neither Xcode nor the macos
       # workload. Running it here gates Mac policy on the lane every PR crosses.
-      # The tests that ask the running OS itself (this host's version, this
-      # host's login Keychain) carry [RequiresMacOS] and skip at discovery, each
-      # naming the capability it wanted; the macos job is where they run.
+      # The tests that ask the running OS itself carry [RequiresMacOS] and skip at
+      # discovery, each naming the capability it wanted in its skip reason; the
+      # macos job is where they run. That skip list is the enumeration, so this
+      # comment deliberately does not keep a second one in prose.
       - name: Build + test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 

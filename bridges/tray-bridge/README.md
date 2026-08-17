@@ -109,10 +109,11 @@ dotnet test tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.cspr
 
 The Mac policy tests take the running macOS version as a parameter, so they
 mean the same thing on any host. The handful that ask the running OS itself
-(this Mac's version, this Mac's login Keychain) carry `[RequiresMacOS]` and
-skip at discovery off a Mac, each naming the capability it wanted so the skip
-list says what went unexercised. `[RequiresNonMacOS]` is the mirror, for the
-tests that pin what the Mac layer answers when it is NOT on a Mac.
+carry `[RequiresMacOS]` and skip at discovery off a Mac, each naming the
+capability it wanted, so the skip list itself says what went unexercised and
+no prose here has to keep a second list of them. `[RequiresNonMacOS]` is the
+mirror, for the tests that pin what the Mac layer answers when it is NOT on a
+Mac.
 
 `TapClientWebSocketTests` covers `/tap` negotiation + binary framing (tokened
 and `--no-auth`) against an in-process Kestrel server, and

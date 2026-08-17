@@ -101,8 +101,8 @@ internal sealed partial class SecKeychainItems(string service, string account) :
             scope,
             [
                 (Globals.Class, Globals.ClassGenericPassword),
-                (Globals.AttrService, scope.Keep(CFString(service))),
-                (Globals.AttrAccount, scope.Keep(CFString(account))),
+                (Globals.AttrService, CfString(scope, service)),
+                (Globals.AttrAccount, CfString(scope, account)),
                 .. extra,
             ]);
 
@@ -127,8 +127,10 @@ internal sealed partial class SecKeychainItems(string service, string account) :
         return scope.Keep(CFDataCreate(IntPtr.Zero, bytes, bytes.Length));
     }
 
-    private static IntPtr CFString(string value) =>
-        CFStringCreateWithCString(IntPtr.Zero, value, EncodingUtf8);
+    // Takes the scope like every other factory here. The one CF object this file created
+    // without handing it over was the only leak still writable by forgetting a wrapper.
+    private static IntPtr CfString(CfScope scope, string value) =>
+        scope.Keep(CFStringCreateWithCString(IntPtr.Zero, value, EncodingUtf8));
 
     // The length-taking overload, not the NUL-terminated one: a CFData is a byte count and a
     // pointer, with no terminator promised, so reading it as a C string would run past the

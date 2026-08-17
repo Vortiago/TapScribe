@@ -41,7 +41,7 @@ public class SecKeychainItemsLoadingTests
         // of the four is guarded rather than three of them. Without it nothing on any lane
         // calls into this type off a Mac, so deleting a guard is invisible: the ubuntu lane
         // stays green because no test ever reached the dlopen it would have unleashed.
-        var keychain = new SecKeychainItems("TapScribe Tray Bridge (test)", "off-a-mac");
+        SecKeychainItems keychain = TestKeychain.Item("off-a-mac");
 
         Assert.Equal(KeychainStatus.NotAvailable, keychain.Copy(out string? secret));
         Assert.Null(secret);

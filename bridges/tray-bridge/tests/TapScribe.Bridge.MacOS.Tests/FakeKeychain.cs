@@ -1,5 +1,21 @@
 namespace TapScribe.Bridge.MacOS.Tests;
 
+/// <summary>How a test reaches the REAL Keychain, and the only sanctioned way to do it.
+/// Every item it hands out is under a service of its own, never
+/// <see cref="KeychainTapTokenStore.ServiceName"/>: a test that ran against the production
+/// pair would delete the token off the machine of whoever ran the suite. Spelling that
+/// service by hand in each test made the safeguard a comment repeated per file, and one
+/// paste away from failing silently.</summary>
+internal static class TestKeychain
+{
+    private const string Service = "TapScribe Tray Bridge (test)";
+
+    /// <summary>A live Keychain seam over an item nothing else will touch. The account is
+    /// fresh per call so two tests, or two runs of one test, cannot collide.</summary>
+    public static SecKeychainItems Item(string what) =>
+        new(Service, $"{what}-{Guid.NewGuid()}");
+}
+
 /// <summary>
 /// A hand-written <see cref="IKeychainItems"/> standing in for the login Keychain (#419):
 /// the one item the seam speaks for, plus settable statuses so a test can drive the refusals
@@ -12,13 +28,16 @@ internal sealed class FakeKeychain : IKeychainItems
     private string? _stored;
 
     /// <summary>When set, every call answers with this instead of doing the work, which is
-    /// how a denied Keychain is driven.</summary>
+    /// how a wholly denied Keychain is driven.</summary>
     public int? Refuses { get; set; }
 
-    /// <summary>When set, only the calls that STORE answer with this. A real Keychain can
-    /// refuse to write while still answering a read or a delete: it locks between two calls,
-    /// or an ACL covers writing the item but not finding it. That asymmetry is the whole
-    /// difficulty of replacing a secret, so it needs its own knob.</summary>
+    /// <summary>When set, only the calls that STORE refuse; reads and deletes still work.
+    /// Not a convenience over <see cref="Refuses"/>: a blanket refusal blocks the DELETE
+    /// too, which closes the very window a destructive save would fall into, so the test
+    /// for "a refused store must not cost the operator their existing token" cannot be
+    /// written with one knob. It passes against delete-then-add, which is the bug. A real
+    /// Keychain does this whenever it locks between two calls, or when an ACL covers
+    /// writing an item but not finding it.</summary>
     public int? RefusesStore { get; set; }
 
     private int? StoreRefusal => RefusesStore ?? Refuses;

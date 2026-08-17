@@ -9,11 +9,12 @@ namespace TapScribe.Bridge.MacOS;
 /// </summary>
 internal static class BridgeAppData
 {
-    // Composed from the home directory and Apple's literal path rather than from
-    // SpecialFolder.ApplicationData, which is what the Windows sibling uses: on Unix .NET
-    // follows the XDG spec and resolves that to ~/.config. Mirroring the Windows line here
-    // would put an operator's settings somewhere no Mac app looks, and no test that only
-    // compared the two would notice.
+    // Composed from the home directory rather than from SpecialFolder.ApplicationData,
+    // which is what the Windows sibling uses and which does resolve to
+    // ~/Library/Application Support on a Mac. The reason is the LANE, not the mapping:
+    // this assembly is plain net10.0 and its tests run on ubuntu, where that same call
+    // answers ~/.config. Composing the path makes this value the operator's Mac path on
+    // every host, so TrayStoresTests can assert it without needing a Mac to run on.
     public static string Directory => Path.Join(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         "Library",

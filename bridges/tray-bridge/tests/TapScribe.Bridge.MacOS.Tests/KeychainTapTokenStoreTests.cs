@@ -123,6 +123,8 @@ public class KeychainTapTokenStoreTests
         var store = new KeychainTapTokenStore(keychain);
         store.Write("first-token");
 
+        // Refuses the STORE only. A blanket refusal would block the delete too, closing the
+        // very window this is about, and would pass against the delete-then-add bug.
         keychain.RefusesStore = KeychainStatus.InteractionNotAllowed;
         store.Write("second-token");
         keychain.RefusesStore = null;
@@ -149,9 +151,9 @@ public class KeychainTapTokenStoreTests
         // The one test that talks to the login Keychain, and the only way the P/Invoke half
         // is proved at all: the fake above proves the policy but nothing about whether
         // SecItemAdd was handed a dictionary it understands. Driven at the seam rather than
-        // through the store so it can use an item of its own - running the store's real
-        // service and account here would delete the tester's actual saved token.
-        var keychain = new SecKeychainItems("TapScribe Tray Bridge (test)", $"round-trip-{Guid.NewGuid()}");
+        // through the store, via TestKeychain, which owns the rule that a live test never
+        // runs against the production service.
+        SecKeychainItems keychain = TestKeychain.Item("round-trip");
 
         // Deliberately not ASCII. The secret crosses hand-written interop twice, out through
         // CFDataCreate over Encoding.UTF8's bytes and back through CFDataGetBytePtr over a

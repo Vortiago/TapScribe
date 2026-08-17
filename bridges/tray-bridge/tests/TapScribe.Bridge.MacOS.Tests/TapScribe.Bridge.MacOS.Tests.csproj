@@ -3,9 +3,9 @@
   <!-- Tests for the Mac platform layer. net10.0 like the library, so they run on
        every CI lane including ubuntu: the macOS floor is pure policy and deserves
        to be gated on the cheap job every PR crosses, not only on the Xcode
-       runner. The few tests that ask the running OS itself (this host's version,
-       this host's login Keychain) carry [RequiresMacOS] and skip at discovery
-       elsewhere. -->
+       runner. The few tests that ask the running OS itself carry [RequiresMacOS]
+       and skip at discovery elsewhere, each naming the capability it wanted; that
+       skip list is the enumeration, so this comment does not keep a second. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
