@@ -122,7 +122,25 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     /// so the core must survive a backend that doesn't swallow it.</summary>
     public Exception? StopError { get; init; }
 
-    public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
+    /// <summary>When set, UNSUBSCRIBING from this throws it: the endpoint was invalidated by
+    /// the time its owner let go. It is the one failure that reaches the end-of-meeting DRAIN
+    /// rather than the dispose (<see cref="TapSession.DrainAllAsync"/> detaches before it
+    /// awaits), so it is how a test says "the barrier faulted part-way" and asks what the
+    /// teardown released anyway.</summary>
+    public Exception? DetachError { get; init; }
+
+    private EventHandler<AudioCapturedEventArgs>? _data;
+
+    public event EventHandler<AudioCapturedEventArgs>? DataAvailable
+    {
+        add => _data += value;
+        remove
+        {
+            if (DetachError is not null)
+                throw DetachError;
+            _data -= value;
+        }
+    }
 
     public bool IsMuted { get; private set; }
     public event EventHandler? MuteChanged;
@@ -142,9 +160,31 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
         if (StopError is not null)
             throw StopError;
     }
-    public void Dispose() => Interlocked.Increment(ref _disposals);
+    /// <summary>When set, <see cref="Dispose"/> blocks until it is released: a device that HANGS
+    /// closing, which is what a teardown cap is a backstop against. It sits on Dispose rather
+    /// than on Stop deliberately: Stop runs before <see cref="TapSession.DisposeAsync"/>'s only
+    /// await, so holding there would block the caller instead of leaving the teardown TASK
+    /// outstanding, and a caller that is blocked never reaches the cap at all. Bounded, so a
+    /// regression that puts the release back on the caller's thread is a slow failure rather
+    /// than a hung run.</summary>
+    public ManualResetEventSlim? DisposeHold { get; init; }
 
-    public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
+    /// <summary>Set once <see cref="Dispose"/> has been reached and is waiting on
+    /// <see cref="DisposeHold"/>: the anti-vacuity guard for a test that needs the teardown to
+    /// still be in flight.</summary>
+    public ManualResetEventSlim DisposeReached { get; } = new(false);
+
+    public void Dispose()
+    {
+        if (DisposeHold is not null)
+        {
+            DisposeReached.Set();
+            DisposeHold.Wait(TimeSpan.FromSeconds(10));
+        }
+        Interlocked.Increment(ref _disposals);
+    }
+
+    public void Emit(byte[] pcm) => _data?.Invoke(this, new AudioCapturedEventArgs(pcm));
 
     /// <summary>Raise <see cref="Failed"/> — the synthetic stand-in for the OS
     /// invalidating the endpoint mid-capture (unplugged/disabled). A null
@@ -184,19 +224,75 @@ internal sealed class FakeAudioDeviceEnumerator : IAudioDeviceEnumerator
         return capture;
     }
 
+    /// <summary>Register a device whose capture is scripted by the caller (a start that
+    /// throws, a detach that throws) instead of the plain one <see cref="Add"/> builds.</summary>
+    public void Add(CaptureDevice device, FakeAudioCapture capture)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        _devices.Add(device);
+        _captures[device.Id] = capture;
+    }
+
+    /// <summary>Make <see cref="Open"/> throw for one device: the endpoint is in use, gone, or
+    /// offers no format the pipeline can take. Registered per device rather than per call
+    /// ordinal, because a test about "the OTHER device still records" has to name which one
+    /// died for its assertion to mean anything.</summary>
+    public void FailOpen(string deviceId, Exception error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        _openErrors[deviceId] = error;
+    }
+
+    private readonly Dictionary<string, Exception> _openErrors = new(StringComparer.Ordinal);
+
     public IReadOnlyList<CaptureDevice> List() => _devices.ToList();
 
-    public IAudioCapture Open(CaptureDevice device) =>
-        _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
-            ? capture
-            : throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+    public IAudioCapture Open(CaptureDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        if (_openErrors.TryGetValue(device.Id, out Exception? error))
+            throw error;
+        if (!_captures.TryGetValue(device.Id, out FakeAudioCapture? capture))
+            throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+        _opened.Add(capture);
+        return capture;
+    }
+
+    /// <summary>Captures handed out, oldest first: what this enumerator's owner is on the
+    /// hook for. Note "opened", not "started": the seam hands back a capture that is NOT
+    /// running (a <see cref="TapSession"/> starts it), so this, never
+    /// <see cref="FakeAudioCapture.Started"/>, is what says something has taken ownership of
+    /// a thing it now has to release.</summary>
+    public IReadOnlyList<FakeAudioCapture> Opened => _opened;
+
+    private readonly List<FakeAudioCapture> _opened = [];
 
     /// <summary>Records the release. There are no handles behind this fake, but the seam
     /// declares one, so the double answers it rather than leaving a real backend's obligation
     /// invisible to the tests.</summary>
-    public bool Disposed { get; private set; }
+    public bool Disposed => Volatile.Read(ref _disposals) > 0;
 
-    public void Dispose() => Disposed = true;
+    /// <summary>How many times it was released. An owner fixing a leak must not turn it into
+    /// a double release: <see cref="IDisposable"/> is contract-bound to be throw-free, never
+    /// to be idempotent.</summary>
+    public int Disposals => Volatile.Read(ref _disposals);
+
+    private int _disposals;
+
+    /// <summary>Whether every capture this enumerator handed out had already been released by
+    /// the time the enumerator itself was. That ordering is the claim: an enumerator hands its
+    /// endpoint over to the capture it opens, so releasing it while a capture is still live
+    /// inverts the ownership. Null until it is released at all, and latched on the FIRST
+    /// release, since recomputing it on a second would measure the ordering against captures
+    /// that are all released by then, so a double release would overwrite its own
+    /// evidence.</summary>
+    public bool? CapturesReleasedFirst { get; private set; }
+
+    public void Dispose()
+    {
+        CapturesReleasedFirst ??= _opened.TrueForAll(c => c.Disposed);
+        Interlocked.Increment(ref _disposals);
+    }
 }
 
 /// <summary>

@@ -4,4 +4,25 @@
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
+  <!-- The capture seam declares ExternalException as its native failure type, and until now
+       that was PROSE only: 0B-1 converted five of seven catch sites and the two it missed
+       stayed green, because a Windows COMException satisfies both spellings and Windows is
+       where the shell ran. BannedSymbols.txt makes that spelling a build error in this
+       project, which is the one that must hold for a Core Audio backend too.
+
+       RS0030 reports symbol USAGES (construction, member access), and deliberately not type
+       references in a catch clause or a type pattern. Those are the shape the defect actually
+       took, so the source gate in tests/test_bridge_core_exception_seam.py covers them; this
+       covers everything an alias or a rename could hide from a text search. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="BannedSymbols.txt" />
+  </ItemGroup>
+
+  <!-- A warning would be a note nobody reads, on a rule whose whole point is that the wrong
+       spelling looks right. -->
+  <PropertyGroup>
+    <WarningsAsErrors>$(WarningsAsErrors);RS0030</WarningsAsErrors>
+  </PropertyGroup>
+
 </Project>

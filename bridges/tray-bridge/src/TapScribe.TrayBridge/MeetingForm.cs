@@ -8,14 +8,18 @@ namespace TapScribe.TrayBridge;
 /// Copy button. Pure presentation — no decisions live here; <see cref="Render"/> just
 /// re-applies the projection as new poll views arrive.
 ///
-/// Two callers (#107 + #168): the End-meeting flow opens it straight at the finished
-/// summary (<c>new MeetingForm(); Render(doneView)</c>), and a Past-meetings re-open
-/// (#168) shows it immediately in the Loading state and feeds it a
-/// <see cref="MeetingController"/>'s emissions — Loading → progress → summary (or a
+/// Two callers (#107 + #168), both through <see cref="ITrayView.OpenMeetingWindow"/>: the
+/// End-meeting flow opens it and renders the finished summary straight into it, and a
+/// Past-meetings re-open (#168) leaves it in the Loading state while a
+/// <see cref="MeetingController"/>'s emissions arrive: Loading → progress → summary (or a
 /// "no longer available" failure). It starts in the Loading state so an empty window is
 /// never shown.
+///
+/// It closes on the operator's terms and reports that as <see cref="IMeetingWindow.Closed"/>,
+/// which is what stops the poll behind it; and it releases itself, since nothing else holds it
+/// once the window is gone.
 /// </summary>
-internal sealed class MeetingForm : Form, IMeetingView
+internal sealed class MeetingForm : Form, IMeetingWindow
 {
     // A RichTextBox (not a plain TextBox) so the summary's markdown renders with real
     // headings / bullets / bold / monospace runs instead of literal `##`/`**` markup. The
@@ -84,7 +88,23 @@ internal sealed class MeetingForm : Form, IMeetingView
         Controls.Add(layout);
         AcceptButton = close;
 
+        FormClosed += (_, _) =>
+        {
+            _closed?.Invoke();
+            Dispose();
+        };
+
         Apply(MeetingFormView.For(null)); // start in the Loading state
+    }
+
+    // Implemented explicitly: Form already has a (long-deprecated) Closed event of its own, and
+    // hiding it would leave two spellings of "this window went away" on the same type.
+    private Action? _closed;
+
+    event Action? IMeetingWindow.Closed
+    {
+        add => _closed += value;
+        remove => _closed -= value;
     }
 
     /// <summary>Re-render from the latest poll view (or null for the pre-first-poll loading

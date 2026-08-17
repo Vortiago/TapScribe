@@ -1,19 +1,19 @@
 using TapScribe.Bridge.Core;
-using TapScribe.Bridge.Windows;
 
 namespace TapScribe.TrayBridge.Tests;
 
 /// <summary>
-/// Pins the seam that makes this whole assembly runnable, so it cannot quietly close again.
+/// The shell as an <see cref="ITrayView"/>: what the runtime tells it, rendered onto a
+/// NotifyIcon and a ContextMenuStrip. The lifecycle behind those calls is
+/// <see cref="BridgeRuntime"/>'s and is covered without WinForms; what is left here is the
+/// mapping, and it is the half that only ever runs on Windows.
 ///
-/// Everything the tray does that needs a real desktop session — registering a
-/// notification-area icon, its tooltip, its balloons — sits behind
-/// <see cref="ITrayIndicator"/>. When it did not, constructing the shell called
-/// <c>Shell_NotifyIcon</c> on a CI runner with no shell to answer, and the test host died
-/// before a single result was reported: no assertion, no stack, the whole assembly aborted.
-/// The rule these tests hold is "the shell's status and balloons go through the indicator,
-/// and nothing else in the shell touches the OS" — reintroduce a direct NotifyIcon and the
-/// first assertion here goes quiet rather than the run going red.
+/// It also pins the seam that makes this whole assembly runnable, so it cannot quietly close
+/// again. Everything the tray does that needs a real desktop session (registering a
+/// notification-area icon, its tooltip, its balloons) sits behind <see cref="ITrayIndicator"/>.
+/// When it did not, constructing the shell called <c>Shell_NotifyIcon</c> on a CI runner with
+/// no shell to answer, and the test host died before a single result was reported: no
+/// assertion, no stack, the whole assembly aborted.
 /// </summary>
 public class TrayIndicatorTests
 {
@@ -21,7 +21,7 @@ public class TrayIndicatorTests
     public void TheShell_RoutesItsStatusThroughTheIndicator_NotTheOSDirectly()
     {
         using var sta = new StaShell();
-        var harness = new TrayHarness();
+        using var harness = new TrayHarness();
 
         TrayContext tray = sta.Build(harness);
 
@@ -29,93 +29,129 @@ public class TrayIndicatorTests
         // only handle the OS surface gets on the shell's menu.
         Assert.Same(tray.Menu, harness.Indicator.AttachedMenu);
 
-        // A status change reaches the indicator and the menu header together, from one
-        // StatusView — so a substituted indicator sees exactly what the real one would.
-        sta.Run(tray.Start); // no devices registered: resolves to nothing and fails to idle
-        Assert.True(tray.StartTask!.Wait(StaShell.CallTimeout), "the start never settled");
-        _ = sta.Drain();
+        StatusView error = StatusView.For(new TrayStatus.Error("the recorder is unreachable"));
+        sta.Run(() => ((ITrayView)tray).ShowStatus(error));
 
-        StatusView shown = Assert.IsType<StatusView>(harness.Indicator.LastStatus);
-        Assert.Equal(TrayIcon.Error, shown.Icon);
-        Assert.Equal(shown.Header, tray.StatusHeader);
-        Assert.NotEmpty(harness.Indicator.Balloons);
+        // One StatusView reaches the indicator and the menu header together, so a substituted
+        // indicator sees exactly what the real one would.
+        Assert.Same(error, harness.Indicator.LastStatus);
+        Assert.Equal(error.Header, tray.StatusHeader);
     }
 
     [Fact]
-    public void ADeviceThatKeepsDropping_ShowsTheError_ButToastsOnce()
+    public void ANotice_GoesToTheChannelItsKindNames()
     {
-        // B5's shell wiring, and the cost of getting the repeat wrong. A dropped device is
-        // reported once per Utterance for the rest of the meeting: the status line has to say
-        // so throughout, but the operator must be TOLD once — ShowBalloon is a real 4-second
-        // Windows toast, so the naive wiring toasts every utterance until the meeting ends.
+        // The mapping is the shell's whole contribution here, and getting it backwards is
+        // invisible in a screenshot: an information balloon for a failure reads as reassurance.
         using var sta = new StaShell();
-        // A device is reported by the IDENTITY its tap streams under — what the Recorder
-        // attributes its recordings to, and what the operator sees on the dashboard — not by
-        // the endpoint's device name. Spelled out here rather than left to the default pair,
-        // where the mic's identity is quietly the operator's own label.
-        const string micIdentity = "Alice";
-        BridgeSettings settings = TrayHarness.DefaultSettings();
-        settings.Devices =
-        [
-            new DeviceSelection.FollowDefault(DeviceFlow.Capture, micIdentity, micIdentity),
-            new DeviceSelection.FollowDefault(DeviceFlow.Render, "System audio", "System audio"),
-        ];
-        var harness = new TrayHarness { Settings = settings };
-        FakeCapture mic = harness.Enumerator.Add("mic-endpoint", DeviceFlow.Capture);
-        harness.Enumerator.Add("system-endpoint", DeviceFlow.Render);
+        using var harness = new TrayHarness();
 
-        TrayContext tray = sta.StartMeeting(harness);
-        int balloonsBefore = harness.Indicator.Balloons.Count;
+        TrayContext tray = sta.Build(harness);
+        sta.Run(() =>
+        {
+            ((ITrayView)tray).ShowNotice("mic stopped", "endpoint gone", NoticeKind.Warning);
+            ((ITrayView)tray).ShowNotice("Meeting summary ready", "notes are ready", NoticeKind.Information);
+        });
 
-        mic.RaiseFailed(new IOException("endpoint gone"));
-        mic.RaiseFailed(new IOException("endpoint gone")); // the next utterance says the same
-        mic.RaiseFailed(new IOException("endpoint gone")); // ...and the next
-        _ = sta.Drain();
+        Assert.Equal(("mic stopped", "endpoint gone"), Assert.Single(harness.Indicator.Warnings));
+        Assert.Equal(
+            ("Meeting summary ready", "notes are ready"), Assert.Single(harness.Indicator.Informations));
+    }
 
-        (string Title, string Message) toast =
-            Assert.Single(harness.Indicator.Balloons.Skip(balloonsBefore));
-        Assert.Equal($"{micIdentity} stopped", toast.Title); // the whole message, not just the name
+    [Fact]
+    public void TheMenuState_DrivesTheTwoMeetingCommands()
+    {
+        // Including "both disabled", which is a legitimate state rather than an error one: a
+        // meeting that is ending, or a pipeline in flight.
+        using var sta = new StaShell();
+        using var harness = new TrayHarness();
 
-        // The status still says it, though — that is what the header is for.
-        Assert.Contains($"{micIdentity} stopped", tray.StatusHeader, StringComparison.Ordinal);
-        Assert.Equal(TrayIcon.Error, harness.Indicator.LastStatus!.Icon);
+        TrayContext tray = sta.Build(harness);
+        Assert.True(tray.StartItem.Enabled);
+        Assert.False(tray.EndItem.Enabled);
+
+        sta.Run(() => ((ITrayView)tray).SetMenuState(canStart: false, canEnd: true));
+        Assert.False(tray.StartItem.Enabled);
+        Assert.True(tray.EndItem.Enabled);
+
+        sta.Run(() => ((ITrayView)tray).SetMenuState(canStart: false, canEnd: false));
+        Assert.False(tray.StartItem.Enabled);
+        Assert.False(tray.EndItem.Enabled);
     }
 
     [Fact]
     public void Quit_ReleasesTheIndicator()
     {
-        // The OS registration must go when the tray goes — it is the one resource that
-        // outlives the process's own memory if it is leaked.
+        // The OS registration must go when the tray goes: it is the one resource that outlives
+        // the process's own memory if it is leaked. It is released on the marshalled Shutdown
+        // at the END of the teardown, so a drain stands between the click and the release.
         using var sta = new StaShell();
-        var harness = new TrayHarness();
+        using var harness = new TrayHarness();
 
         TrayContext tray = sta.Build(harness);
         Assert.False(harness.Indicator.Disposed);
 
-        sta.Run(tray.Quit);
+        sta.Quit(tray);
 
         Assert.True(harness.Indicator.Disposed, "the notification-area icon outlived the tray");
     }
 
     [Fact]
-    public void TheShell_SchedulesItsResumeKick_RatherThanTimingItItself()
+    public void TheShell_BuildsItsRuntimeOnTheLoopsFirstTurn_RatherThanInItsConstructor()
     {
-        // The other thing that killed the host: the resume kick used to be a WinForms timer
-        // created in the constructor, which registers a native timer window on the calling
-        // thread — left behind on any thread that never pumps a loop and then exits. It is a
-        // scheduling decision now, so a caller that has no message loop supplies none.
+        // Two things this holds. The resume kick used to be a WinForms timer created in the
+        // constructor, which registers a native timer window on the calling thread and left it
+        // behind on any thread that never pumped a loop and then exited: that is what killed the
+        // test host. And the runtime is built on that turn because it is the first moment
+        // SynchronizationContext.Current is the WinForms one, so a constructor that built it
+        // would capture nothing to marshal through.
         using var sta = new StaShell();
-        var harness = new TrayHarness();
+        using var harness = new TrayHarness();
+        harness.StateStore.Save(new MeetingState { SessionId = "2026-08-10T09-00-00" });
         var scheduled = new List<Action>();
         TrayDependencies deps = harness.Dependencies with { ScheduleOnLoopStart = scheduled.Add };
 
-        sta.Build(harness, deps);
+        TrayContext tray = sta.Build(harness, deps);
 
-        Action kick = Assert.Single(scheduled);   // exactly one, and deferred...
-        Assert.Equal(0, harness.Stores.StateLoads); // ...with nothing done in the ctor
+        Action kick = Assert.Single(scheduled);            // exactly one, and deferred...
+        Assert.Equal("○ Idle", tray.StatusHeader);         // ...with nothing done in the ctor
 
         sta.Run(kick.Invoke); // what the message loop would do on its first turn
 
-        Assert.Equal(1, harness.Stores.StateLoads); // and THEN it looks for a meeting to resume
+        // The runtime exists and has resumed the meeting the previous session left behind.
+        Assert.Contains("Resuming", tray.StatusHeader, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AClickBeforeTheLoopsFirstTurn_DoesNothing_RatherThanThrowing()
+    {
+        // The other side of the deferral above, and a real window rather than a theoretical
+        // one: the icon goes visible in the indicator's constructor and the menu is built
+        // before Application.Run, while the runtime is built from a one-shot 200 ms timer. So
+        // the tray is on screen and clickable for about a fifth of a second with no runtime
+        // behind it. Throwing there surfaces an unhandled-exception dialog out of a click
+        // handler; doing nothing matches what the operator already believes, which is that they
+        // clicked a tray that had not finished starting.
+        using var sta = new StaShell();
+        using var harness = new TrayHarness();
+        var scheduled = new List<Action>();
+        TrayDependencies deps = harness.Dependencies with { ScheduleOnLoopStart = scheduled.Add };
+
+        TrayContext tray = sta.Build(harness, deps); // the kick is held, so there is no runtime
+
+        sta.Run(() =>
+        {
+            tray.StartItem.PerformClick();
+            tray.EndItem.PerformClick();
+            tray.RebuildPastMeetingsMenu();
+        });
+
+        // Nothing happened, and nothing pretended to: the menu is exactly as it was built.
+        Assert.True(tray.StartItem.Enabled, "a click with no runtime behind it moved the menu");
+        Assert.False(tray.EndItem.Enabled);
+        Assert.Equal("○ Idle", tray.StatusHeader);
+        // The submenu still rebuilds, from an empty history rather than from a null runtime.
+        ToolStripItem placeholder = Assert.Single(tray.PastMeetingsItem.DropDownItems.Cast<ToolStripItem>());
+        Assert.False(placeholder.Enabled);
     }
 }

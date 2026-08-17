@@ -13,22 +13,6 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 public class MeetingViewDriverTests
 {
-    // Renders are posted through a SynchronizationContext; running them inline keeps the test
-    // deterministic — every Render has happened by the time DriveAsync returns.
-    private sealed class InlineSyncContext(Action? afterFirstPost = null) : SynchronizationContext
-    {
-        private bool _posted;
-
-        public override void Post(SendOrPostCallback d, object? state)
-        {
-            d(state);
-            if (_posted)
-                return;
-            _posted = true;
-            afterFirstPost?.Invoke(); // the window closing the instant it has something to show
-        }
-    }
-
     private sealed class FakeView : IMeetingView
     {
         private readonly List<PipelineView?> _rendered = [];
@@ -60,7 +44,7 @@ public class MeetingViewDriverTests
         var view = new FakeView();
 
         await MeetingViewDriver.DriveAsync(
-            Resumer(server, http, "meet-past"), view, new InlineSyncContext(), CancellationToken.None);
+            Resumer(server, http, "meet-past"), view, new InlineDispatcher(), CancellationToken.None);
 
         // The view rode progress to the terminal summary — never re-triggering a pipeline.
         Assert.Equal(PipelinePhase.Done, view.Last!.Phase);
@@ -85,7 +69,7 @@ public class MeetingViewDriverTests
         using var closing = new CancellationTokenSource();
 
         // Cancel the moment the first poll has been rendered — the window closing mid-flight.
-        var cancelOnFirstRender = new InlineSyncContext(() => closing.Cancel());
+        var cancelOnFirstRender = new InlineDispatcher(() => closing.Cancel());
 
         await MeetingViewDriver.DriveAsync(
             Resumer(server, http, "meet-open"), view, cancelOnFirstRender, closing.Token);
@@ -103,7 +87,7 @@ public class MeetingViewDriverTests
         var view = new FakeView();
 
         await MeetingViewDriver.DriveAsync(
-            Resumer(server, http, "meet-gone"), view, new InlineSyncContext(), CancellationToken.None);
+            Resumer(server, http, "meet-gone"), view, new InlineDispatcher(), CancellationToken.None);
 
         Assert.Equal(PipelinePhase.Failed, view.Last!.Phase);
         Assert.Contains("no longer available", view.Last.FailureReason!, StringComparison.OrdinalIgnoreCase);
@@ -118,7 +102,7 @@ public class MeetingViewDriverTests
         var view = new FakeView();
 
         await MeetingViewDriver.DriveAsync(
-            Resumer(server, http, "meet-progress"), view, new InlineSyncContext(), CancellationToken.None);
+            Resumer(server, http, "meet-progress"), view, new InlineDispatcher(), CancellationToken.None);
 
         Assert.True(view.RenderCount >= 2); // at least one running view before the done view
         Assert.Equal(PipelinePhase.Done, view.Last!.Phase);

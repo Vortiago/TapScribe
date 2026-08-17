@@ -14,10 +14,10 @@ running pipeline **by identity** — the same per-identity channel
 `CaptureOrchestrator` buckets sessions by (ADR-0005):
 
 - **At Start**, `DeviceSelection.Resolve` carries each selection's gate to its
-  `ResolvedDevice`; `TrayContext` builds each `PipelineSpec` with that
+  `ResolvedDevice`; `BridgeRuntime` builds each `PipelineSpec` with that
   device's `GateOptions`, so every `LevelGate` is constructed from its own
   device's tuning.
-- **Live** (Settings → Save mid-meeting), `TrayContext` pushes
+- **Live** (Settings → Save mid-meeting), `BridgeRuntime.ApplySettings` pushes
   `BridgeSettings.ToGateOptionsByIdentity()` to
   `CaptureOrchestrator.UpdateGates(map)`. An identity with no running pipeline
   is skipped; a pipeline whose identity isn't in the map keeps its tuning — so

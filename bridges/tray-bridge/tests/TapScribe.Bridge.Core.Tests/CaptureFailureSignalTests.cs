@@ -27,10 +27,10 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         // The endpoint is invalidated mid-capture, after a clean Start — the exact case
         // the Stop()/Dispose() comments acknowledge (AUDCLNT_E_DEVICE_INVALIDATED).
@@ -50,10 +50,10 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         // A clean stop carries no exception — it must NOT be misreported as a failure.
         capture.RaiseFailed(null);
@@ -77,10 +77,10 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
         await orchestrator.DisposeAsync();
 
         // Endpoints can fire Failed on their own thread after Stop; the session must have
@@ -98,10 +98,10 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic")],
+            new CaptureSet([Spec(capture, "mic")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
         await orchestrator.DrainAllAsync(); // End-of-meeting drain detaches before the un-capped await
 
         capture.RaiseFailed(new InvalidOperationException("device lost after drain"));
@@ -124,10 +124,10 @@ public class CaptureFailureSignalTests
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(
-            [Spec(capture, "mic"), Spec(healthy, "system")],
+            new CaptureSet([Spec(capture, "mic"), Spec(healthy, "system")]),
             onConnected: _ => { },
             onFailed: (id, ex) => failures.Add((id, ex)),
-            FastGate(), FastStream(), transport.Create);
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
 
         // The failed Start surfaces once through the orchestrator's per-identity catch.
         Assert.Single(failures);
