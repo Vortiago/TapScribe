@@ -451,6 +451,12 @@ jobs:
   dotnet-build-macos:
     name: dotnet build + test (macos)
     runs-on: macos-latest
+    # The one job that talks to a real login Keychain. A Keychain call that needs
+    # to prompt and cannot BLOCKS rather than failing, so without a bound this job
+    # would sit on the priciest runner class for GitHub's 6 hour default before
+    # anyone learned anything. Ten minutes is several times the honest runtime
+    # (workload install included), so hitting this is a diagnosis, not a flake.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
