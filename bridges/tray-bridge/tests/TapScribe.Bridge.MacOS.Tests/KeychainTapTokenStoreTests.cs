@@ -115,7 +115,14 @@ public class KeychainTapTokenStoreTests
         // through the store so it can use an item of its own - running the store's real
         // service and account here would delete the tester's actual saved token.
         var keychain = new SecKeychainItems("TapScribe Tray Bridge (test)", $"round-trip-{Guid.NewGuid()}");
-        const string secret = "real-keychain-token-xyz";
+
+        // Deliberately not ASCII. The secret crosses hand-written interop twice, out through
+        // CFDataCreate over Encoding.UTF8's bytes and back through CFDataGetBytePtr over a
+        // byte COUNT rather than a terminator, and an ASCII token would pass under a wrong
+        // encoding constant or an off-by-one length just as happily. The emoji is a surrogate
+        // pair in UTF-16 and four bytes in UTF-8, so it also proves the two lengths are not
+        // being confused.
+        const string secret = "tøken-æøå-\U0001F511-中文";
 
         try
         {
