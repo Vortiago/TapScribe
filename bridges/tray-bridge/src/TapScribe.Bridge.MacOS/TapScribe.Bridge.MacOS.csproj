@@ -19,6 +19,14 @@
          hand-written unsafe code lives here. MacOSProductVersion states the rule about
          reaching the OS through P/Invoke at all. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- The other half of the plain-net10.0 bet. Every native declaration here carries
+         [SupportedOSPlatform("macos")], so CA1416 proves at COMPILE time that no path
+         reaches one without an OperatingSystem.IsMacOS() guard in front of it. Without
+         this line CA1416 is a warning nobody sets TreatWarningsAsErrors on, i.e.
+         decoration; with it, the guard rule MacOSProductVersion states in prose is
+         checked rather than remembered. -->
+    <WarningsAsErrors>CA1416</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>

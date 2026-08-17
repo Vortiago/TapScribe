@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 
 namespace TapScribe.Bridge.MacOS;
@@ -54,6 +55,11 @@ public static partial class MacOSProductVersion
     internal static Version? Parse(string reading) =>
         Version.TryParse(reading.Trim().Trim('\0'), out Version? version) ? version : null;
 
+    // On the declaration rather than on Current(), which is honestly all-platform: answering
+    // "this host has no macOS version" off a Mac IS its contract, and the tests call it
+    // there. CA1416 then walks the guard above and fails the build if a future caller
+    // reaches this without one.
+    [SupportedOSPlatform("macos")]
     [LibraryImport("libc", EntryPoint = "sysctlbyname", StringMarshalling = StringMarshalling.Utf8)]
     private static partial int SysctlByName(
         string name,
