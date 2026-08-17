@@ -103,6 +103,13 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Start()
     {
+        // InvalidOperationException, not the native failure type: a double start is a bug in
+        // the caller rather than a dead endpoint, so the orchestrator's skip-and-carry-on
+        // filter must not swallow it. Guarding here also keeps a second registration from
+        // overwriting the handle below and leaking the first.
+        if (_ioProc is not null)
+            throw new InvalidOperationException($"device {_deviceId} is already capturing");
+
         CoreAudioIoProcHandle ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
         try
         {

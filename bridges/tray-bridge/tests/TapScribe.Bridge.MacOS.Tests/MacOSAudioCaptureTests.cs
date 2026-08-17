@@ -211,4 +211,24 @@ public class MacOSAudioCaptureTests
         Assert.IsAssignableFrom<ExternalException>(Record.Exception(capture.Start));
         Assert.Equal(0, hal.LiveIoProcs);
     }
+
+    [Fact]
+    public void Capture_StartedTwice_ThrowsInvalidOperationAndLeavesTheRunningStreamAlone()
+    {
+        // The seam declares InvalidOperationException for an already-started device,
+        // deliberately NOT the native failure type: a double start is a bug in the caller,
+        // not a dead endpoint, so the orchestrator's skip-and-carry-on filter must not
+        // swallow it. Without the guard the second Start registers a second IOProc and
+        // overwrites the handle, leaking the first for the process lifetime.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        capture.Start();
+
+        Exception? thrown = Record.Exception(capture.Start);
+
+        Assert.IsType<InvalidOperationException>(thrown);
+        Assert.Equal(1, hal.LiveIoProcs);
+        Assert.Equal(1, hal.RunningIoProcs);
+    }
 }
