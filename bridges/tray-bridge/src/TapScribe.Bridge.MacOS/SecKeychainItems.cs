@@ -177,6 +177,8 @@ internal sealed partial class SecKeychainItems(string service, string account) :
         // happen on first ACCESS of a field rather than at any earlier moment the runtime
         // finds convenient. Every method above refuses off a Mac before reaching one, and
         // that is only true if this type has not already initialised itself.
+        // SecKeychainItemsLoadingTests pins it, since deleting an empty static constructor
+        // looks like removing dead code and the damage lands on the ubuntu lane.
         static Globals()
         {
         }
