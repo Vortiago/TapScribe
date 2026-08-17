@@ -47,16 +47,53 @@ public class KeychainTapTokenStoreTests
     }
 
     [Fact]
+    public void Read_IgnoresTheAtRestValue_BecauseTheFileNeverCarriesOne()
+    {
+        // The macOS half of the seam answers from the Keychain and nowhere else. Windows
+        // passes its DPAPI blob through this parameter, so a store that honoured it here
+        // would hand back whatever a hand-edited settings file said the token was, which is
+        // the one thing keeping the secret out of that file was for.
+        const string secret = "keychain-token";
+        var store = new KeychainTapTokenStore(new FakeKeychain());
+        store.Write(secret);
+
+        Assert.Equal(secret, store.Read("stale-blob-from-a-settings-file"));
+    }
+
+    [Fact]
+    public void Write_ARotatedToken_ReplacesTheStoredOne()
+    {
+        // The only path a token CHANGE can take, and the reason Update exists at all:
+        // SecItemAdd refuses an existing item with errSecDuplicateItem rather than
+        // overwriting it, so a save that stopped at the Add would leave the operator on the
+        // OLD token forever while the dialog showed the new one. Rotating a leaked token is
+        // exactly when that matters most.
+        var store = new KeychainTapTokenStore(new FakeKeychain());
+        store.Write("first-token");
+
+        store.Write("second-token");
+
+        Assert.Equal("second-token", store.Read(null));
+    }
+
+    [Fact]
     public void Write_AnEmptyToken_DropsTheStoredSecret()
     {
         // "" is how the dialog says "forget my token", and BridgeSettingsStore hands it over
         // unconditionally for exactly this. A cleared token that stayed in the Keychain
         // would come back on the next Load, so the operator could never revoke one.
-        var store = new KeychainTapTokenStore(new FakeKeychain());
+        //
+        // Asserted at the seam rather than through Read: an item left behind holding an
+        // empty value reads back as "" too, so only asking the Keychain whether the item is
+        // still THERE tells the two apart, and a revoked token that is merely blanked is
+        // still a Keychain entry the operator was told had gone.
+        var keychain = new FakeKeychain();
+        var store = new KeychainTapTokenStore(keychain);
         store.Write("tap-token-abc");
 
-        store.Write("");
+        Assert.Null(store.Write(""));
 
+        Assert.Equal(KeychainStatus.ItemNotFound, keychain.Copy(out _));
         Assert.Equal("", store.Read(null));
     }
 

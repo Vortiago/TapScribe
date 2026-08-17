@@ -22,3 +22,24 @@ internal sealed class RequiresMacOSAttribute : FactAttribute
             Skip = $"not running macOS, so this host cannot {capability}";
     }
 }
+
+/// <summary>The mirror of <see cref="RequiresMacOSAttribute"/>, for the other half of the
+/// OS line: a test that asserts what this assembly does when it is NOT on a Mac. The
+/// off-a-Mac behaviour is a real contract rather than an accident (the ubuntu lane builds and
+/// runs this assembly, so every OS call has to answer rather than throw), and it can only be
+/// observed where that is actually true.
+///
+/// Both halves exist because xunit v2's dynamic-skip token is not recognised by
+/// <c>dotnet test</c>: the decision has to be made at discovery, through <c>Skip</c>, so it
+/// takes an attribute either way rather than an early return inside the test, which would
+/// read as a pass on the lane that skipped the assertions.</summary>
+internal sealed class RequiresNonMacOSAttribute : FactAttribute
+{
+    /// <param name="contract">What the test pins about being off a Mac, folded into the skip
+    /// reason so the macos lane's skip list says which contract went unexercised there.</param>
+    public RequiresNonMacOSAttribute(string contract = "behave as a non-Mac host")
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            Skip = $"running macOS, so this host cannot {contract}";
+    }
+}

@@ -32,4 +32,21 @@ public class SecKeychainItemsLoadingTests
             globals.Attributes.HasFlag(TypeAttributes.BeforeFieldInit),
             "Globals must keep its explicit static constructor, or the OperatingSystem.IsMacOS() guards can be outrun");
     }
+
+    [RequiresNonMacOS("prove the not-on-a-Mac answer")]
+    public void EveryCall_OffAMac_AnswersNotAvailable_RatherThanDlopeningSecurityFramework()
+    {
+        // The other half of the rule above, and the half that actually EXERCISES it: the
+        // beforefieldinit pin says the guards CAN run first, this says they DO, and that each
+        // of the four is guarded rather than three of them. Without it nothing on any lane
+        // calls into this type off a Mac, so deleting a guard is invisible: the ubuntu lane
+        // stays green because no test ever reached the dlopen it would have unleashed.
+        var keychain = new SecKeychainItems("TapScribe Tray Bridge (test)", "off-a-mac");
+
+        Assert.Equal(KeychainStatus.NotAvailable, keychain.Copy(out string? secret));
+        Assert.Null(secret);
+        Assert.Equal(KeychainStatus.NotAvailable, keychain.Add("unreachable"));
+        Assert.Equal(KeychainStatus.NotAvailable, keychain.Update("unreachable"));
+        Assert.Equal(KeychainStatus.NotAvailable, keychain.Delete());
+    }
 }
