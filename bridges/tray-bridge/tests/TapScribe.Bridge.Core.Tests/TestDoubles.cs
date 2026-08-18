@@ -414,6 +414,17 @@ internal sealed class FakeTapTransport
     /// transient 0; poll on this instead.</summary>
     public bool HasStreamed(string identity) => ConnectionsFor(identity).Any(c => c.SentCount > 0);
 
+    /// <summary>Every payload byte this identity's pipeline delivered, in order, across
+    /// whatever connections it took to get there. The Recorder concatenates a tap's frames
+    /// into one WAV, so this is that WAV's samples.</summary>
+    /// <param name="identity">The pipeline to read.</param>
+    /// <returns>The wire-format PCM, index headers stripped.</returns>
+    public byte[] StreamedAudio(string identity)
+    {
+        lock (_lock)
+            return [.. _conns.Where(c => c.Identity == identity).SelectMany(c => c.SentAudio).SelectMany(f => f)];
+    }
+
     public ITapConnection Create(TapConnectionOptions options)
     {
         var conn = new FakeTapConnection(this, options);
@@ -436,6 +447,14 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     public string? Session => Options.Session;
     public string? UtteranceId => Options.UtteranceId;
     public List<int> Sent { get; } = [];
+
+    /// <summary>Every frame verbatim: the wire-format PCM the Recorder would write to a WAV.
+    /// Kept alongside <see cref="Sent"/> because the indices answer delivery and ordering, and
+    /// only the bytes answer "is what arrived actually the audio that went in". The two are
+    /// the same frames read two ways - a test-built frame carries its index in its first four
+    /// sample bytes, since the wire has no header to put one in.</summary>
+    public List<byte[]> SentAudio { get; } = [];
+
     public bool Closed { get; private set; }
     public bool Disposed { get; private set; }
 
@@ -458,8 +477,12 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
         if (!transport.IsUpFor(Options.Identity))
             throw transport.Failure(WebSocketError.ConnectionClosedPrematurely, "blip");
         int index = BinaryPrimitives.ReadInt32LittleEndian(frame.Span);
+        byte[] audio = frame.ToArray();
         lock (_lock)
+        {
             Sent.Add(index);
+            SentAudio.Add(audio);
+        }
         return Task.CompletedTask;
     }
 
