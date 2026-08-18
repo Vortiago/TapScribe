@@ -283,19 +283,17 @@ public class MacOSAudioCaptureTests
         var capture = new MacOSAudioCapture(hal, device.ObjectId);
         List<Exception?> failures = [];
         capture.Failed += (_, e) => failures.Add(e);
-        // Released on the way out of a failing arrange too. Disposing is the ACT here, so it
-        // cannot ride a `using`, and Start can throw.
+        // The ACT sits in the finally, which is unusual and deliberate: disposing IS what this
+        // test does, so it cannot ride a `using`, and putting it here means it happens on
+        // every path rather than only when Start succeeds.
         try
         {
             capture.Start();
         }
-        catch
+        finally
         {
             capture.Dispose();
-            throw;
         }
-
-        capture.Dispose();
 
         Assert.Empty(failures);
         Assert.Equal(0, hal.RunningIoProcs);

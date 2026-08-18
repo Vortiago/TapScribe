@@ -133,20 +133,18 @@ public class MacOSAudioDeviceEnumeratorTests
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
         var enumerator = new MacOSAudioDeviceEnumerator(hal);
-        // Released on the way out of a failing setup as well as on the happy path. Disposing
-        // it is the ACT here, so it cannot ride a `using`, and the arrange above can throw.
+        // The ACT sits in the finally, which is unusual and deliberate: disposing IS what this
+        // test does, so it cannot ride a `using`, and putting it here means it happens on
+        // every path rather than only when the arrange above succeeds.
         try
         {
             IAudioCapture capture = enumerator.Open(Assert.Single(enumerator.List()));
             capture.Start();
         }
-        catch
+        finally
         {
             enumerator.Dispose();
-            throw;
         }
-
-        enumerator.Dispose();
 
         Assert.Equal(1, hal.Disposals);
         // Still running, because nothing here released it. Had the enumerator disposed the
