@@ -24,12 +24,23 @@ public enum CoreAudioPropertyKind
     /// notification carries no state.</summary>
     Mute,
 
-    // Only the one kind, deliberately. Device-is-alive (the mid-stream loss behind Failed) and
-    // default-input-changed both belong to later slices, and a kind declared ahead of its
-    // subscriber costs the ONE class here that no test can reach: each is a hand-typed
-    // four-char selector that nothing on any lane can exercise, in the file whose whole bargain
-    // is being too thin to need more than a symbol check. They go in with the code that
-    // subscribes them.
+    /// <summary><c>kAudioDevicePropertyDeviceIsAlive</c> on a device. Fires when the endpoint
+    /// leaves: unplugged, disabled, or an aggregate whose sub-device went away. Unlike
+    /// <see cref="Mute"/> there is nothing to re-read, and deliberately no HAL call to read it
+    /// with: a device that ARRIVES carries no listener yet, so a notification reaching one of
+    /// these can only mean the object it names is gone.</summary>
+    DeviceIsAlive,
+
+    /// <summary><c>kAudioHardwarePropertyDefaultOutputDevice</c> on
+    /// <see cref="CoreAudioObject.System"/>. Fires when the Mac starts playing through a
+    /// different endpoint, which on this platform is what "the system audio moved" means: the
+    /// listener re-reads the device list rather than trusting a payload, matching every other
+    /// kind here.</summary>
+    DefaultOutputDevice,
+
+    // A kind goes in with the code that subscribes it, never ahead of it: each is a hand-typed
+    // four-char selector, in the ONE class here no test can reach, whose whole bargain is being
+    // too thin to need more than a symbol check.
 }
 
 /// <summary>
@@ -50,6 +61,29 @@ public delegate void CoreAudioIoCallback(ReadOnlySpan<byte> audio);
 /// or used after it is destroyed.
 /// </summary>
 public abstract class CoreAudioIoProcHandle;
+
+/// <summary>
+/// An opaque handle to one live Core Audio process tap: the object that carries what the Mac
+/// is playing. A tap is NOT something an IOProc can run over on its own - it becomes audio
+/// only once it is listed inside an aggregate device (see
+/// <see cref="ICoreAudioHal.CreateAggregateDevice"/>), which is why the two are separate
+/// handles with separate lifetimes rather than one. Owned by the HAL that issued it, which
+/// rejects a handle it did not create.
+/// </summary>
+public abstract class CoreAudioTapHandle;
+
+/// <summary>
+/// An opaque handle to one live aggregate device wrapping a process tap. Owned by the HAL that
+/// issued it, which rejects a handle it did not create.
+/// </summary>
+public abstract class CoreAudioAggregateHandle
+{
+    /// <summary>The aggregate's <c>AudioObjectID</c>, which is what makes it an ordinary device
+    /// to the rest of this seam: <see cref="ICoreAudioHal.CreateIoProc"/> and the property
+    /// listeners take it like any other. Exposed rather than hidden because the whole point of
+    /// the aggregate is to turn a tap into a device id.</summary>
+    public abstract uint DeviceId { get; }
+}
 
 /// <summary>
 /// A CoreAudio call that failed, carrying the <c>OSStatus</c> it returned. Derives from
@@ -152,6 +186,44 @@ public interface ICoreAudioHal : IDisposable
     /// <param name="ioProc">A handle from <see cref="CreateIoProc"/>.</param>
     /// <exception cref="CoreAudioException">The IOProc could not be destroyed.</exception>
     void DestroyIoProc(CoreAudioIoProcHandle ioProc);
+
+    /// <summary>Create a tap on everything the Mac is playing: a stereo mixdown of every
+    /// process, excluding none, left audible.
+    ///
+    /// Takes no arguments, and that is the seam's line rather than an omission. WHICH endpoint
+    /// the tapped audio is collected through is a property of the aggregate device below, and
+    /// deciding it (the current default output, rebound when it moves) is a judgement that
+    /// lives above this facade; the tap itself has nothing to choose.</summary>
+    /// <returns>The tap, valid until <see cref="DestroyProcessTap"/>.</returns>
+    /// <exception cref="CoreAudioException">The tap could not be created.</exception>
+    CoreAudioTapHandle CreateProcessTap();
+
+    /// <summary>The tap's current stream description: what its audio actually is.</summary>
+    /// <param name="tap">A live handle from <see cref="CreateProcessTap"/>.</param>
+    /// <returns>The ASBD fields, uninterpreted.</returns>
+    /// <exception cref="CoreAudioException">The property could not be read.</exception>
+    CoreAudioStreamFormat ReadTapFormat(CoreAudioTapHandle tap);
+
+    /// <summary>Release the tap. Its aggregate device must already be destroyed; the reverse
+    /// order leaves an aggregate listing a tap that is gone.</summary>
+    /// <param name="tap">A handle from <see cref="CreateProcessTap"/>.</param>
+    /// <exception cref="CoreAudioException">The tap could not be destroyed.</exception>
+    void DestroyProcessTap(CoreAudioTapHandle tap);
+
+    /// <summary>Wrap <paramref name="tap"/> in a private aggregate device clocked by
+    /// <paramref name="outputDeviceUid"/>, which is what gives the tap an
+    /// <c>AudioObjectID</c> an IOProc can run over.</summary>
+    /// <param name="outputDeviceUid">The output endpoint the aggregate is built around, by its
+    /// persistent UID. Which endpoint that should be is decided above this facade.</param>
+    /// <param name="tap">A live handle from <see cref="CreateProcessTap"/>.</param>
+    /// <returns>The aggregate, valid until <see cref="DestroyAggregateDevice"/>.</returns>
+    /// <exception cref="CoreAudioException">The aggregate could not be created.</exception>
+    CoreAudioAggregateHandle CreateAggregateDevice(string outputDeviceUid, CoreAudioTapHandle tap);
+
+    /// <summary>Release the aggregate. Any IOProc on it must already be destroyed.</summary>
+    /// <param name="device">A handle from <see cref="CreateAggregateDevice"/>.</param>
+    /// <exception cref="CoreAudioException">The aggregate could not be destroyed.</exception>
+    void DestroyAggregateDevice(CoreAudioAggregateHandle device);
 }
 
 /// <summary>

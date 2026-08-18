@@ -18,8 +18,13 @@ namespace TapScribe.Bridge.MacOS;
 /// check is a decision that has escaped its test, and belongs above the facade.
 ///
 /// P/Invoke throughout, never the managed ObjC bindings, per the rule in
-/// <see cref="MacOSProductVersion"/>. Nothing here is an ObjC class, so no
-/// <c>objc_msgSend</c> is needed either: the HAL is a plain C API.
+/// <see cref="MacOSProductVersion"/>. The HAL proper is a plain C API; the one ObjC class the
+/// backend touches (<c>CATapDescription</c>) is reached through the runtime's own C entry
+/// points in the tap half of this class, which says why.
+///
+/// Two files, one type: <c>CoreAudioHal.Tap.cs</c> carries the process-tap surface (#420).
+/// Partial rather than a second class so the reflection half of the upstream-contract test,
+/// which counts this type's <c>[LibraryImport]</c>s, still sees every native declaration.
 ///
 /// Not thread-safe, and does not need to be: one enumerator owns one of these and drives it
 /// from the tray thread. The native CALLBACKS arrive on CoreAudio threads, but they touch only
@@ -74,15 +79,22 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         return devices;
     }
 
-    public CoreAudioStreamFormat ReadStreamFormat(uint deviceId)
+    public CoreAudioStreamFormat ReadStreamFormat(uint deviceId) =>
+        ReadStreamDescription(
+            deviceId, Selector.StreamFormat, Scope.Input,
+            $"reading the stream format of device {deviceId}");
+
+    // One ASBD read, shared by the device's input stream and the tap's own format: same
+    // struct, same two-call shape, different object and scope.
+    private static CoreAudioStreamFormat ReadStreamDescription(
+        uint objectId, uint selector, uint scope, string what)
     {
         AudioStreamBasicDescription asbd = default;
         uint size = (uint)sizeof(AudioStreamBasicDescription);
-        AudioObjectPropertyAddress address = Address(Selector.StreamFormat, Scope.Input);
-        int status = AudioObjectGetPropertyData(
-            deviceId, &address, 0, IntPtr.Zero, &size, &asbd);
+        AudioObjectPropertyAddress address = Address(selector, scope);
+        int status = AudioObjectGetPropertyData(objectId, &address, 0, IntPtr.Zero, &size, &asbd);
         if (status != NoError)
-            throw new CoreAudioException($"reading the stream format of device {deviceId}", status);
+            throw new CoreAudioException(what, status);
 
         return new CoreAudioStreamFormat(
             asbd.SampleRate,
@@ -113,6 +125,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         AudioObjectPropertyAddress address = kind switch
         {
             CoreAudioPropertyKind.Mute => Address(Selector.Mute, Scope.Input),
+            CoreAudioPropertyKind.DeviceIsAlive => Address(Selector.DeviceIsAlive, Scope.Global),
+            CoreAudioPropertyKind.DefaultOutputDevice =>
+                Address(Selector.DefaultOutputDevice, Scope.Global),
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
 
@@ -201,6 +216,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         // is also why no Clear() follows: the list is empty by the time the loop ends.
         foreach (Registration registration in _listeners.ToList())
             registration.Dispose();
+
+        // Last, because an aggregate device can be the very thing an IOProc above ran over.
+        ReleaseTapObjects();
     }
 
     private IoProc Live(CoreAudioIoProcHandle ioProc, string call)
@@ -525,6 +543,12 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         public const uint DeviceUid = 0x75696420;           // 'uid '
         public const uint Name = 0x6C6E616D;                // 'lnam'
         public const uint Mute = 0x6D757465;                // 'mute'
+        public const uint DeviceIsAlive = 0x6C69766E;       // 'livn'
+
+        // Read off a TAP object rather than off a device: no AudioObjectID but a tap's
+        // answers either of them.
+        public const uint TapUid = 0x74756964;              // 'tuid'
+        public const uint TapFormat = 0x74666D74;           // 'tfmt'
     }
 
     /// <summary>The CoreAudio property scopes, as four-char codes.</summary>

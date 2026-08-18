@@ -19,6 +19,8 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     private readonly Dictionary<uint, bool?> _mute = [];
     private readonly List<Registration> _listeners = [];
     private readonly List<Handle> _handles = [];
+    private readonly List<Tap> _taps = [];
+    private readonly List<AggregateDevice> _aggregates = [];
 
     /// <summary>When set, <see cref="ListDevices"/> throws it.</summary>
     public Exception? ListDevicesError { get; set; }
@@ -37,6 +39,14 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     /// <summary>When set, <see cref="StopIo"/> throws it: the endpoint was invalidated while
     /// capture ran, so there is nothing left to stop.</summary>
     public Exception? StopIoError { get; set; }
+
+    /// <summary>When set, <see cref="CreateProcessTap"/> throws it: this Mac refused the tap,
+    /// which is what a missing TCC grant and a pre-14.4 kernel both look like from here.
+    /// </summary>
+    public Exception? CreateProcessTapError { get; set; }
+
+    /// <summary>When set, <see cref="CreateAggregateDevice"/> throws it.</summary>
+    public Exception? CreateAggregateDeviceError { get; set; }
 
     /// <summary>When set, <see cref="Dispose"/> throws it. The seam binds disposal to be
     /// throw-free all the way up, and only a HAL that misbehaves can show that the layer above
@@ -127,6 +137,24 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     /// <summary>IOProcs currently running.</summary>
     public int RunningIoProcs => _handles.Count(h => h.Running);
 
+    /// <summary>Process taps created and not yet destroyed.</summary>
+    public int LiveTaps => _taps.Count(t => !t.Destroyed);
+
+    /// <summary>Aggregate devices created and not yet destroyed.</summary>
+    public int LiveAggregates => _aggregates.Count(a => !a.Destroyed);
+
+    /// <summary>The output endpoint each live aggregate was built around, by UID. What a
+    /// rebind test reads: the claim is not "an aggregate exists" but "the aggregate is bound to
+    /// the device the Mac is playing through NOW".</summary>
+    public IReadOnlyList<string> LiveAggregateOutputs =>
+        [.. _aggregates.Where(a => !a.Destroyed).Select(a => a.OutputDeviceUid)];
+
+    /// <summary>The stream description every tap reports. Fixed for the whole fake rather than
+    /// per tap, because a global tap has one format at a time and the thing worth varying is
+    /// what it becomes AFTER a rebind - which is what setting this between binds models.
+    /// </summary>
+    public CoreAudioStreamFormat TapFormat { get; set; } = Formats.Float32Stereo48k;
+
     /// <summary>Deliver one buffer to the device's running IOProc, the stand-in for CoreAudio
     /// calling it. Refuses when nothing is running: a real IOProc's callback cannot fire
     /// before <see cref="StartIo"/> or after <see cref="StopIo"/>, so a test that pushes into
@@ -210,6 +238,54 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         handle.Destroyed = true;
     }
 
+    public CoreAudioTapHandle CreateProcessTap()
+    {
+        if (CreateProcessTapError is not null)
+            throw CreateProcessTapError;
+
+        var tap = new Tap($"tap-uid-{_tapsCreated++}");
+        _taps.Add(tap);
+        return tap;
+    }
+
+    public CoreAudioStreamFormat ReadTapFormat(CoreAudioTapHandle tap)
+    {
+        LiveTap(tap, nameof(ReadTapFormat));
+        return TapFormat;
+    }
+
+    public void DestroyProcessTap(CoreAudioTapHandle tap)
+    {
+        Tap live = LiveTap(tap, nameof(DestroyProcessTap));
+        // The ordering CoreAudio itself enforces, and the one a teardown is easiest to get
+        // backwards: an aggregate that still lists this tap refers to an object that is gone.
+        if (_aggregates.Any(a => !a.Destroyed && a.Tap == live))
+            throw new InvalidOperationException(
+                "the tap is still listed by a live aggregate device; destroy the aggregate first");
+        live.Destroyed = true;
+    }
+
+    public CoreAudioAggregateHandle CreateAggregateDevice(string outputDeviceUid, CoreAudioTapHandle tap)
+    {
+        ArgumentNullException.ThrowIfNull(outputDeviceUid);
+        Tap live = LiveTap(tap, nameof(CreateAggregateDevice));
+        if (CreateAggregateDeviceError is not null)
+            throw CreateAggregateDeviceError;
+
+        var aggregate = new AggregateDevice(_nextAggregateId++, outputDeviceUid, live);
+        _aggregates.Add(aggregate);
+        return aggregate;
+    }
+
+    public void DestroyAggregateDevice(CoreAudioAggregateHandle device)
+    {
+        AggregateDevice live = LiveAggregate(device, nameof(DestroyAggregateDevice));
+        if (_handles.Any(h => !h.Destroyed && h.DeviceId == live.DeviceId))
+            throw new InvalidOperationException(
+                "an IOProc is still registered on the aggregate; destroy it first");
+        live.Destroyed = true;
+    }
+
     public void Dispose()
     {
         Disposals++;
@@ -223,6 +299,13 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     // Mute reads answered so far, which is what SeedMuteError counts against.
     private int _muteReads;
 
+    // Taps issued so far, so each gets a distinguishable UID the way CoreAudio's do.
+    private int _tapsCreated;
+
+    // Aggregate object ids, from well above any device id a test registers, so a test that
+    // confuses the two fails rather than silently addressing a real device.
+    private uint _nextAggregateId = 900;
+
     // The handle-validating half: a handle has to be one THIS fake issued and still live, or
     // the call is one hardware would have refused.
     private Handle Live(CoreAudioIoProcHandle ioProc, string call)
@@ -233,6 +316,43 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         if (handle.Destroyed)
             throw new InvalidOperationException($"{call} was handed an IOProc handle that was already destroyed");
         return handle;
+    }
+
+    private Tap LiveTap(CoreAudioTapHandle tap, string call)
+    {
+        ArgumentNullException.ThrowIfNull(tap);
+        if (tap is not Tap live || !_taps.Contains(live))
+            throw new InvalidOperationException($"{call} was handed a tap handle this HAL never issued");
+        if (live.Destroyed)
+            throw new InvalidOperationException($"{call} was handed a tap handle that was already destroyed");
+        return live;
+    }
+
+    private AggregateDevice LiveAggregate(CoreAudioAggregateHandle device, string call)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        if (device is not AggregateDevice live || !_aggregates.Contains(live))
+            throw new InvalidOperationException(
+                $"{call} was handed an aggregate handle this HAL never issued");
+        if (live.Destroyed)
+            throw new InvalidOperationException(
+                $"{call} was handed an aggregate handle that was already destroyed");
+        return live;
+    }
+
+    private sealed class Tap(string uid) : CoreAudioTapHandle
+    {
+        public string Uid { get; } = uid;
+        public bool Destroyed { get; set; }
+    }
+
+    private sealed class AggregateDevice(uint deviceId, string outputDeviceUid, Tap tap)
+        : CoreAudioAggregateHandle
+    {
+        public override uint DeviceId { get; } = deviceId;
+        public string OutputDeviceUid { get; } = outputDeviceUid;
+        public Tap Tap { get; } = tap;
+        public bool Destroyed { get; set; }
     }
 
     private sealed class Handle(uint deviceId, CoreAudioIoCallback callback) : CoreAudioIoProcHandle

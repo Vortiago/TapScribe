@@ -20,6 +20,7 @@ public class CoreAudioUpstreamContractTests
     private const string CoreAudio = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio";
     private const string CoreFoundation =
         "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    private const string ObjC = "/usr/lib/libobjc.A.dylib";
 
     private static readonly (string Framework, string Symbol)[] Bound =
     [
@@ -39,6 +40,29 @@ public class CoreAudioUpstreamContractTests
         // listing.
         (CoreFoundation, "CFStringGetCString"),
         (CoreFoundation, "CFRelease"),
+        // The system-audio process tap (#420): the tap object, and the private aggregate
+        // device that carries its audio to an IOProc.
+        (CoreAudio, "AudioHardwareCreateProcessTap"),
+        (CoreAudio, "AudioHardwareDestroyProcessTap"),
+        (CoreAudio, "AudioHardwareCreateAggregateDevice"),
+        (CoreAudio, "AudioHardwareDestroyAggregateDevice"),
+        // CATapDescription is the one ObjC class in the whole backend and is NOT bound by
+        // Microsoft.macOS, which carries no CoreAudio namespace at all. It is reached through
+        // the ObjC runtime's own C entry points rather than through a hand-written NSObject
+        // binding: constructing any NSObject-derived type under the test host faults inside
+        // ObjCRuntime, so a binding would make this class untestable even for its symbols.
+        // Two objc_msgSend declarations, because the ABI needs the real signature at each
+        // call: one for the no-argument selectors and one for the initialiser's array.
+        (ObjC, "objc_getClass"),
+        (ObjC, "sel_registerName"),
+        (ObjC, "objc_msgSend"),
+        (ObjC, "objc_msgSend"),
+        // An empty NSArray for that initialiser (toll-free bridged), and the aggregate's
+        // description, which is parsed from a property list rather than assembled call by
+        // call - see CoreAudioAggregateDescription for why.
+        (CoreFoundation, "CFArrayCreate"),
+        (CoreFoundation, "CFDataCreate"),
+        (CoreFoundation, "CFPropertyListCreateWithData"),
     ];
 
     // One fact over the whole set rather than a case each, so a run reports EVERY symbol that
@@ -48,7 +72,9 @@ public class CoreAudioUpstreamContractTests
     public void EverySymbolTheHalBinds_ResolvesInItsFramework()
     {
         List<string> missing = [];
-        foreach ((string framework, string symbol) in Bound)
+        // Distinct, because the table lists one row per DECLARATION and objc_msgSend is
+        // declared twice under two signatures: dyld has one answer for it either way.
+        foreach ((string framework, string symbol) in Bound.Distinct())
         {
             Assert.True(NativeLibrary.TryLoad(framework, out IntPtr handle), $"could not load {framework}");
             try
