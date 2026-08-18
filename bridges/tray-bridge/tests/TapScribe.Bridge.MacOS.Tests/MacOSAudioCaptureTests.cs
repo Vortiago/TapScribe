@@ -132,30 +132,14 @@ public class MacOSAudioCaptureTests
         // that, so the raise happens off the IO thread and this is what says so.
         var hal = new FakeCoreAudioHal();
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
-        // Declared BEFORE the capture so they outlive it: `using` disposes in reverse, and the
-        // pump can still be inside the handler until Stop has joined it. Disposing them first
-        // is an ObjectDisposedException on a background thread, which takes the test host down
-        // rather than failing a test.
-        using var handlerEntered = new ManualResetEventSlim();
-        using var releaseHandler = new ManualResetEventSlim();
-        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
-        capture.DataAvailable += (_, _) =>
-        {
-            handlerEntered.Set();
-            releaseHandler.Wait(Wait);
-        };
-        capture.Start();
+        using var wedge = new WedgedPump(hal, device);
 
         // Driven from another thread only so a regression FAILS rather than deadlocking the
         // run: an inline raise leaves PushAudio inside the blocked handler forever.
         Task push = Task.Run(() => hal.PushAudio(device.ObjectId, [1, 2, 3, 4]));
 
-        Assert.True(handlerEntered.Wait(Wait), "the handler never ran");
-        Assert.Same(
-            push,
-            await Task.WhenAny(push, Task.Delay(Wait)));
-        releaseHandler.Set();
-        capture.Stop();   // joins the pump, so nothing is inside the handler past here
+        Assert.True(wedge.HandlerEntered.Wait(Wait), "the handler never ran");
+        await push.WaitAsync(Wait);
     }
 
     [Fact]
@@ -168,28 +152,80 @@ public class MacOSAudioCaptureTests
         // guard in a realtime path is worth as much as no guard.
         var hal = new FakeCoreAudioHal();
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
-        // Declared before the capture, for the reason spelled out in the test above: the pump
-        // may still be inside the handler until Stop has joined it.
-        using var handlerEntered = new ManualResetEventSlim();
-        using var releaseHandler = new ManualResetEventSlim();
-        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
-        capture.DataAvailable += (_, _) =>
-        {
-            handlerEntered.Set();
-            releaseHandler.Wait(Wait);
-        };
-        capture.Start();
+        using var wedge = new WedgedPump(hal, device);
 
         // Wedge the pump inside the first buffer, then hand the producer far more than the
         // ring holds. Every push returns, which is the property under test.
         hal.PushAudio(device.ObjectId, [1]);
-        Assert.True(handlerEntered.Wait(Wait), "the pump never picked up the first buffer");
+        Assert.True(wedge.HandlerEntered.Wait(Wait), "the pump never picked up the first buffer");
         for (int i = 0; i < 64; i++)
             hal.PushAudio(device.ObjectId, [(byte)i]);
 
-        Assert.True(capture.Dropped > 0, "a full ring did not drop anything, so the guard is unreachable");
-        releaseHandler.Set();
-        capture.Stop();   // joins the pump, so nothing is inside the handler past here
+        Assert.True(
+            wedge.Capture.DroppedBuffers > 0,
+            "a full ring did not drop anything, so the guard is unreachable");
+    }
+
+    [Fact]
+    public void Capture_HandedABufferLargerThanASlot_DropsItRatherThanAllocating()
+    {
+        // The producer's other refusal, and the one that would be silent: a device whose period
+        // exceeds MaxBufferFrames drops EVERY buffer, so the capture runs and delivers nothing.
+        // Allocating a bigger slot on this thread is the one thing it may not do, so the count
+        // is the only way that device would ever be diagnosed. Deliverable as a test only
+        // because a slot is now a device period rather than a whole second of audio.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        int delivered = 0;
+        capture.DataAvailable += (_, _) => Interlocked.Increment(ref delivered);
+        capture.Start();
+
+        // 8192 frames of 48 kHz stereo float32 is the ceiling; this is one frame past it.
+        hal.PushAudio(device.ObjectId, new byte[(8192 * 2 * 4) + 8]);
+
+        Assert.Equal(1, capture.DroppedBuffers);
+        Assert.Equal(0, delivered);
+        capture.Stop();
+    }
+
+    /// <summary>A started capture whose pump is held inside its first handler, so a test can
+    /// watch what the PRODUCER does while the consumer is stuck.
+    ///
+    /// It exists to own one ordering that is easy to get wrong and expensive when it is: the
+    /// handler is released and the pump joined BEFORE the events it waits on are disposed.
+    /// Get that backwards, or leave the release on a path an assertion can skip, and a
+    /// background thread touches a disposed <see cref="ManualResetEventSlim"/>, which aborts
+    /// the whole test host rather than failing one test.</summary>
+    private sealed class WedgedPump : IDisposable
+    {
+        private readonly ManualResetEventSlim _release = new();
+
+        public ManualResetEventSlim HandlerEntered { get; } = new();
+
+        public MacOSAudioCapture Capture { get; }
+
+        public WedgedPump(FakeCoreAudioHal hal, CoreAudioDevice device)
+        {
+            Capture = new MacOSAudioCapture(hal, device.ObjectId);
+            Capture.DataAvailable += (_, _) =>
+            {
+                HandlerEntered.Set();
+                _release.Wait(Wait);
+            };
+            Capture.Start();
+        }
+
+        public void Dispose()
+        {
+            // Release first, then join, then dispose: the reverse of construction, and the only
+            // order in which nothing is inside the handler when the events go away. Runs from a
+            // `using`, so a failing assertion takes this path too.
+            _release.Set();
+            Capture.Dispose();
+            HandlerEntered.Dispose();
+            _release.Dispose();
+        }
     }
 
     [Fact]
