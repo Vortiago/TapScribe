@@ -132,18 +132,13 @@ public class MacOSAudioDeviceEnumeratorTests
         // turn it into a double release: disposal is bound to be throw-free, never idempotent.
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
-        var enumerator = new MacOSAudioDeviceEnumerator(hal);
-        // The ACT sits in the finally, which is unusual and deliberate: disposing IS what this
-        // test does, so it cannot ride a `using`, and putting it here means it happens on
-        // every path rather than only when the arrange above succeeds.
-        try
+        // Scoped rather than method-scoped, because disposing IS the act here and the
+        // assertions below have to run AFTER it. A bare `using var` would dispose at the end
+        // of the method, i.e. after they had already read hal.Disposals.
         {
+            using var enumerator = new MacOSAudioDeviceEnumerator(hal);
             IAudioCapture capture = enumerator.Open(Assert.Single(enumerator.List()));
             capture.Start();
-        }
-        finally
-        {
-            enumerator.Dispose();
         }
 
         Assert.Equal(1, hal.Disposals);

@@ -280,19 +280,14 @@ public class MacOSAudioCaptureTests
         // listener - since the seam binds it to leave no handle behind.
         var hal = new FakeCoreAudioHal();
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
-        var capture = new MacOSAudioCapture(hal, device.ObjectId);
         List<Exception?> failures = [];
-        capture.Failed += (_, e) => failures.Add(e);
-        // The ACT sits in the finally, which is unusual and deliberate: disposing IS what this
-        // test does, so it cannot ride a `using`, and putting it here means it happens on
-        // every path rather than only when Start succeeds.
-        try
+        // Scoped rather than method-scoped, because disposing IS the act here and the
+        // assertions below have to run AFTER it. A bare `using var` would dispose at the end
+        // of the method, i.e. after they had already read the handle counts.
         {
+            using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+            capture.Failed += (_, e) => failures.Add(e);
             capture.Start();
-        }
-        finally
-        {
-            capture.Dispose();
         }
 
         Assert.Empty(failures);
