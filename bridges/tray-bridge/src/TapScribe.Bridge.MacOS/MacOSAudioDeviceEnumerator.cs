@@ -32,13 +32,25 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
     private IEnumerable<CoreAudioDevice> Tappable() =>
         _hal.ListDevices().Where(d => d.Flow == DeviceFlow.Capture);
 
-    public IReadOnlyList<CaptureDevice> List() =>
-        Tappable()
-            // Keyed on the UID rather than the AudioObjectID: CoreAudio re-issues object ids
-            // per boot and per replug, so a saved device selection keyed on one names a
-            // different device next launch, or nothing. Open resolves the UID back.
-            .Select(d => new CaptureDevice(d.Uid, d.Name, d.Flow, d.IsDefault))
-            .ToList();
+    public IReadOnlyList<CaptureDevice> List() => [.. Tappable().Select(Portable)];
+
+    /// <summary>The portable descriptor for one CoreAudio device row.
+    ///
+    /// Keyed on the UID rather than the <c>AudioObjectID</c>: CoreAudio re-issues object ids
+    /// per boot and per replug, so a saved device selection keyed on one names a different
+    /// device next launch, or nothing. <see cref="Open"/> resolves the UID back.
+    ///
+    /// Shared with <see cref="MacOSSystemAudioCapture"/>, which finds the default output
+    /// through Core's own <see cref="CaptureDevice.DefaultFor"/> rule: mapped in one place so
+    /// the endpoint the tap binds to and the one the picker shows cannot be arrived at
+    /// differently.</summary>
+    /// <param name="device">The row as the HAL reported it.</param>
+    /// <returns>The same device, in the terms the core speaks.</returns>
+    internal static CaptureDevice Portable(CoreAudioDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        return new CaptureDevice(device.Uid, device.Name, device.Flow, device.IsDefault);
+    }
 
     public IAudioCapture Open(CaptureDevice device)
     {
