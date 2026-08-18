@@ -87,6 +87,9 @@ public sealed class BridgeRuntime
         // Disable Start now so a second click can't race a second meeting; the rest is async
         // and reports back through the dispatcher.
         ShowBusy();
+        // Everything a notice could be about belongs to the meeting that is over. A shell whose
+        // notice is a line rather than a balloon would otherwise carry it into this one.
+        _view.ClearNotice();
         ApplyStatus(new TrayStatus.Starting());
 
         // Publish the task rather than firing and forgetting: teardown waits on it, so a

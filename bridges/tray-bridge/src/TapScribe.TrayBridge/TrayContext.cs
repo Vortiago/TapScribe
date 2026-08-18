@@ -148,6 +148,15 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
             _indicator.Warn(title, message);
     }
 
+    /// <summary>Nothing to do here, and that is the whole implementation: a notice on Windows
+    /// is a balloon, which the shell already takes down on its own timer, and there is no API
+    /// to retract one early. The seam declares this for the shells whose notice is shown in
+    /// place - the macOS menu's status line - where it stays until something removes it.
+    /// </summary>
+    public void ClearNotice()
+    {
+    }
+
     public void SetMenuState(bool canStart, bool canEnd)
     {
         _startItem.Enabled = canStart;

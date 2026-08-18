@@ -50,6 +50,21 @@ internal sealed class FakeTrayView : ITrayView
         lock (_lock) _notices.Add((title, message, kind));
     }
 
+    /// <summary>How many times the tray was told to take its notice down. Counted rather than
+    /// flagged, because "cleared once, when a meeting starts" and "cleared on every render"
+    /// are different behaviours and only one of them is wanted.</summary>
+    public int NoticesCleared
+    {
+        get { lock (_lock) return _cleared; }
+    }
+
+    private int _cleared;
+
+    public void ClearNotice()
+    {
+        lock (_lock) _cleared++;
+    }
+
     public void SetMenuState(bool canStart, bool canEnd)
     {
         lock (_lock)

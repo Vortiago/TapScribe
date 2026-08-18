@@ -179,6 +179,16 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _notice.Hidden = false;
     }
 
+    /// <summary>Take the notice line back out of the menu. The Mac shell needs this because
+    /// its notice is a menu item rather than a balloon: shown once, it stays until something
+    /// removes it. See <see cref="ITrayView.ClearNotice"/> for why the runtime removes it when
+    /// a meeting starts and not when one ends.</summary>
+    public void ClearNotice()
+    {
+        _notice.Title = "";
+        _notice.Hidden = true;
+    }
+
     /// <summary>Enable or disable the two meeting commands.</summary>
     /// <param name="canStart">Whether Start meeting is live.</param>
     /// <param name="canEnd">Whether End meeting is live.</param>
