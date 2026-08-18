@@ -453,10 +453,31 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         _bound = null;
     }
 
-    // Fires on a CoreAudio notification thread when the aggregate leaves.
+    // Fires on a CoreAudio notification thread when the aggregate leaves: its sub-device went
+    // away, so the device carrying the tap is invalidated and CoreAudio simply stops calling
+    // the IOProc. Nothing is re-read, because there is nothing to re-read - a device that
+    // ARRIVES carries no listener yet, so a notification reaching this one can only mean the
+    // object it names is gone.
     private void OnAggregateGone()
     {
+        lock (_binding)
+        {
+            // Only while a stream was actually running. The seam says Failed means capture
+            // ended unexpectedly MID-STREAM, and a binding that was never started has ended
+            // nothing; the next Start fails on its own, which is where that belongs.
+            if (!_streaming)
+                return;
+            StopIo();
+        }
+
+        // Outside the lock: the pipeline's handler is the one that tears the whole session
+        // down, and it is entitled to reach back into this capture.
+        Failed?.Invoke(this, new CoreAudioException(
+            "the aggregate device carrying the system-audio tap was invalidated", DeviceGone));
     }
+
+    // kAudioHardwareBadDeviceError, the four-char code '!dev'.
+    private const int DeviceGone = NoOutputEndpoint;
 
     // kAudioHardwareBadDeviceError, the four-char code '!dev': the platform's own word for
     // "the device you are asking about is not there".

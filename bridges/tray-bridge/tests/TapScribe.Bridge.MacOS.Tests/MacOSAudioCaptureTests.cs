@@ -251,6 +251,44 @@ public class MacOSAudioCaptureTests
     }
 
     [Fact]
+    public void Capture_WhenTheDeviceGoesAwayMidStream_RaisesFailedWithTheReason()
+    {
+        // The mic was unplugged, disabled, or its interface went to sleep. CoreAudio simply
+        // stops calling the IOProc, so without this the meeting keeps running and records
+        // nothing under that speaker for the rest of the call, with the status line still
+        // saying it is streaming. Failed carries a non-null payload precisely to read as
+        // "microphone lost" rather than as the clean stop a null one means.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        hal.FireProperty(device.ObjectId, CoreAudioPropertyKind.DeviceIsAlive);
+
+        Assert.IsAssignableFrom<ExternalException>(Assert.Single(failures));
+    }
+
+    [Fact]
+    public void Capture_WhenTheDeviceGoesAwayBeforeAnythingStarted_RaisesNothing()
+    {
+        // The seam says Failed means capture ended unexpectedly MID-STREAM. A device that
+        // leaves while nothing is capturing has ended no stream: the next Start will fail on
+        // its own and the enumerator will not list it, which are the two places that fact
+        // belongs. Raising here would have the pipeline report a device that never ran.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+
+        hal.FireProperty(device.ObjectId, CoreAudioPropertyKind.DeviceIsAlive);
+
+        Assert.Empty(failures);
+    }
+
+    [Fact]
     public void Capture_StoppedWhenItWasNeverStarted_RaisesNothing()
     {
         // The seam documents Stop as safe to call when not started, and teardown paths do

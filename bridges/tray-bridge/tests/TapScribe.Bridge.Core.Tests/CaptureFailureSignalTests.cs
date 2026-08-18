@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 using static TapScribe.Bridge.Core.Tests.Fixtures;
 
@@ -40,6 +41,37 @@ public class CaptureFailureSignalTests
         var failure = Assert.Single(failures);
         Assert.Equal("mic", failure.Identity);
         Assert.Same(boom, failure.Error);
+    }
+
+    [Fact]
+    public async Task OneCaptureFailingMidStream_LeavesTheOtherPipelinesStreaming()
+    {
+        // The claim the whole multi-pipeline shape rests on. A meeting is the operator's
+        // microphone AND what the Mac plays, each its own device with its own way of going
+        // away mid-call: a mic unplugged, an output the audio moved off. Losing one has to cost
+        // exactly that one - the other speaker's track keeps being recorded, and the meeting
+        // stays endable - because the alternative is that a headphone jack ends the meeting.
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        var system = new FakeAudioCapture(RecorderFormat);
+        var failures = new List<(string Identity, Exception Error)>();
+
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            new CaptureSet([Spec(mic, "mic"), Spec(system, "system")]),
+            onConnected: _ => { },
+            onFailed: (id, ex) => failures.Add((id, ex)),
+            gate: FastGate(), stream: FastStream(), connectionFactory: transport.Create);
+
+        system.RaiseFailed(new ExternalException("the endpoint behind the tap was invalidated"));
+
+        // Emitted AFTER the failure, so this is about what the surviving pipeline does from
+        // here rather than about what it had already sent.
+        mic.Emit(Loud(50));
+        await Poll.UntilAsync(
+            () => transport.HasStreamed("mic"), TimeSpan.FromSeconds(10), "the surviving mic to keep streaming");
+
+        Assert.Equal("system", Assert.Single(failures).Identity);
+        Assert.Equal(2, orchestrator.PipelineCount);
     }
 
     [Fact]

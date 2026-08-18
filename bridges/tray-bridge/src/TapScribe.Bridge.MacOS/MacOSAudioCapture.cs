@@ -18,6 +18,11 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // what says there is nothing to unsubscribe at teardown.
     private readonly IDisposable? _muteListener;
 
+    // Fires when the endpoint leaves. Subscribed for the capture's whole life rather than per
+    // Start, so the ctor's one unwind covers both listeners; whether a notification MEANS
+    // anything is the handler's business, and it is only ever true mid-stream.
+    private readonly IDisposable _lifeListener;
+
     // Cached so a read from the IO thread never re-enters CoreAudio; refreshed from the
     // property notification. Volatile because the notification arrives on a CoreAudio thread
     // and the gate reads it on another.
@@ -67,28 +72,54 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         // ordering, for the same reason, as the Windows sibling's ctor.
         Format = CoreAudioFormat.Classify(hal.ReadStreamFormat(deviceId));
 
-        if (hal.TryReadMute(deviceId) is null)
-            return;
-
-        // Subscribe BEFORE seeding, so a toggle during construction is not lost in the gap;
-        // the seed then reads the reconciled current state.
-        _muteListener = hal.AddPropertyListener(deviceId, CoreAudioPropertyKind.Mute, OnMuteProperty);
+        _lifeListener = hal.AddPropertyListener(deviceId, CoreAudioPropertyKind.DeviceIsAlive, OnDeviceGone);
         try
         {
+            if (hal.TryReadMute(deviceId) is null)
+                return;
+
+            // Subscribe BEFORE seeding, so a toggle during construction is not lost in the
+            // gap; the seed then reads the reconciled current state.
+            _muteListener = hal.AddPropertyListener(deviceId, CoreAudioPropertyKind.Mute, OnMuteProperty);
             _muted = hal.TryReadMute(deviceId) ?? false;
         }
         catch
         {
-            // The seed is the one native call this ctor makes AFTER taking ownership of
-            // something, and it can fail on its own (the property is there, the read is
-            // refused). Undo the subscription before the throw leaves: nobody will ever hold
-            // this instance, so nobody can Dispose it, and a listener left behind is a native
+            // Everything after the first subscription runs inside this, because from there on
+            // a throw would leave the ctor owning something. Nobody will ever hold this
+            // instance, so nobody can Dispose it, and a listener left behind is a native
             // registration plus the GCHandle rooting it for the process lifetime - still
-            // firing into a half-constructed capture.
-            _muteListener.Dispose();
+            // firing into a half-constructed capture. The seeding read is the shape that
+            // actually happens: the mute property is there, and reading it is refused.
+            _muteListener?.Dispose();
+            _lifeListener.Dispose();
             throw;
         }
     }
+
+    // Fires on a CoreAudio notification thread when the endpoint leaves: unplugged, disabled,
+    // or an interface that went to sleep. CoreAudio simply stops calling the IOProc, so without
+    // this the meeting records nothing under this speaker for the rest of the call while the
+    // status line still says it is streaming.
+    private void OnDeviceGone()
+    {
+        // Only while a stream is actually running. The seam says Failed means capture ended
+        // unexpectedly MID-STREAM, and a device that leaves while nothing is capturing has
+        // ended no stream; the next Start fails on its own, which is where that belongs.
+        if (_ioProc is null)
+            return;
+
+        // Deliberately not a ReleaseIoProc: the endpoint is gone, so stopping and destroying
+        // its IOProc is a call CoreAudio will refuse, and the owner's response to this signal
+        // is to tear the pipeline down through Dispose anyway - which is where that release
+        // happens, once, on the thread that owns it.
+        Failed?.Invoke(this, new CoreAudioException(
+            $"the endpoint behind device {_deviceId} was invalidated", DeviceGone));
+    }
+
+    // kAudioHardwareBadDeviceError, the four-char code '!dev': the platform's own word for
+    // "the device you are asking about is not there".
+    private const int DeviceGone = 560227702;
 
     // Fires on a CoreAudio notification thread. The device's whole notification set reaches
     // one listener, so a volume tweak arrives here too; forward only true mute transitions,
@@ -200,6 +231,7 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
         // Detaching is what stops a late notification landing mid-teardown.
         _muteListener?.Dispose();
+        _lifeListener.Dispose();
         GC.SuppressFinalize(this);
     }
 

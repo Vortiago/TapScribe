@@ -234,6 +234,24 @@ public class MacOSSystemAudioCaptureTests
     }
 
     [Fact]
+    public void SystemAudio_WhenTheAggregateGoesAwayMidStream_RaisesFailedWithTheReason()
+    {
+        // An aggregate device whose sub-device leaves is itself invalidated, and CoreAudio just
+        // stops calling the IOProc. Without this the far side of the meeting records as silence
+        // for the rest of the call with the status line still claiming both devices are
+        // streaming - the exact failure the tap was added to fix, arriving by a different door.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        hal.FireProperty(capture.AggregateDeviceId, CoreAudioPropertyKind.DeviceIsAlive);
+
+        Assert.IsAssignableFrom<ExternalException>(Assert.Single(failures));
+    }
+
+    [Fact]
     public void SystemAudio_StartedTwice_ThrowsInvalidOperationAndLeavesTheRunningStreamAlone()
     {
         // InvalidOperationException, deliberately NOT the native failure type: a double start
