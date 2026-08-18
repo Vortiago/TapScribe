@@ -250,6 +250,155 @@ public class MacOSSystemAudioCaptureTests
     }
 
     [Fact]
+    public void SystemAudio_WhenTheDefaultOutputMoves_RebindsTheTapToTheNewEndpoint()
+    {
+        // Plugging in headphones mid-meeting is the everyday case, and it moves what the Mac
+        // plays through. The aggregate is built AROUND one endpoint, so the old binding does
+        // not follow: left alone it records the rest of the call as silence, with the meeting
+        // still showing as streaming and nothing anywhere to say the far side went away.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        capture.Start();
+
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+
+        Assert.Equal(["External Headphones:uid"], hal.LiveAggregateOutputs);
+        // And exactly one of each, so the rebind REPLACED the binding rather than stacking a
+        // second tap on top of a private aggregate device nobody will ever destroy.
+        Assert.Equal(1, hal.LiveTaps);
+        Assert.Equal(1, hal.LiveAggregates);
+    }
+
+    [Fact]
+    public void SystemAudio_RebindingWhileStreaming_KeepsDeliveringFromTheNewEndpoint()
+    {
+        // The rebind is only worth doing if the meeting carries on through it. The fake
+        // refuses to deliver into anything but a RUNNING IOProc on that exact device, so
+        // audio arriving from the new aggregate is the whole claim: registered, started, and
+        // wired to the same handler as before.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        List<byte[]> received = [];
+        using var arrived = new CountdownEvent(1);
+        capture.DataAvailable += (_, e) =>
+        {
+            received.Add(e.Data.ToArray());
+            arrived.Signal();
+        };
+        capture.Start();
+
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+        hal.PushAudio(capture.AggregateDeviceId, [7, 7, 7, 7]);
+
+        Assert.True(arrived.Wait(Wait), "nothing arrived from the endpoint the tap moved to");
+        Assert.Equal([[7, 7, 7, 7]], received);
+        Assert.Equal(1, hal.RunningIoProcs);
+    }
+
+    [Fact]
+    public void SystemAudio_RebindingWhileStopped_DoesNotStartAStreamNobodyAskedFor()
+    {
+        // A capture that was opened but never started still has to follow the output, because
+        // its Format was read from the tap and Start must find a binding that matches. What it
+        // must NOT do is come up streaming: the IOProc is Start's, and a rebind is not a Start.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+
+        Assert.Equal(["External Headphones:uid"], hal.LiveAggregateOutputs);
+        Assert.Equal(0, hal.LiveIoProcs);
+        Assert.Equal(0, hal.RunningIoProcs);
+    }
+
+    [Fact]
+    public void SystemAudio_WhenThePropertyFiresWithoutTheOutputMoving_KeepsTheBindingItHas()
+    {
+        // CoreAudio fires the default-output property on changes this capture has no stake in,
+        // and a rebind is not free: it destroys and rebuilds a tap and an aggregate device, and
+        // drops however many buffers land in the gap. Rebuilding on every notification would
+        // punch a hole in the recording each time something else on the Mac touched the
+        // property.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        capture.Start();
+        uint aggregate = capture.AggregateDeviceId;
+
+        hal.FireProperty(CoreAudioObject.System, CoreAudioPropertyKind.DefaultOutputDevice);
+
+        Assert.Equal(aggregate, capture.AggregateDeviceId);
+        Assert.Equal(1, hal.LiveTaps);
+        Assert.Equal(1, hal.LiveAggregates);
+    }
+
+    [Fact]
+    public void SystemAudio_WhenTheNewEndpointsTapReadsDifferently_ReportsFailedRatherThanGarbage()
+    {
+        // Format is read once, at Open, and everything downstream is built from it: the
+        // Resampler that turns these bytes into the wire format was constructed against that
+        // description and cannot be told otherwise mid-stream. So an endpoint whose tap reads
+        // differently is not something to quietly carry on with - the bytes would be
+        // reinterpreted at the wrong rate and channel count, which is noise recorded as
+        // speech. Failed is what the pipeline surfaces as "system audio stopped".
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        hal.TapFormat = new CoreAudioStreamFormat(
+            SampleRate: 44_100,
+            ChannelsPerFrame: 2,
+            BitsPerChannel: 32,
+            FormatId: CoreAudioFormatId.LinearPcm,
+            FormatFlags: CoreAudioFormatFlags.IsFloat | CoreAudioFormatFlags.IsPacked);
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+
+        Assert.NotNull(Assert.Single(failures));
+        // Left unbound rather than half-bound: nothing is streaming, and the handles the
+        // refused rebind made are gone rather than sitting in the operator's Mac.
+        Assert.Equal(0, hal.RunningIoProcs);
+        Assert.Equal(0, hal.LiveTaps);
+        Assert.Equal(0, hal.LiveAggregates);
+    }
+
+    [Fact]
+    public void SystemAudio_WhenTheRebindItselfIsRefused_ReportsFailedAndHoldsNothing()
+    {
+        // The output moved to an endpoint this Mac then refuses to tap. There is nothing left
+        // to record the far side with, so the pipeline is told; what it must not be left with
+        // is a capture that reports fine and delivers nothing.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        hal.CreateAggregateDeviceError = new CoreAudioException("creating the aggregate device", -66748);
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+
+        Assert.IsAssignableFrom<ExternalException>(Assert.Single(failures));
+        Assert.Equal(0, hal.LiveTaps);
+        Assert.Equal(0, hal.LiveAggregates);
+    }
+
+    [Fact]
+    public void SystemAudio_DisposedAfterARefusedRebind_StillReleasesCleanly()
+    {
+        // A capture that lost its binding is still an object its owner will Dispose, from a
+        // finally with nothing to fall back on. It has nothing left to release, and saying so
+        // by throwing would strand the rest of the teardown.
+        FakeCoreAudioHal hal = WithSpeakers();
+        var capture = new MacOSSystemAudioCapture(hal);
+        capture.Start();
+        hal.CreateProcessTapError = new CoreAudioException("creating a system-audio process tap", -66748);
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+
+        Assert.Null(Record.Exception(capture.Dispose));
+        Assert.Equal(0, hal.LiveListeners);
+    }
+
+    [Fact]
     public void SystemAudio_WhenTheAggregateRefusesToStart_LeavesNoIoProcAndNoPumpBehind()
     {
         // The tray retries a device that refused, so a registration or a pump thread left by

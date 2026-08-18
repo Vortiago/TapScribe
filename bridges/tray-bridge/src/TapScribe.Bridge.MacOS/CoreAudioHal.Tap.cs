@@ -45,7 +45,8 @@ public sealed unsafe partial class CoreAudioHal
             // what the aggregate lists the tap by, and CoreAudio is the one that assigned it.
             string uid = ReadString(tapId, Selector.TapUid);
             var tap = new ProcessTap(tapId, uid);
-            _taps.Add(tap);
+            lock (_registrations)
+                _taps.Add(tap);
             return tap;
         }
         finally
@@ -74,7 +75,8 @@ public sealed unsafe partial class CoreAudioHal
         if (status != NoError)
             throw new CoreAudioException($"destroying the process tap {live.ObjectId}", status);
 
-        _taps.Remove(live);
+        lock (_registrations)
+            _taps.Remove(live);
     }
 
     public CoreAudioAggregateHandle CreateAggregateDevice(string outputDeviceUid, CoreAudioTapHandle tap)
@@ -98,7 +100,8 @@ public sealed unsafe partial class CoreAudioHal
                     $"creating the aggregate device around tap {live.ObjectId}", status);
 
             var aggregate = new Aggregate(deviceId);
-            _aggregates.Add(aggregate);
+            lock (_registrations)
+                _aggregates.Add(aggregate);
             return aggregate;
         }
         finally
@@ -114,7 +117,8 @@ public sealed unsafe partial class CoreAudioHal
         if (status != NoError)
             throw new CoreAudioException($"destroying the aggregate device {live.DeviceId}", status);
 
-        _aggregates.Remove(live);
+        lock (_registrations)
+            _aggregates.Remove(live);
     }
 
     // The last owner of whatever tap or aggregate is still registered, called from Dispose.
@@ -123,19 +127,17 @@ public sealed unsafe partial class CoreAudioHal
     // every release path to be throw-free, and there is no caller left who could act on one.
     private void ReleaseTapObjects()
     {
-        foreach (Aggregate aggregate in _aggregates)
+        foreach (Aggregate aggregate in Drain(_aggregates))
             AudioHardwareDestroyAggregateDevice(aggregate.DeviceId);
-        _aggregates.Clear();
 
-        foreach (ProcessTap tap in _taps)
+        foreach (ProcessTap tap in Drain(_taps))
             AudioHardwareDestroyProcessTap(tap.ObjectId);
-        _taps.Clear();
     }
 
     private ProcessTap LiveTap(CoreAudioTapHandle tap, string call)
     {
         ArgumentNullException.ThrowIfNull(tap);
-        if (tap is not ProcessTap live || !_taps.Contains(live))
+        if (tap is not ProcessTap live || !Holds(_taps, live))
             throw new InvalidOperationException($"{call} was handed a tap handle this HAL does not hold");
         return live;
     }
@@ -143,7 +145,7 @@ public sealed unsafe partial class CoreAudioHal
     private Aggregate LiveAggregate(CoreAudioAggregateHandle device, string call)
     {
         ArgumentNullException.ThrowIfNull(device);
-        if (device is not Aggregate live || !_aggregates.Contains(live))
+        if (device is not Aggregate live || !Holds(_aggregates, live))
             throw new InvalidOperationException(
                 $"{call} was handed an aggregate handle this HAL does not hold");
         return live;

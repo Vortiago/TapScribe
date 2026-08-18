@@ -100,6 +100,32 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         FireProperty(deviceId, CoreAudioPropertyKind.Mute);
     }
 
+    /// <summary>Move the system default output to <paramref name="device"/> and fire the
+    /// property, the way plugging in headphones does the two together. Registering the device
+    /// as part of the move rather than beforehand is what makes a test read as the situation:
+    /// the endpoint appears and becomes the default in one step.</summary>
+    /// <param name="device">The endpoint that is now the default output. Must be a
+    /// <see cref="DeviceFlow.Render"/> row; there is no such thing as a default output that is
+    /// an input.</param>
+    public void SetDefaultOutput(CoreAudioDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        if (device.Flow != DeviceFlow.Render)
+            throw new InvalidOperationException($"{device.Name} is not an output, so it cannot be the default one");
+
+        for (int i = 0; i < _devices.Count; i++)
+            if (_devices[i].Flow == DeviceFlow.Render)
+                _devices[i] = _devices[i] with { IsDefault = false };
+
+        int existing = _devices.FindIndex(d => d.ObjectId == device.ObjectId && d.Flow == DeviceFlow.Render);
+        if (existing >= 0)
+            _devices[existing] = device with { IsDefault = true };
+        else
+            AddDevice(device with { IsDefault = true });
+
+        FireProperty(CoreAudioObject.System, CoreAudioPropertyKind.DefaultOutputDevice);
+    }
+
     /// <summary>Invoke every live listener on <paramref name="objectId"/> for
     /// <paramref name="kind"/>. A no-op when nothing is watching, matching CoreAudio: the OS
     /// fires on properties nobody asked about, and a capture that registered no listener is

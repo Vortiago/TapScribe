@@ -26,9 +26,13 @@ namespace TapScribe.Bridge.MacOS;
 /// Partial rather than a second class so the reflection half of the upstream-contract test,
 /// which counts this type's <c>[LibraryImport]</c>s, still sees every native declaration.
 ///
-/// Not thread-safe, and does not need to be: one enumerator owns one of these and drives it
-/// from the tray thread. The native CALLBACKS arrive on CoreAudio threads, but they touch only
-/// their own pinned registration, never the lists here.
+/// The native calls are CoreAudio's own to serialise; what this class adds is the four lists
+/// of what it still holds, and every touch of one is under <c>_registrations</c>. That is
+/// needed since #420: the system-audio capture rebinds its tap from a CoreAudio NOTIFICATION
+/// thread while the tray thread may be ending the meeting through the same HAL, and one
+/// enumerator's HAL is shared by every capture it opened, so the race is ACROSS captures
+/// rather than within one. The lists are the only shared state; the IOProc trampoline touches
+/// none of it, so the realtime path pays nothing.
 ///
 /// The macos platform attribute is on the TYPE, so the "never touch a native symbol off a Mac"
 /// rule is decided once, where this is CONSTRUCTED, and CA1416 proves it at compile time.
@@ -40,6 +44,10 @@ namespace TapScribe.Bridge.MacOS;
 [SupportedOSPlatform("macos")]
 public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 {
+    /// <summary>Guards every list of what this HAL still holds. Taken by each method that
+    /// reads or mutates one, so a caller never has to know which thread it is on.</summary>
+    private readonly Lock _registrations = new();
+
     private readonly List<Registration> _listeners = [];
     private readonly List<IoProc> _ioProcs = [];
     private bool _disposed;
@@ -140,7 +148,8 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             throw new CoreAudioException($"watching a property on object {objectId}", status);
         }
 
-        _listeners.Add(registration);
+        lock (_registrations)
+            _listeners.Add(registration);
         return registration;
     }
 
@@ -158,7 +167,8 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         }
 
         ioProc.ProcId = procId;
-        _ioProcs.Add(ioProc);
+        lock (_registrations)
+            _ioProcs.Add(ioProc);
         return ioProc;
     }
 
@@ -191,30 +201,33 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         if (status != NoError)
             throw new CoreAudioException($"destroying the IOProc on device {live.DeviceId}", status);
 
-        _ioProcs.Remove(live);
+        lock (_registrations)
+            _ioProcs.Remove(live);
         live.Unpin();
     }
 
     public void Dispose()
     {
-        if (_disposed)
-            return;
-        _disposed = true;
+        lock (_registrations)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+        }
 
         // The last owner of whatever is still registered. Nothing here throws or checks a
         // status: the seam binds every release path to be throw-free, and there is no caller
         // left who could act on a failure.
-        foreach (IoProc ioProc in _ioProcs)
+        foreach (IoProc ioProc in Drain(_ioProcs))
         {
             AudioDeviceStop(ioProc.DeviceId, ioProc.ProcId);
             AudioDeviceDestroyIOProcID(ioProc.DeviceId, ioProc.ProcId);
             ioProc.Unpin();
         }
-        _ioProcs.Clear();
 
-        // Copied because Dispose() removes the registration from this list as it goes, which
-        // is also why no Clear() follows: the list is empty by the time the loop ends.
-        foreach (Registration registration in _listeners.ToList())
+        // Each Dispose removes the registration from the list, so the copy is what makes the
+        // walk safe as well as what makes it exclusive.
+        foreach (Registration registration in Drain(_listeners))
             registration.Dispose();
 
         // Last, because an aggregate device can be the very thing an IOProc above ran over.
@@ -224,9 +237,37 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     private IoProc Live(CoreAudioIoProcHandle ioProc, string call)
     {
         ArgumentNullException.ThrowIfNull(ioProc);
-        if (ioProc is not IoProc live || !_ioProcs.Contains(live))
+        if (ioProc is not IoProc live || !Holds(_ioProcs, live))
             throw new InvalidOperationException($"{call} was handed an IOProc handle this HAL does not hold");
         return live;
+    }
+
+    /// <summary>Whether this HAL still holds <paramref name="handle"/>, which is what makes a
+    /// handle from another HAL, or one already released, refusable.</summary>
+    /// <typeparam name="T">What the list holds.</typeparam>
+    /// <param name="held">The list to look in.</param>
+    /// <param name="handle">The handle to look for.</param>
+    /// <returns>True when the list holds it.</returns>
+    private bool Holds<T>(List<T> held, T handle)
+    {
+        lock (_registrations)
+            return held.Contains(handle);
+    }
+
+    /// <summary>Take everything a list holds and empty it, so the caller walks a snapshot
+    /// nothing else can be releasing at the same time. The teardown shape: whoever drains owns
+    /// what came out.</summary>
+    /// <typeparam name="T">What the list holds.</typeparam>
+    /// <param name="held">The list to empty.</param>
+    /// <returns>What it held.</returns>
+    private List<T> Drain<T>(List<T> held)
+    {
+        lock (_registrations)
+        {
+            List<T> taken = [.. held];
+            held.Clear();
+            return taken;
+        }
     }
 
     // ---- property reads, all the same two-call shape: ask the size, then ask again ----
@@ -469,7 +510,8 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
                 AudioObjectRemovePropertyListener(
                     _objectId, address, &OnPropertyChanged, GCHandle.ToIntPtr(Pin));
             }
-            _hal._listeners.Remove(this);
+            lock (_hal._registrations)
+                _hal._listeners.Remove(this);
             Unpin();
         }
     }

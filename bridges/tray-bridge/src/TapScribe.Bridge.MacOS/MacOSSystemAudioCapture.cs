@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.MacOS;
@@ -156,11 +157,16 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             ObjectDisposedException.ThrowIf(_disposed, this);
             // InvalidOperationException, not the native failure type: a double start is a bug
             // in the caller rather than a Mac that refused, so the orchestrator's
-            // skip-and-carry-on filter must not swallow it.
+            // skip-and-carry-on filter must not swallow it. Same for a capture whose rebind was
+            // refused: it already reported the platform failure through Failed, and reporting
+            // it a second time as a start failure would have the runtime classify one dead tap
+            // as two.
             if (_streaming)
                 throw new InvalidOperationException("system audio is already being captured");
+            if (_bound is not { } bound)
+                throw new InvalidOperationException("system audio has no tap left to start");
 
-            StartIo(_bound!);
+            StartIo(bound);
             // Set only once the IOProc is actually running, so a refused Start leaves this
             // capture stopped and retryable rather than claiming a stream it does not have.
             _streaming = true;
@@ -344,10 +350,107 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     // ---- what the notifications mean ---------------------------------------------------------
 
     // Fires on a CoreAudio notification thread when the Mac starts playing through a different
-    // endpoint. Left unimplemented in this slice deliberately: what a rebind MEANS is its own
-    // behaviour, and a half-done one would silently keep the old binding.
+    // endpoint. The aggregate is built AROUND one endpoint and does not follow, so left alone
+    // the rest of the meeting records as silence while the status line still says streaming:
+    // plugging in headphones mid-call is the everyday way that happens.
     private void OnDefaultOutputChanged()
     {
+        Exception? failure;
+        lock (_binding)
+            failure = Rebind();
+
+        // Outside the lock: a handler is entitled to reach back into this capture, and the
+        // pipeline's is the one that tears the whole session down.
+        if (failure is not null)
+            Failed?.Invoke(this, failure);
+    }
+
+    // Move the tap to whatever the Mac is playing through now, keeping the stream running
+    // across it. Returns what to report, or null when there was nothing to do or nothing went
+    // wrong. Caller holds the lock.
+    private Exception? Rebind()
+    {
+        if (_disposed || _bound is not { } current)
+            return null;
+
+        string moved;
+        try
+        {
+            moved = DefaultOutputUid();
+        }
+        catch (CoreAudioException ex)
+        {
+            // Every output left at once, or the HAL refused the walk. Reported rather than
+            // retried: nothing will fire this property again until an endpoint comes back, and
+            // the binding it names is already the wrong one.
+            Unbind(current);
+            return ex;
+        }
+
+        // CoreAudio fires this property on changes this capture has no stake in, and a rebind
+        // is not free: it destroys and rebuilds a tap and an aggregate device, and drops
+        // whatever lands in the gap. Rebuilding on every notification would punch a hole in
+        // the recording each time something else on the Mac touched the property.
+        if (string.Equals(moved, current.OutputDeviceUid, StringComparison.Ordinal))
+            return null;
+
+        bool wasStreaming = _streaming;
+        // The old binding goes FIRST, before anything of the new one exists. A tap is a
+        // system-wide object and an aggregate device is registered with the whole Mac, so
+        // building the replacement while the old pair is still live would leave two of each on
+        // any path that then throws.
+        Unbind(current);
+
+        Bound next;
+        try
+        {
+            next = Bind();
+            AudioFormat arriving = CoreAudioFormat.Classify(_hal.ReadTapFormat(next.Tap));
+            // Format is read once, at Open, and the Resampler downstream was built from it and
+            // cannot be told otherwise mid-stream. An endpoint whose tap reads differently
+            // would have these bytes reinterpreted at the wrong rate and channel count, which
+            // is noise recorded as speech, so this refuses rather than carrying on.
+            if (arriving != Format)
+            {
+                Release(next);
+                return new NotSupportedException(
+                    $"System audio moved to an endpoint whose tap is {arriving.SampleRate} Hz, " +
+                    $"{arriving.Channels} channel(s), and this meeting is recording " +
+                    $"{Format.SampleRate} Hz, {Format.Channels} channel(s). End the meeting and " +
+                    "start it again to record from it.");
+            }
+
+            _bound = next;
+            if (wasStreaming)
+            {
+                StartIo(next);
+                _streaming = true;
+            }
+        }
+        catch (Exception ex) when (ex is ExternalException or NotSupportedException)
+        {
+            // The endpoint moved somewhere this Mac will not tap, or refused the IOProc on it.
+            // There is nothing left to record the far side with, so the pipeline is told rather
+            // than left with a capture that reports fine and delivers nothing. Whatever the
+            // failed attempt DID make is released by whoever threw, so nothing is held here.
+            if (_bound is { } half)
+            {
+                Unbind(half);
+                _bound = null;
+            }
+            return ex;
+        }
+
+        return null;
+    }
+
+    // Stop whatever this binding is doing and release it, leaving this capture holding
+    // nothing. Caller holds the lock.
+    private void Unbind(Bound bound)
+    {
+        StopIo();
+        Release(bound);
+        _bound = null;
     }
 
     // Fires on a CoreAudio notification thread when the aggregate leaves.
