@@ -26,8 +26,16 @@ internal static class BridgeAppData
 /// The macOS wiring of the portable storage layer. Everything platform-specific about where
 /// the tray's files live and how its one secret is protected is decided here and nowhere
 /// else; the stores themselves are OS-agnostic.
+///
+/// An INSTANCE with a <see cref="Production"/> singleton, rather than a static set, because
+/// the settings store's token half is the login Keychain: a Save writes a real Keychain item
+/// and a Save of a blank token DELETES one, and there is no temp-directory escape for either
+/// the way there is for the three files. So the shell takes a set rather than reaching for a
+/// static one, and anything exercising the shell hands it a directory and a token store it
+/// owns. <c>Production</c> is what the app runs, matching <c>TrayDependencies.Production</c>
+/// on the Windows side.
 /// </summary>
-public static class TrayStores
+public sealed class TrayStores
 {
     /// <summary>
     /// The on-disk settings filename, an operator-facing contract: a change orphans every
@@ -37,14 +45,31 @@ public static class TrayStores
     /// </summary>
     public const string SettingsFileName = "macos-tray-bridge.json";
 
-    /// <summary>Connection settings + device selection, with the tap token in the Keychain
-    /// rather than in the file.</summary>
-    public static BridgeSettingsStore Settings { get; } =
-        new(new KeychainTapTokenStore(), BridgeAppData.Directory, SettingsFileName);
+    /// <summary>The operator's own set: the three files in
+    /// ~/Library/Application Support/TapScribe, with the tap token in their login Keychain.
+    /// The only place the Keychain-backed token store is constructed.</summary>
+    public static TrayStores Production { get; } =
+        new(BridgeAppData.Directory, new KeychainTapTokenStore());
+
+    /// <summary>Build the three stores over one directory.</summary>
+    /// <param name="directory">Where all three files live.</param>
+    /// <param name="tokens">How the tap token is kept at rest.</param>
+    public TrayStores(string directory, ITapTokenStore tokens)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        ArgumentNullException.ThrowIfNull(tokens);
+        Settings = new BridgeSettingsStore(tokens, directory, SettingsFileName);
+        MeetingState = new MeetingStateStore(directory);
+        MeetingHistory = new MeetingHistoryStore(directory);
+    }
+
+    /// <summary>Connection settings + device selection, with the tap token wherever the
+    /// token store this was built with puts it.</summary>
+    public BridgeSettingsStore Settings { get; }
 
     /// <summary>The active meeting, for restart-resume (#107).</summary>
-    public static MeetingStateStore MeetingState { get; } = new(BridgeAppData.Directory);
+    public MeetingStateStore MeetingState { get; }
 
     /// <summary>The local Past-meetings list (#168).</summary>
-    public static MeetingHistoryStore MeetingHistory { get; } = new(BridgeAppData.Directory);
+    public MeetingHistoryStore MeetingHistory { get; }
 }
