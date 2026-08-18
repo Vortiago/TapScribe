@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
@@ -331,6 +332,66 @@ public class MacOSAudioCaptureTests
 
         Assert.IsAssignableFrom<ExternalException>(Record.Exception(capture.Start));
         Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
+    public void Capture_WhenTheDeviceRefusesTheIoProc_LeavesNoPumpThreadBehind()
+    {
+        // The pump is started BEFORE the IOProc, so the first buffer has somewhere to go,
+        // which makes tearing it down part of every way Start can fail. A pump left parked on
+        // a semaphore nothing will ever release is not collectable, and Dispose cannot reach
+        // it either: it releases through the IOProc handle, which a failed Start never
+        // assigns. The tray retries a device that refused, so it is one thread and one ring
+        // per attempt for the process lifetime.
+        //
+        // Collectability is the observable form of it: the pump's delegate runs an INSTANCE
+        // method, so a live pump roots the capture. Counting OS threads would be the same
+        // claim measured against the thread pool's noise.
+        var hal = new FakeCoreAudioHal
+        {
+            CreateIoProcError = new CoreAudioException("creating an IOProc on device 41", -66748),
+        };
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+
+        WeakReference abandoned = StartAndRelease(hal, device);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.False(
+            abandoned.IsAlive,
+            "a capture whose Start was refused is still rooted, which is its pump thread still parked");
+    }
+
+    // Out of line and NoInlining so the capture cannot stay live in a caller's frame, which
+    // would make the assertion above about the JIT rather than about the pump.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference StartAndRelease(FakeCoreAudioHal hal, CoreAudioDevice device)
+    {
+        var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        Record.Exception(capture.Start);
+        capture.Dispose();
+        return new WeakReference(capture);
+    }
+
+    [Fact]
+    public void Capture_WhenSeedingTheMuteStateIsRefused_LeavesNoListenerBehind()
+    {
+        // The constructor's bargain: a throw leaves this instance owning nothing. It has to
+        // hold, because a ctor that throws hands the instance to NOBODY, so nobody can ever
+        // Dispose it. The subscription is deliberately taken BEFORE the seeding read, so a
+        // toggle during construction is not lost in the gap, and that makes the seed the one
+        // call that can fail with something already owned: a native registration plus the
+        // GCHandle rooting it, still firing into a half-constructed capture, for the process
+        // lifetime.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        hal.SeedMuteError = new CoreAudioException("reading the mute state of device 41", -66748);
+
+        Assert.IsAssignableFrom<ExternalException>(
+            Record.Exception(() => new MacOSAudioCapture(hal, device.ObjectId)));
+
+        Assert.Equal(0, hal.LiveListeners);
     }
 
     [Fact]

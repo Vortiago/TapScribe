@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.MacOS;
@@ -59,14 +60,41 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // that actually matters is RingSlots (8 buffers of pump slack), which slot size does not
     // affect.
     private const int MaxBufferFrames = 8192;
-    private readonly int[] _lengths = new int[RingSlots];
-    private byte[][] _ring = [];
-    private long _written;              // producer-only; the semaphore carries publication
-    private long _read;                 // published with Volatile.Write, read by the producer
-    private long _dropped;              // producer-only, diagnostic
-    private SemaphoreSlim? _filled;     // one release per published slot
+    private long _dropped;              // producer-only, diagnostic; spans generations
+
+    // The running generation, or null while stopped. Volatile because the IO thread reads it
+    // and Stop clears it; null is also what tells a callback arriving after teardown that
+    // there is nowhere left to put it.
+    private volatile Ring? _active;
     private Thread? _pump;
     private CancellationTokenSource? _pumping;
+
+    /// <summary>One Start's worth of hand-off: the slots, their lengths, the counters and the
+    /// semaphore that publishes them.
+    ///
+    /// Scoped to the generation rather than held in fields on the capture, because
+    /// <see cref="StopPump"/>'s join is BOUNDED. A pump abandoned at the cap is still inside
+    /// its handler, and advances its read counter once more when that handler returns. Held in
+    /// shared fields, that write lands on the ring of whatever Start came next and desyncs it:
+    /// the producer misjudges fullness and the new pump reads a slot nobody wrote, which is
+    /// stale audio delivered out of order. Per generation, the stray write hits a ring nobody
+    /// is reading.</summary>
+    private sealed class Ring
+    {
+        internal readonly byte[][] Slots = new byte[RingSlots][];
+        internal readonly int[] Lengths = new int[RingSlots];
+        internal readonly SemaphoreSlim Filled = new(0);
+        internal long Written;          // producer-only; the semaphore carries publication
+        internal long Read;             // published with Volatile.Write, read by the producer
+
+        /// <summary>Allocate every slot up front, so the IO thread never does.</summary>
+        /// <param name="slotBytes">Bytes one slot holds.</param>
+        internal Ring(int slotBytes)
+        {
+            for (int i = 0; i < RingSlots; i++)
+                Slots[i] = new byte[slotBytes];
+        }
+    }
 
     /// <summary>How long <see cref="Stop"/> waits for the pump to leave before abandoning it.
     /// Sized like its siblings (<c>TapSession.DisposeDrainTimeout</c>,
@@ -115,7 +143,21 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         // Subscribe BEFORE seeding, so a toggle during construction is not lost in the gap;
         // the seed then reads the reconciled current state.
         _muteListener = hal.AddPropertyListener(deviceId, CoreAudioPropertyKind.Mute, OnMuteProperty);
-        _muted = hal.TryReadMute(deviceId) ?? false;
+        try
+        {
+            _muted = hal.TryReadMute(deviceId) ?? false;
+        }
+        catch
+        {
+            // The seed is the one native call this ctor makes AFTER taking ownership of
+            // something, and it can fail on its own (the property is there, the read is
+            // refused). Undo the subscription before the throw leaves: nobody will ever hold
+            // this instance, so nobody can Dispose it, and a listener left behind is a native
+            // registration plus the GCHandle rooting it for the process lifetime - still
+            // firing into a half-constructed capture.
+            _muteListener.Dispose();
+            throw;
+        }
     }
 
     // Fires on a CoreAudio notification thread. The device's whole notification set reaches
@@ -140,21 +182,21 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // measured (see the note on the fields above).
     private void OnIoProc(ReadOnlySpan<byte> audio)
     {
-        SemaphoreSlim? filled = _filled;
-        if (filled is null)
+        Ring? ring = _active;
+        if (ring is null)
             return;
 
         // Full ring means the pump is behind. Drop THIS buffer rather than overwrite one the
         // pump has not read: overwriting would hand it a slot changing underneath it, and
         // blocking would miss the deadline, which is the one thing this thread must not do.
-        if (_written - Volatile.Read(ref _read) >= RingSlots)
+        if (ring.Written - Volatile.Read(ref ring.Read) >= RingSlots)
         {
             _dropped++;
             return;
         }
 
-        int slot = (int)(_written % RingSlots);
-        byte[] target = _ring[slot];
+        int slot = (int)(ring.Written % RingSlots);
+        byte[] target = ring.Slots[slot];
         // Larger than the period Start sized for, which means this device asks for more than
         // MaxBufferFrames. Dropping beats allocating on this thread, and every buffer from
         // such a device drops, so the count is how it would be diagnosed.
@@ -165,28 +207,28 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         }
 
         audio.CopyTo(target);
-        _lengths[slot] = audio.Length;
+        ring.Lengths[slot] = audio.Length;
         // Plain increment: only this thread reads it. The semaphore's release/wait pair is
-        // what publishes the slot's contents to the pump, and _read is the one counter that
+        // what publishes the slot's contents to the pump, and Read is the one counter that
         // genuinely crosses threads.
-        _written++;
-        filled.Release();
+        ring.Written++;
+        ring.Filled.Release();
     }
 
     // The pump. Raises DataAvailable off the IO thread, one buffer at a time and in order, so
     // the seam's "the buffer is reusable once the handler returns" still holds: a slot is only
     // returned to the producer after the handler for it has returned.
-    private void PumpLoop(SemaphoreSlim filled, CancellationToken stopping)
+    private void PumpLoop(Ring ring, CancellationToken stopping)
     {
         try
         {
             while (true)
             {
-                filled.Wait(stopping);
-                int slot = (int)(_read % RingSlots);
+                ring.Filled.Wait(stopping);
+                int slot = (int)(ring.Read % RingSlots);
                 DataAvailable?.Invoke(
-                    this, new AudioCapturedEventArgs(_ring[slot].AsMemory(0, _lengths[slot])));
-                Volatile.Write(ref _read, _read + 1);
+                    this, new AudioCapturedEventArgs(ring.Slots[slot].AsMemory(0, ring.Lengths[slot])));
+                Volatile.Write(ref ring.Read, ring.Read + 1);
             }
         }
         catch (OperationCanceledException)
@@ -204,47 +246,47 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         if (_ioProc is not null)
             throw new InvalidOperationException($"device {_deviceId} is already capturing");
 
-        // Everything the IO thread will touch, allocated before it can run. The slot size is
-        // a whole second of this device's format, which no sane buffer period approaches, so
-        // the producer's over-length drop is a guard rather than a working path.
-        _written = 0;
-        _read = 0;
+        // Everything the IO thread will touch, allocated before it can run. A slot holds one
+        // device buffer period, so the producer's over-length drop is a guard rather than a
+        // working path on any device that asks for a sane one.
         _dropped = 0;
-        int slotBytes = MaxBufferFrames * Format.BytesPerInterleavedFrame;
-        _ring = new byte[RingSlots][];
-        for (int i = 0; i < RingSlots; i++)
-            _ring[i] = new byte[slotBytes];
-
-        var filled = new SemaphoreSlim(0);
+        var ring = new Ring(MaxBufferFrames * Format.BytesPerInterleavedFrame);
         var pumping = new CancellationTokenSource();
         // Started BEFORE the IOProc, so the first buffer has somewhere to go. IsBackground so
         // a pump nobody stopped cannot hold the process up.
-        var pump = new Thread(() => PumpLoop(filled, pumping.Token))
+        var pump = new Thread(() => PumpLoop(ring, pumping.Token))
         {
             IsBackground = true,
             Name = $"tapscribe-capture-{_deviceId}",
         };
-        _filled = filled;
+        _active = ring;
         _pumping = pumping;
         _pump = pump;
         pump.Start();
 
-        CoreAudioIoProcHandle ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
+        // BOTH native calls inside the guard, because the pump is already running: a
+        // CreateIoProc that refuses leaves a thread parked on a semaphore nothing will ever
+        // release, holding its ring, and Dispose cannot collect it either since it releases
+        // through _ioProc, which a failed Start never assigns. The tray retries a device that
+        // refused, so that is a thread and a ring per attempt for the process lifetime.
+        CoreAudioIoProcHandle? ioProc = null;
         try
         {
+            ioProc = _hal.CreateIoProc(_deviceId, OnIoProc);
             _hal.StartIo(ioProc);
         }
         catch
         {
-            StopPump();
-            // Registered but not running. Unregister before letting the failure out: the tray
-            // retries a device that refused, so keeping it would leak one registration per
-            // attempt for the process lifetime. Assigning _ioProc only AFTER the start
-            // succeeds is the other half - a failed Start leaves this instance holding
-            // nothing, so a later Stop has nothing to release and announces nothing.
             try
             {
-                _hal.DestroyIoProc(ioProc);
+                // Registered but not running. Unregister before letting the failure out: the
+                // tray retries a device that refused, so keeping it would leak one
+                // registration per attempt for the process lifetime. Assigning _ioProc only
+                // AFTER the start succeeds is the other half - a failed Start leaves this
+                // instance holding nothing, so a later Stop has nothing to release and
+                // announces nothing.
+                if (ioProc is not null)
+                    _hal.DestroyIoProc(ioProc);
             }
             catch (CoreAudioException)
             {
@@ -253,6 +295,15 @@ internal sealed class MacOSAudioCapture : IAudioCapture
                 // caller filters on; what is lost is one registration on a device already
                 // failing, which goes when the device does.
             }
+            finally
+            {
+                // In a finally, and after the IOProc is down rather than before, for the two
+                // reasons ReleaseIoProc gives: a live IOProc must never outlive the pump it
+                // publishes into, and the pump must come down on EVERY way out of here or the
+                // thread and its ring outlive the capture nobody will ever hold.
+                StopPump();
+            }
+
             throw;
         }
 
@@ -274,14 +325,18 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         {
             ReleaseIoProc();
         }
-        catch (CoreAudioException)
+        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
         {
-            // The endpoint was invalidated while capture ran (unplugged, disabled, default
-            // switched), so CoreAudio refuses to stop what is already gone. Swallowed because
-            // Dispose is contract-bound not to throw: every teardown path reaches it from a
-            // finally or from the tray's bounded Quit, and a throw here strands the device for
-            // the process lifetime. What is lost is the report, which Stop would have
-            // propagated to an owner that could still act on it.
+            // ExternalException: the endpoint was invalidated while capture ran (unplugged,
+            // disabled, default switched), so CoreAudio refuses to stop what is already gone.
+            // InvalidOperationException: the HAL was released first, so it no longer holds the
+            // registration this is handing back - an ownership order the seam forbids, but one
+            // a teardown path must survive rather than diagnose. Swallowed because Dispose is
+            // contract-bound not to throw: every teardown path reaches it from a finally or
+            // from the tray's bounded Quit, and a throw here strands the device AND skips the
+            // listener detach below for the process lifetime. What is lost is the report,
+            // which Stop would have propagated to an owner that could still act on it. The
+            // filter is the same one TapSession.DisposeAsync applies to Stop.
         }
 
         // Detaching is what stops a late notification landing mid-teardown.
@@ -338,11 +393,12 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     private void StopPump()
     {
         _pumping?.Cancel();
-        _filled = null;
+        // Clearing the generation is also what releases its slots, and what tells a callback
+        // that outlived the IOProc there is nowhere to put its buffer.
+        _active = null;
         _pump?.Join(PumpStopCap);
         _pumping?.Dispose();
         _pumping = null;
         _pump = null;
-        _ring = [];
     }
 }

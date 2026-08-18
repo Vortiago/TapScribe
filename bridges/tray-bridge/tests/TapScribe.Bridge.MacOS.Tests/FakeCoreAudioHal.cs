@@ -43,6 +43,13 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     /// holds that line.</summary>
     public Exception? DisposeError { get; set; }
 
+    /// <summary>When set, <see cref="TryReadMute"/> answers the FIRST read and throws it on
+    /// every one after. The probe for "does this endpoint carry a mute at all" and the seed of
+    /// its current state are two separate reads, and a real device can answer the first and
+    /// refuse the second; that is the one shape in which a capture's constructor fails with a
+    /// subscription already taken.</summary>
+    public Exception? SeedMuteError { get; set; }
+
     /// <summary>How many times this HAL was released. Counted rather than flagged: whoever
     /// owns it is contract-bound to be throw-free, never to be idempotent.</summary>
     public int Disposals { get; private set; }
@@ -148,7 +155,12 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
             : throw new CoreAudioException($"reading the stream format of device {deviceId}", NoSuchObject);
     }
 
-    public bool? TryReadMute(uint deviceId) => _mute.TryGetValue(deviceId, out bool? muted) ? muted : null;
+    public bool? TryReadMute(uint deviceId)
+    {
+        if (SeedMuteError is not null && _muteReads++ > 0)
+            throw SeedMuteError;
+        return _mute.TryGetValue(deviceId, out bool? muted) ? muted : null;
+    }
 
     public IDisposable AddPropertyListener(uint objectId, CoreAudioPropertyKind kind, Action handler)
     {
@@ -207,6 +219,9 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
 
     // kAudioHardwareBadObjectError, the four-char code '!obj'.
     private const int NoSuchObject = 560947818;
+
+    // Mute reads answered so far, which is what SeedMuteError counts against.
+    private int _muteReads;
 
     // The handle-validating half: a handle has to be one THIS fake issued and still live, or
     // the call is one hardware would have refused.
