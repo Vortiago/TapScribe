@@ -40,6 +40,46 @@ public class TrayStoresTests
     }
 
     [Fact]
+    public void FallbackIdentity_IsAMacsOwn_NotTheWindowsSlug()
+    {
+        // The identity is the WAV filename slug and the key the Recorder attributes recordings
+        // under. Core's frozen default is "windows-tray", which is correct WHERE IT IS FROZEN
+        // and simply wrong on a Mac: an operator whose box offers no username would have their
+        // recordings filed under a Windows tray they have never run. Same class of value as
+        // the settings filename beside it - platform-side, operator-facing, and a change here
+        // re-attributes every recording made under it rather than renaming anything.
+        Assert.Equal("mac-tray", TrayStores.FallbackIdentity);
+    }
+
+    [Fact]
+    public void LoadedSettings_CarryTheMacFallback_SoNoWindowsSlugCanReachADefaultDevice()
+    {
+        // The settings the shell actually runs on. A blank Speaker ID is normal (the field is
+        // optional), and every blank one resolves through the fallback: the base identity a
+        // tap streams under, and the label the default microphone row is named with. Loaded
+        // through the real store, because the stamp is the store's job and asserting on a
+        // hand-built BridgeSettings would prove nothing about the path the app takes.
+        string directory = Path.Join(Path.GetTempPath(), $"tapscribe-mac-fallback-{Guid.NewGuid():n}");
+        try
+        {
+            var stores = new TrayStores(directory, new RecordingTapTokenStore());
+            BridgeSettings loaded = stores.Settings.Load();
+            loaded.Identity = "";
+
+            Assert.Equal("mac-tray", loaded.FallbackIdentity);
+            Assert.DoesNotContain(
+                "windows",
+                loaded.DefaultDevices()[0].Identity,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ProductionStores_AllLiveInTheApplicationSupportFolder()
     {
         // Settings, restart-resume state and Past-meetings history: three files, one folder,

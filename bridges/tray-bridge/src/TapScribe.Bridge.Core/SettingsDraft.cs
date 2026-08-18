@@ -48,6 +48,11 @@ public sealed class SettingsDraft
     // (so a migrated pinned gate is recovered rather than reset — ADR-0007).
     private string _baseIdentity = "";
     private string _baseName = "";
+
+    // The shell's fallback slug, carried across a Save. Neither editable nor shown: it is a
+    // property of the platform, and dropping it here would hand the runtime settings whose
+    // blank Speaker ID resolves to another OS's frozen name.
+    private string _fallbackIdentity = "";
     private IReadOnlyList<DeviceSelection> _savedDevices = [];
     private IReadOnlyList<DeviceSelection> _effectiveDevices = [];
     private IReadOnlyList<DeviceSelection> _absentPinned = [];
@@ -71,6 +76,7 @@ public sealed class SettingsDraft
             ProcessOnEnd = current.ProcessOnEnd,
             _baseIdentity = current.Identity,
             _baseName = current.Name,
+            _fallbackIdentity = current.FallbackIdentity,
             _savedDevices = current.Devices,
             _effectiveDevices = current.EffectiveDevices,
         };
@@ -196,6 +202,7 @@ public sealed class SettingsDraft
             AllowSelfSignedCert = Tls && AllowSelfSignedCert,
             Identity = _baseIdentity,
             Name = _baseName,
+            FallbackIdentity = _fallbackIdentity,
             Token = Token.Trim(),
             ProcessOnEnd = ProcessOnEnd,
             Devices = selections,

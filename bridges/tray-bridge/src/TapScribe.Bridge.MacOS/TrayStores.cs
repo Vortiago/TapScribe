@@ -45,6 +45,20 @@ public sealed class TrayStores
     /// </summary>
     public const string SettingsFileName = "macos-tray-bridge.json";
 
+    /// <summary>
+    /// The identity a tap streams under when neither the operator nor the Mac offers one -
+    /// the WAV filename slug, and the key the Recorder attributes those recordings by. Same
+    /// class of value as the filename above, and living here for the same reason: it is
+    /// operator-facing, it is frozen, and changing it re-attributes every recording made under
+    /// it as a new speaker rather than renaming anything.
+    ///
+    /// Core's own default is "windows-tray", which is right where it is frozen and simply
+    /// wrong here: it would file a Mac operator's recordings under a Windows tray they have
+    /// never run. <see cref="BridgeSettingsStore"/> takes this and stamps it, so there is one
+    /// place per platform rather than one per member that falls back to it.
+    /// </summary>
+    public const string FallbackIdentity = "mac-tray";
+
     /// <summary>The operator's own set: the three files in
     /// ~/Library/Application Support/TapScribe, with the tap token in their login Keychain.
     /// The only place the Keychain-backed token store is constructed.</summary>
@@ -58,7 +72,7 @@ public sealed class TrayStores
     {
         ArgumentNullException.ThrowIfNull(directory);
         ArgumentNullException.ThrowIfNull(tokens);
-        Settings = new BridgeSettingsStore(tokens, directory, SettingsFileName);
+        Settings = new BridgeSettingsStore(tokens, directory, SettingsFileName, FallbackIdentity);
         MeetingState = new MeetingStateStore(directory);
         MeetingHistory = new MeetingHistoryStore(directory);
     }

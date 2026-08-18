@@ -329,7 +329,8 @@ internal sealed class RuntimeHarness : IDisposable
 
     public BridgeSettingsStore SettingsStore =>
         _settingsStore ??= new BridgeSettingsStore(
-            new FakeTapTokenStore(), SettingsStoreDirectory ?? _directory, "runtime-test.json");
+            new FakeTapTokenStore(), SettingsStoreDirectory ?? _directory, "runtime-test.json",
+            "test-tray");
 
     private BridgeSettingsStore? _settingsStore;
 

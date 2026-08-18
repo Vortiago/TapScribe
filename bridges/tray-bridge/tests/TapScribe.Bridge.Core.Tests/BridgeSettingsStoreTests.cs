@@ -15,7 +15,12 @@ public class BridgeSettingsStoreTests : IDisposable
     private readonly string _dir =
         Path.Join(Path.GetTempPath(), $"tapscribe-settings-{Guid.NewGuid():N}");
 
-    private BridgeSettingsStore Store(ITapTokenStore tokens) => new(tokens, _dir, "settings.json");
+    // A shell's own fallback slug, spelled as neither platform's, so a test asserting on the
+    // stamp cannot pass because it happened to match a default.
+    private const string Fallback = "test-tray";
+
+    private BridgeSettingsStore Store(ITapTokenStore tokens) =>
+        new(tokens, _dir, "settings.json", Fallback);
 
     [Fact]
     public void SaveThenLoad_RoundTripsEveryField()
@@ -160,10 +165,11 @@ public class BridgeSettingsStoreTests : IDisposable
     {
         // Nothing written yet: a first run must land on the environment-seeded defaults.
         BridgeSettings loaded = Store(new FakeTapTokenStore()).Load();
-        BridgeSettings expected = BridgeSettings.SeedFromEnvironment();
+        BridgeSettings expected = BridgeSettings.SeedFromEnvironment(Fallback);
 
         Assert.Equal(expected.Host, loaded.Host);
         Assert.Equal(expected.Port, loaded.Port);
+        Assert.Equal(Fallback, loaded.FallbackIdentity);
     }
 
     [Fact]
@@ -174,10 +180,27 @@ public class BridgeSettingsStoreTests : IDisposable
         File.WriteAllText(store.FilePath, "{ this is not valid json at all ");
 
         BridgeSettings loaded = store.Load(); // must not throw
-        BridgeSettings expected = BridgeSettings.SeedFromEnvironment();
+        BridgeSettings expected = BridgeSettings.SeedFromEnvironment(Fallback);
 
         Assert.Equal(expected.Host, loaded.Host);
         Assert.Equal(expected.Port, loaded.Port);
+    }
+
+    [Fact]
+    public void Load_StampsTheShellsFallbackIdentity_OnAFileThatCarriesNone()
+    {
+        // The settings file has no such key and never will: it is the shell's fact, not the
+        // operator's. Every blank Speaker ID resolves through it - the base identity a tap
+        // streams under, and the label the default microphone row is named with - so a file
+        // loaded without the stamp would run the meeting under whatever Core's own frozen
+        // default happens to be, which is the wrong platform's on every shell but one.
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+        store.Save(new BridgeSettings { Host = "rec.example", Identity = "" });
+
+        BridgeSettings loaded = store.Load();
+
+        Assert.Equal(Fallback, loaded.FallbackIdentity);
+        Assert.Equal(Fallback, loaded.DefaultDevices()[0].Identity);
     }
 
     public void Dispose()

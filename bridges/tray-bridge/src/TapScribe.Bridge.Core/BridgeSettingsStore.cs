@@ -4,11 +4,19 @@ namespace TapScribe.Bridge.Core;
 
 /// <summary>
 /// Loads/saves <see cref="BridgeSettings"/> as JSON in <paramref name="directory"/>. An
-/// instance, not a static: the platform supplies the directory, the filename and the
-/// <paramref name="tokens"/> translation, so this half stays portable and testable against
-/// a temp directory and a fake token store.
+/// instance, not a static: the platform supplies the directory, the filename, the
+/// <paramref name="tokens"/> translation and the <paramref name="fallbackIdentity"/>, so this
+/// half stays portable and testable against a temp directory and a fake token store.
 /// </summary>
-public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory, string fileName)
+/// <param name="tokens">How the tap token is kept at rest.</param>
+/// <param name="directory">Where the settings file lives.</param>
+/// <param name="fileName">What it is called: an on-disk contract with the operator.</param>
+/// <param name="fallbackIdentity">The shell's own fallback slug, stamped onto everything this
+/// store hands out. Here rather than left to each caller because a deserialised file carries
+/// no such field, and this is the one place every settings object the app runs on comes from -
+/// so it is the one place the stamp cannot be forgotten.</param>
+public sealed class BridgeSettingsStore(
+    ITapTokenStore tokens, string directory, string fileName, string fallbackIdentity)
 {
     /// <summary>The settings file this store reads and writes.</summary>
     public string FilePath { get; } = Path.Join(directory, fileName);
@@ -28,6 +36,10 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
                 if (loaded is not null)
                 {
                     loaded.Token = ReadToken(loaded.ProtectedToken);
+                    // The file has no such key and never will: it is the shell's, not the
+                    // operator's. Stamped on the way out so nothing downstream can meet a
+                    // settings object carrying another platform's name.
+                    loaded.FallbackIdentity = fallbackIdentity;
                     return loaded;
                 }
             }
@@ -38,7 +50,7 @@ public sealed class BridgeSettingsStore(ITapTokenStore tokens, string directory,
             // failing to launch. What's lost is whatever the operator had saved; they
             // re-save from the dialog, which overwrites the bad file.
         }
-        return BridgeSettings.SeedFromEnvironment();
+        return BridgeSettings.SeedFromEnvironment(fallbackIdentity);
     }
 
     /// <summary>Save the settings, creating the directory if needed. The plaintext token

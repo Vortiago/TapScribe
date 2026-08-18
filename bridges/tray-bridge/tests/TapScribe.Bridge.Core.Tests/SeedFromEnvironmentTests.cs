@@ -24,6 +24,10 @@ public sealed class EnvironmentSeedCollection
 [Collection(EnvironmentSeedCollection.Name)]
 public class SeedFromEnvironmentTests
 {
+    // A shell's own fallback slug, spelled as neither platform's, so an assertion on it
+    // cannot pass by matching a default nobody stamped.
+    private const string Fallback = "test-tray";
+
     private static readonly string[] Keys =
     [
         "TAPSCRIBE_HOST", "TAPSCRIBE_PORT", "TAPSCRIBE_TLS", "TAPSCRIBE_TLS_ALLOW_SELF_SIGNED",
@@ -45,7 +49,7 @@ public class SeedFromEnvironmentTests
             },
             () =>
             {
-                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment();
+                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment(Fallback);
 
                 Assert.Equal("rec.example", seeded.Host);
                 Assert.Equal(9200, seeded.Port);
@@ -70,29 +74,34 @@ public class SeedFromEnvironmentTests
             },
             () =>
             {
-                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment();
+                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment(Fallback);
 
                 Assert.Equal("localhost", seeded.Host);
                 Assert.Equal(8001, seeded.Port);
                 Assert.False(seeded.Tls);
                 Assert.False(seeded.AllowSelfSignedCert); // insecure opt-in is off by default
-                Assert.False(string.IsNullOrEmpty(seeded.Identity)); // username / "windows-tray"
+                Assert.False(string.IsNullOrEmpty(seeded.Identity)); // the OS username, or the fallback
             });
     }
 
     [Fact]
-    public void SeedFromEnvironment_WhenTheOsOffersNoUserName_SeedsTheFrozenTrayIdentity()
+    public void SeedFromEnvironment_WhenTheOsOffersNoUserName_SeedsTheShellsOwnFallback()
     {
         WithEnv(
             new() { ["TAPSCRIBE_IDENTITY"] = null },
             () =>
             {
                 // The identity is the WAV filename slug and the key the Recorder attributes
-                // recordings under, so the slug is frozen: changing it re-attributes the tray
-                // as a brand-new speaker. Pinned here because nothing else reaches this path
-                // (it needs an OS with no username), so a rename would otherwise land silently.
-                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment(osUserName: static () => "");
-                Assert.Equal("windows-tray", seeded.Identity);
+                // recordings under, so the slug is frozen per shell: changing one
+                // re-attributes that tray as a brand-new speaker. It comes from the shell
+                // rather than from here, because "windows-tray" on a Mac would file an
+                // operator's recordings under a tray they have never run. Pinned because
+                // nothing else reaches this path (it needs an OS with no username), so a
+                // dropped stamp would otherwise land silently.
+                BridgeSettings seeded = BridgeSettings.SeedFromEnvironment(
+                    Fallback, osUserName: static () => "");
+                Assert.Equal(Fallback, seeded.Identity);
+                Assert.Equal(Fallback, seeded.FallbackIdentity);
             });
     }
 

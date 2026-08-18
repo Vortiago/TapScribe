@@ -105,7 +105,7 @@ public sealed class BridgeSettings
         string micLabel =
             !string.IsNullOrWhiteSpace(Name) ? Name.Trim()
             : !string.IsNullOrWhiteSpace(Identity) ? Identity.Trim()
-            : FallbackIdentity();
+            : FallbackIdentity;
         return
         [
             new DeviceSelection.FollowDefault(DeviceFlow.Capture, micLabel, micLabel),
@@ -192,47 +192,54 @@ public sealed class BridgeSettings
     // be confused with DeviceSelection.EffectiveIdentity, which answers the different question
     // of what ONE device streams under given a base.
     private string BaseIdentity =>
-        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
+        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity : Identity.Trim();
 
     /// <summary>
-    /// What the tray seeds when the OS offers no username: the frozen slug, so the seeded
-    /// identity and <see cref="TapConnectionOptions.Identity"/>'s default cannot drift.
+    /// The identity to fall back to when neither the operator nor the OS offers one: the slug
+    /// a blank Speaker ID streams under, and the label the default microphone row is named
+    /// with. Not serialised - it is a property of the SHELL rather than of the operator's
+    /// saved file, so it is stamped on every instance the platform's
+    /// <see cref="BridgeSettingsStore"/> hands out.
     ///
-    /// It is a WINDOWS value applied on every platform, which is wrong for a Mac shell but is
-    /// deliberately left alone here: the three members that fall back to it
-    /// (<see cref="DefaultDevices"/>, <see cref="BaseIdentity"/> and
-    /// <see cref="SeedFromEnvironment"/>) are instance- and seed-level, so making it
-    /// per-platform means stamping it onto every settings instance the store loads, not
-    /// threading it through one factory. A knob on one of the three would read as configured
-    /// while the other two still said Windows.
+    /// A stamp rather than a knob on one member, because all three of
+    /// <see cref="DefaultDevices"/>, <see cref="BaseIdentity"/> and
+    /// <see cref="SeedFromEnvironment"/> fall back to it: threading it through one factory
+    /// would leave the other two saying something else.
     ///
-    /// The shape it wants is the one <c>TrayStores.SettingsFileName</c> already has: the same
-    /// class of value (frozen, operator-facing, changing it orphans operator data), living
-    /// Windows-side and reaching the core through <see cref="BridgeSettingsStore"/>'s
-    /// constructor beside the directory and filename. Slice 7 owns that, alongside the rest of
-    /// the identity defaults.
+    /// The initialiser is Core's own frozen slug, which is the honest answer for an instance
+    /// nobody stamped - it is what <see cref="TapConnectionOptions.Identity"/> defaults to, so
+    /// an unstamped settings object and an unstamped tap agree rather than disagreeing
+    /// quietly. Each shell stamps its own: see <c>TrayStores.FallbackIdentity</c> per
+    /// platform, which sits beside the settings filename because it is the same class of
+    /// operator-facing value.
     /// </summary>
-    private const string WindowsFallbackIdentity = TapConnectionOptions.TrayIdentity;
+    [JsonIgnore]
+    public string FallbackIdentity { get; set; } = TapConnectionOptions.TrayIdentity;
 
     /// <summary>
     /// Defaults for a first run with no saved file: seed from the legacy
     /// environment variables when present (so an existing env-based setup keeps
     /// working), otherwise sensible defaults.
-    ///
-    /// <paramref name="osUserName"/> reads the OS username; injected so the no-username path
-    /// is exercisable without an OS-level fixture.
     /// </summary>
-    public static BridgeSettings SeedFromEnvironment(Func<string>? osUserName = null)
+    /// <param name="fallbackIdentity">The shell's own fallback slug, stamped onto the result
+    /// and used when the OS offers no username. Required rather than defaulted, so a new
+    /// platform cannot quietly seed an operator's first run under another one's name.</param>
+    /// <param name="osUserName">Reads the OS username; injected so the no-username path is
+    /// exercisable without an OS-level fixture.</param>
+    /// <returns>The seeded settings.</returns>
+    public static BridgeSettings SeedFromEnvironment(string fallbackIdentity, Func<string>? osUserName = null)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fallbackIdentity);
         return new BridgeSettings
         {
             Host = Env("TAPSCRIBE_HOST") ?? "localhost",
             Port = int.TryParse(Env("TAPSCRIBE_PORT"), out int port) ? port : 8001,
             Tls = Env("TAPSCRIBE_TLS") is "1" or "true",
             AllowSelfSignedCert = Env("TAPSCRIBE_TLS_ALLOW_SELF_SIGNED") is "1" or "true",
-            Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(osUserName),
+            Identity = Env("TAPSCRIBE_IDENTITY") ?? OsUserNameOr(fallbackIdentity, osUserName),
             Name = Env("TAPSCRIBE_NAME") ?? "",
             Token = Env("TAPSCRIBE_TAP_TOKEN") ?? "",
+            FallbackIdentity = fallbackIdentity,
         };
 
         static string? Env(string key)
@@ -242,9 +249,9 @@ public sealed class BridgeSettings
         }
     }
 
-    private static string FallbackIdentity(Func<string>? osUserName = null)
+    private static string OsUserNameOr(string fallbackIdentity, Func<string>? osUserName)
     {
         string user = (osUserName ?? (static () => Environment.UserName))();
-        return string.IsNullOrEmpty(user) ? WindowsFallbackIdentity : user;
+        return string.IsNullOrEmpty(user) ? fallbackIdentity : user;
     }
 }
