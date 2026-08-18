@@ -18,7 +18,13 @@ namespace TapScribe.TrayBridge.MacOS;
 internal sealed class SettingsWindow
 {
     private const int Width = 480;
-    private const int Height = 620;
+
+    // The row budget, not a taste: the layout below is a top-down cursor, so this has to cover
+    // every row it places (19 of them, plus a heading's extra air and the two-line notes) or
+    // the last control is framed below the window and simply is not drawn. Nothing catches
+    // that but opening the window, so a row added here comes with a bump to this number and a
+    // look at the Save button.
+    private const int Height = 760;
     private const int Padding = 16;
     private const int LabelWidth = 120;
     private const int RowHeight = 22;

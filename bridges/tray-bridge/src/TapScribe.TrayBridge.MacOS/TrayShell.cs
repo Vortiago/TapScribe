@@ -63,8 +63,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
         // AppKit's automatic enablement asks each item's target whether it is live and
         // overrides Enabled every time the menu opens, which would undo every SetMenuState
-        // the runtime makes. The runtime is the one deciding, so the menu stops guessing.
+        // the runtime makes. The runtime is the one deciding, so the menu stops guessing. Both
+        // menus: the Past-meetings items carry a managed handler rather than a target/action
+        // pair AppKit can interrogate, so auto-enablement would grey out every meeting in it.
         _menu.AutoEnablesItems = false;
+        _pastMeetingsMenu.AutoEnablesItems = false;
         _menu.AddItem(_statusHeader);
         _menu.AddItem(_notice);
         _menu.AddItem(NSMenuItem.SeparatorItem);
@@ -255,11 +258,6 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
                 _pastMeetingsMenu.AddItem(
                     new NSMenuItem(record.MenuLabel(), (_, _) => OnRuntime(r => r.OpenPastMeeting(record))));
         }
-
-        // The submenu is built here rather than by AppKit's own enablement, so it has to be
-        // told the parent is live: an item with a submenu and no action reads as disabled.
-        _pastMeetingsMenu.AutoEnablesItems = false;
-        _pastMeetings.Enabled = true;
     }
 
     /// <summary>
