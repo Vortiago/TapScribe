@@ -154,13 +154,17 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     {
         IoProc live = Live(ioProc, nameof(DestroyIoProc));
         int status = AudioDeviceDestroyIOProcID(live.DeviceId, live.ProcId);
-        // Unpinned whatever CoreAudio answered. A failed destroy still means no further
-        // callback can be trusted, and keeping the handle pins the callback's target for the
-        // process lifetime; the status is still reported, so the caller decides what it means.
-        _ioProcs.Remove(live);
-        live.Unpin();
+        // Unpinned only once CoreAudio says the registration is GONE. A failed destroy leaves
+        // the IOProc registered, and the pin is what its client data points at: freeing it
+        // hands the next callback a dangling GCHandle, which is a process-level access
+        // violation rather than a managed throw the trampoline could contain. Leaving the
+        // registration listed instead gives Dispose one more attempt at process teardown, and
+        // costs at worst one pinned callback on a device that is already failing.
         if (status != NoError)
             throw new CoreAudioException($"destroying the IOProc on device {live.DeviceId}", status);
+
+        _ioProcs.Remove(live);
+        live.Unpin();
     }
 
     public void Dispose()
@@ -214,7 +218,12 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         if (status != NoError)
             throw new CoreAudioException($"reading property {selector:X} on object {objectId}", status);
 
-        return values;
+        // CoreAudio writes back what it actually filled, and the device list can shrink between
+        // the sizing call and this one: unplug a mic in that window and the tail of the array
+        // is untouched zeros, which the walk above would read as device id 0. That is
+        // kAudioObjectUnknown, no device at all, and every property read against it fails.
+        int written = (int)(size / sizeof(uint));
+        return written < values.Length ? values[..written] : values;
     }
 
     private static uint ReadDefaultDevice(uint selector)
@@ -237,7 +246,15 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         IntPtr cfString = IntPtr.Zero;
         uint size = (uint)IntPtr.Size;
         int status = AudioObjectGetPropertyData(objectId, &address, 0, IntPtr.Zero, &size, &cfString);
-        if (status != NoError || cfString == IntPtr.Zero)
+        // Status-checked like every other read here, rather than answered as "". This one
+        // produces the device UID, which is the key a saved selection round-trips through, so
+        // "" for a failed read means two unreadable devices collide on one id and a stored ""
+        // reopens whichever the walk happens to reach first.
+        if (status != NoError)
+            throw new CoreAudioException($"reading property {selector:X} on object {objectId}", status);
+        // noErr and no string is the property being present and empty: a device that named
+        // itself nothing, which is a different fact from a read that failed.
+        if (cfString == IntPtr.Zero)
             return "";
 
         try
@@ -251,7 +268,7 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
                 if (CFStringGetCString(cfString, target, buffer.Length, EncodingUtf8) == 0)
                     return "";
                 // CFStringGetCString NUL-terminates on success, which is exactly the shape
-                // PtrToStringUTF8 reads. SecKeychainItems uses the same call for the same job.
+                // PtrToStringUTF8 reads.
                 return Marshal.PtrToStringUTF8((IntPtr)target) ?? "";
             }
         }
@@ -268,19 +285,35 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     {
         AudioObjectPropertyAddress address = Address(Selector.StreamConfiguration, scope);
         uint size = 0;
-        if (AudioObjectGetPropertyDataSize(deviceId, &address, 0, IntPtr.Zero, &size) != NoError || size == 0)
+        int status = AudioObjectGetPropertyDataSize(deviceId, &address, 0, IntPtr.Zero, &size);
+        // Status-checked rather than read as "no streams in this scope". A device CoreAudio
+        // refuses to answer for is one the question could not be ASKED about, and answering 0
+        // drops it from the walk silently: the picker then reports the mic as gone when the
+        // truth is that the HAL refused. That is exactly the distinction ListDevices is
+        // declared to keep, and the reason this class carries no per-method off-a-Mac guard.
+        if (status != NoError)
+            throw new CoreAudioException(
+                $"sizing the stream configuration of device {deviceId} in scope {scope:X}", status);
+        // Too small to hold even a buffer count is a scope with nothing in it, which is the
+        // honest zero.
+        if (size < BufferListHeaderBytes)
             return 0;
 
         var raw = new byte[size];
         fixed (byte* target = raw)
         {
-            if (AudioObjectGetPropertyData(deviceId, &address, 0, IntPtr.Zero, &size, target) != NoError)
-                return 0;
+            status = AudioObjectGetPropertyData(deviceId, &address, 0, IntPtr.Zero, &size, target);
+            if (status != NoError)
+                throw new CoreAudioException(
+                    $"reading the stream configuration of device {deviceId} in scope {scope:X}", status);
 
             // AudioBufferList is a count followed by that many AudioBuffers. The array starts
             // at offset 8, not 4: AudioBuffer holds a pointer, so it is 8-aligned and the
-            // count is followed by four bytes of padding.
-            uint buffers = *(uint*)target;
+            // count is followed by four bytes of padding. Capped at what the returned size can
+            // actually hold, because the count is native data and walking past it reads off
+            // the end of this array.
+            uint buffers = Math.Min(
+                *(uint*)target, (size - BufferListHeaderBytes) / (uint)sizeof(AudioBuffer));
             uint channels = 0;
             for (uint i = 0; i < buffers; i++)
             {
@@ -572,8 +605,12 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioDeviceStop(uint deviceId, IntPtr ioProcId);
 
+    // bufferSize is a CFIndex, which is a signed long: nint, not int, the way every other
+    // CFIndex this backend declares is spelled (SecKeychainItems' CFDataGetLength and
+    // CFDataCreate). A 32-bit argument leaves the top half of the register undefined by the
+    // arm64 ABI, and the callee reads all 64 bits of it as the size of this buffer.
     [LibraryImport(CoreFoundationFramework)]
-    private static partial byte CFStringGetCString(IntPtr theString, byte* buffer, int bufferSize, uint encoding);
+    private static partial byte CFStringGetCString(IntPtr theString, byte* buffer, nint bufferSize, uint encoding);
 
     [LibraryImport(CoreFoundationFramework)]
     private static partial void CFRelease(IntPtr cf);
