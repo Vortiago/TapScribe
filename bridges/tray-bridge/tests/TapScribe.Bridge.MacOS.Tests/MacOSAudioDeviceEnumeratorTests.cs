@@ -133,8 +133,18 @@ public class MacOSAudioDeviceEnumeratorTests
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
         var enumerator = new MacOSAudioDeviceEnumerator(hal);
-        IAudioCapture capture = enumerator.Open(Assert.Single(enumerator.List()));
-        capture.Start();
+        // Released on the way out of a failing setup as well as on the happy path. Disposing
+        // it is the ACT here, so it cannot ride a `using`, and the arrange above can throw.
+        try
+        {
+            IAudioCapture capture = enumerator.Open(Assert.Single(enumerator.List()));
+            capture.Start();
+        }
+        catch
+        {
+            enumerator.Dispose();
+            throw;
+        }
 
         enumerator.Dispose();
 
