@@ -39,6 +39,19 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     private readonly List<IoProc> _ioProcs = [];
     private bool _disposed;
 
+    // Static because the trampolines below are: CoreAudio hands them a raw pointer, not an
+    // instance, so this counts faults across every HAL in the process, which is the question
+    // worth asking anyway.
+    private static long _callbackFaults;
+
+    /// <summary>How many times a native callback swallowed an exception. Non-zero is the only
+    /// trace either trampoline can leave: both MUST swallow, because an exception unwinding
+    /// into CoreAudio tears the process down, and neither runs anywhere a report could go (one
+    /// is a notification thread, the other the realtime IO thread). Without this a handler that
+    /// throws on EVERY call looks exactly like a device that never fires: mute silently stops
+    /// updating, or every buffer is dropped, with nothing anywhere to say so.</summary>
+    internal static long CallbackFaults => Interlocked.Read(ref _callbackFaults);
+
     public IReadOnlyList<CoreAudioDevice> ListDevices()
     {
         uint[] ids = ReadUInt32Array(CoreAudioObject.System, Selector.Devices, Scope.Global);
@@ -339,8 +352,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             // Nothing may cross back into CoreAudio: an exception unwinding through a native
             // frame tears the process down. The handler is a one-line "re-read the property"
             // in every caller, so what is swallowed is a state refresh that the next
-            // notification, or the next read, redoes. Reporting it would need a channel that
-            // does not exist on a CoreAudio notification thread.
+            // notification, or the next read, redoes. There is no channel to report on from a
+            // CoreAudio notification thread, so the count is the trace it leaves instead.
+            Interlocked.Increment(ref _callbackFaults);
         }
         return NoError;
     }
@@ -375,7 +389,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         {
             // Same rule as above, and stricter: this is the realtime IO thread. Letting an
             // exception unwind into CoreAudio tears the process down, so a handler that throws
-            // costs one buffer of audio rather than the meeting.
+            // costs one buffer of audio rather than the meeting. Counted for the same reason,
+            // and the increment is on the failure path only, so the deadline pays nothing for
+            // it while things are working.
+            Interlocked.Increment(ref _callbackFaults);
         }
         return NoError;
     }
