@@ -49,11 +49,25 @@ Recorder, Utterance, Session).
   plain TFM is enough and why its tests run on every CI lane rather than only
   on a Mac.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
-  menu-bar shell. Today the bundle, its `Info.plist` (menu-bar only, mic +
-  audio-capture permissions, and deliberately no Screen Recording key) and
-  the launch-time floor check. Its tests reference it, so they assert against
-  the `Info.plist` inside the `.app` a build just produced rather than the
-  source file the SDK is free to rewrite.
+  menu-bar shell, Core's `ITrayView` over an `NSStatusItem` — the same menu as
+  the Windows tray, plus the Settings and per-meeting windows. It also holds
+  the Mac `IDispatcher` (`DispatchQueue.MainQueue`; .NET installs no
+  `SynchronizationContext` here, which is why the seam exists), the bundle and
+  its `Info.plist` (menu-bar only, mic + audio-capture permissions, and
+  deliberately no Screen Recording key), and the launch-time floor check. Its
+  tests reference it, so they assert against the `Info.plist` inside the `.app`
+  a build just produced rather than the source file the SDK is free to rewrite.
+
+  **Nothing NSObject-derived in it can carry a unit test**: constructing one
+  under the `dotnet test` host throws inside `ObjCRuntime`, because the bridge
+  is never initialised. So the AppKit types (`TrayShell`, `MeetingWindow`,
+  `SettingsWindow`) are covered by the build and by a manual check on a Mac,
+  and every decision that could live below them does — the glyph per state
+  (`StatusSymbols`), the notice line (`MenuNotice`), the draft seed
+  (`SettingsSeed`), the field parse (`SettingsFields`), the launch decision
+  (`Program.Run`, which takes the menu-bar launch as a parameter) and the whole
+  meeting lifecycle (`BridgeRuntime`). An `if` inside an AppKit class is a
+  decision that has escaped its test.
 
 **The cross-platform invariant:** `TapScribe.Bridge.Core` references **no
 NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
@@ -96,7 +110,15 @@ On macOS:
 # from this directory (bridges/tray-bridge/)
 dotnet test  tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj -c Release
 dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
+open src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
 ```
+
+`open` (rather than `dotnet run`) because the app has to launch as a **bundle**:
+the `Info.plist` beside the binary is what makes it a menu-bar app and what
+carries the microphone usage string TCC shows in its prompt. Run the inner
+binary directly and macOS has no manifest to read, so the app takes a Dock icon
+and the mic prompt has nothing to say. Launching it from a terminal IS the way
+to see its stderr and to seed `TAPSCRIBE_*` (see Configuration).
 
 **Both lines need Xcode matching the installed `macos` workload** (Xcode 26.4
 or newer for workload 26.4; `dotnet workload list` prints the version), plus
@@ -155,6 +177,25 @@ the legacy `TAPSCRIBE_HOST` / `TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` /
 `TAPSCRIBE_TLS_ALLOW_SELF_SIGNED` / `TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` /
 `TAPSCRIBE_TAP_TOKEN` environment variables when present; the dialog is the
 source of truth thereafter.
+
+On **macOS** the same fields live behind the menu-bar icon → **Settings…**,
+saved to `~/Library/Application Support/TapScribe/macos-tray-bridge.json` (its
+own on-disk contract, `TrayStores.SettingsFileName` again) with the tap token in
+the **login Keychain** rather than in the file at all. Two differences worth
+knowing before you reach for one:
+
+- **`TAPSCRIBE_*` seeding does not reach a Finder-launched `.app`.** Those
+  variables seed the first run, and a bundle opened from Finder, the Dock or
+  `open -a` inherits `launchd`'s environment, not your shell's, so an export in
+  `~/.zshrc` is simply not there. Launching the binary inside the bundle from a
+  terminal (`TAPSCRIBE_HOST=… ./TapScribe.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
+  does seed it, and so does typing the values into Settings once, which is the
+  supported route.
+- **The Settings window is the smaller half of the Windows dialog for now**:
+  connection, the microphone row, the shared gate timings and the
+  end-of-meeting behaviour. The Advanced pin grid and the live level meters are
+  device parity (#421). A saved pin still survives a Save even though there is
+  no grid showing it.
 
 - **Connection** — Recorder host (tolerant: a hostname, an IP, or a pasted
   `wss://host:9000/` all work; Port/TLS stay authoritative), port (default
