@@ -50,10 +50,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         ArgumentNullException.ThrowIfNull(dependencies);
         _deps = dependencies;
 
-        // The idle header from the same StatusView every later change comes through, rather
-        // than a hand-copy of its output: nothing renders a status until the operator acts, so
-        // this string IS the menu header on a normal launch.
-        _statusHeader = new NSMenuItem(StatusView.For(new TrayStatus.Idle()).Header) { Enabled = false };
+        // Empty on purpose. DidFinishLaunching renders the idle status through ShowStatus
+        // before the status item exists, so anything seeded here is overwritten before it can
+        // be seen; the Windows sibling seeds it because its menu is built inside a live
+        // message loop, which is the difference.
+        _statusHeader = new NSMenuItem("") { Enabled = false };
         _notice = new NSMenuItem("") { Enabled = false, Hidden = true };
         _start = new NSMenuItem("Start meeting", (_, _) => OnRuntime(runtime => runtime.Start()));
         _end = new NSMenuItem("End meeting", (_, _) => OnRuntime(runtime => runtime.End())) { Enabled = false };
@@ -84,11 +85,17 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         // operator's click always crosses. WeakDelegate rather than Delegate: this is already
         // an NSApplicationDelegate and so cannot also derive from NSMenuDelegate, and the
         // exported selector below is what AppKit actually looks for.
-        _menu.WeakDelegate = this;
+        // On the Past-meetings SUBMENU, not the whole menu. AppKit fires menuWillOpen: for
+        // whichever menu carries the delegate, so hanging it on _menu re-read and re-parsed
+        // the history file on every status-item click, whether or not the operator went near
+        // Past meetings. The Windows sibling hooks the item's own DropDownOpening for the
+        // same reason.
+        _pastMeetingsMenu.WeakDelegate = this;
     }
 
-    /// <summary>AppKit is about to show the menu: refresh what is about to be read.</summary>
-    /// <param name="menu">The menu being opened, which is the shell's only one.</param>
+    /// <summary>AppKit is about to show the Past-meetings submenu: rebuild it from the
+    /// persisted history, so it reflects meetings ended since it was last shown.</summary>
+    /// <param name="menu">The menu being opened, which is the Past-meetings submenu.</param>
     [Export("menuWillOpen:")]
     public void MenuWillOpen(NSMenu menu) => RebuildPastMeetings();
 
@@ -184,7 +191,14 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     {
         var window = new MeetingWindow();
         _windows.Add(window);
-        window.Closed += () => _windows.Remove(window);
+        window.Closed += () =>
+        {
+            _windows.Remove(window);
+            // Posted rather than disposed inline: this runs from inside -[NSWindow close],
+            // and releasing the window while AppKit is still unwinding that call is how a
+            // close turns into a crash. The post lands after it returns.
+            _dispatcher.Post(window.Dispose);
+        };
         window.Show();
         return window;
     }

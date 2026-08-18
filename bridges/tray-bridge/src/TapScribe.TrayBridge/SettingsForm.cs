@@ -575,7 +575,8 @@ internal sealed class SettingsForm : Form
         _draft.Tls = _tls.Checked;
         // Belt-and-suspenders: never carry the insecure opt-in without TLS, even if a race
         // left the checkbox ticked (it's force-cleared on the TLS toggle in BuildConnectionTab).
-        _draft.AllowSelfSignedCert = _tls.Checked && _allowSelfSigned.Checked;
+        // Scoping to TLS is SettingsDraft.ToSettings' job now, so both shells inherit it.
+        _draft.AllowSelfSignedCert = _allowSelfSigned.Checked;
         _draft.Token = _token.Text;
         _draft.MicEnabled = _micEnabled.Checked;
         _draft.MicName = _micName.Text;

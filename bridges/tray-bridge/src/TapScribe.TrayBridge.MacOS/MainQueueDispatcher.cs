@@ -17,11 +17,18 @@ namespace TapScribe.TrayBridge.MacOS;
 /// </summary>
 internal sealed class MainQueueDispatcher : IDispatcher
 {
+    // Resolved once. DispatchQueue.MainQueue is a PROPERTY that builds a fresh managed
+    // wrapper per access (measured: 32 bytes and a finalizable object each time), and Post
+    // runs on every marshalled callback, so reading it per call was a few MB of finalizer
+    // queue per meeting-heavy day. The main queue is a process singleton, so caching it
+    // changes nothing else.
+    private static readonly DispatchQueue Main = DispatchQueue.MainQueue;
+
     private readonly Action<Action> _enqueue;
 
     /// <summary>The real thing: work goes to <c>DispatchQueue.MainQueue</c>.</summary>
     internal MainQueueDispatcher()
-        : this(static work => DispatchQueue.MainQueue.DispatchAsync(work))
+        : this(static work => Main.DispatchAsync(work))
     {
     }
 

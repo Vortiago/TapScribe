@@ -24,7 +24,7 @@ namespace TapScribe.TrayBridge.MacOS;
 /// Rendering it verbatim in the meantime is the honest reading: a raw recorder error is never
 /// reinterpreted as markup either way.
 /// </summary>
-internal sealed class MeetingWindow : IMeetingWindow
+internal sealed class MeetingWindow : IMeetingWindow, IDisposable
 {
     private const int Width = 560;
     private const int Height = 440;
@@ -44,6 +44,7 @@ internal sealed class MeetingWindow : IMeetingWindow
     // run of identical "Transcribing 2/3…" bodies should not rebuild the text view.
     private string _rawBody = "";
     private bool _closed;
+    private bool _disposed;
 
     internal MeetingWindow()
     {
@@ -98,18 +99,14 @@ internal sealed class MeetingWindow : IMeetingWindow
             BezelStyle = NSBezelStyle.Rounded,
             AutoresizingMask = NSViewResizingMask.MinXMargin | NSViewResizingMask.MaxYMargin,
         };
-        _copy.Activated += (_, _) => Copy(_rawBody);
+        _copy.Activated += OnCopy;
 
         NSView content = _window.ContentView!;
         content.AddSubview(_caption);
         content.AddSubview(scroll);
         content.AddSubview(_copy);
 
-        _window.WillClose += (_, _) =>
-        {
-            _closed = true;
-            Closed?.Invoke();
-        };
+        _window.WillClose += OnWillClose;
 
         Apply(MeetingFormView.For(null)); // open in the Loading state
     }
@@ -135,9 +132,35 @@ internal sealed class MeetingWindow : IMeetingWindow
         _window.MakeKeyAndOrderFront(null);
     }
 
+    private void OnCopy(object? sender, EventArgs e) => Copy(_rawBody);
+
+    private void OnWillClose(object? sender, EventArgs e)
+    {
+        _closed = true;
+        Closed?.Invoke();
+    }
+
     /// <summary>Close the window as if the operator had, which raises
     /// <see cref="Closed"/>.</summary>
     internal void Close() => _window.Close();
+
+    /// <summary>Release the window and everything it draws.
+    ///
+    /// Needed because ReleaseWhenClosed is off, which is what lets this class read the window
+    /// after AppKit has closed it. Without a release the graph (window, scroll view, text view
+    /// and the whole summary it holds) survives every close, and both handlers below capture
+    /// `this`, so the cycle runs through an object AppKit retains. The Windows sibling gets
+    /// this free: a non-modal WinForms Form disposes itself on close. One meeting window is a
+    /// few hundred KB and the tray runs for days.</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        _copy.Activated -= OnCopy;
+        _window.WillClose -= OnWillClose;
+        _window.Dispose();
+    }
 
     private void Apply(MeetingFormView view)
     {
