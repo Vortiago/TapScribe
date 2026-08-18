@@ -43,11 +43,22 @@ Recorder, Utterance, Session).
   of the storage layer: `KeychainTapTokenStore` (the tap token in the login
   Keychain, so the settings file carries nothing about it) plus the `TrayStores`
   binding of the Core stores to `~/Library/Application Support/TapScribe`,
-  and the Core Audio capture and device enumeration behind the portable seams.
-  Everything it asks the OS goes through P/Invoke, never the managed ObjC
-  bindings (`MacOSProductVersion` states that rule and why), which is why the
-  plain TFM is enough and why its tests run on every CI lane rather than only
-  on a Mac.
+  and the Core Audio capture and device enumeration behind the portable seams:
+  the microphone as an IOProc on the endpoint, and system audio as a **process
+  tap** inside a private aggregate device, because macOS has no loopback
+  endpoint (#420, ADR-0020). Everything it asks the OS goes through P/Invoke,
+  never the managed ObjC bindings (`MacOSProductVersion` states that rule and
+  why), with one exception `CoreAudioHal.Tap.cs` explains: `CATapDescription`
+  is an ObjC class that `Microsoft.macOS` does not bind, so it is built through
+  the runtime's own C entry points rather than through a hand-written binding
+  that no test host could construct. The plain TFM is therefore still enough,
+  and its tests run on every CI lane rather than only on a Mac.
+
+  Recording system audio needs the **System Audio Recording** TCC grant, which
+  macOS asks for the first time the IOProc starts rather than when the tap is
+  created. A process with no bundle identity cannot be prompted, so a bare
+  `dotnet run` against the HAL BLOCKS at `AudioDeviceCreateIOProcID`; only the
+  built `.app` is a supported way to exercise that path.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
   menu-bar shell, Core's `ITrayView` over an `NSStatusItem` — the same menu as
   the Windows tray, plus the Settings and per-meeting windows. It also holds
@@ -193,10 +204,15 @@ knowing before you reach for one:
   does seed it, and so does typing the values into Settings once, which is the
   supported route.
 - **The Settings window is the smaller half of the Windows dialog for now**:
-  connection, the microphone row, the shared gate timings and the
-  end-of-meeting behaviour. The Advanced pin grid and the live level meters are
-  device parity (#421). A saved pin still survives a Save even though there is
-  no grid showing it.
+  connection, the microphone row, the system-audio row, the shared gate timings
+  and the end-of-meeting behaviour. The Advanced pin grid and the live level
+  meters are device parity (#421). A saved pin still survives a Save even though
+  there is no grid showing it.
+- **System audio needs a permission the Mac asks for at the first Start**, not
+  at install and not when Settings is opened: macOS prompts for **System Audio
+  Recording** the first time a meeting's process tap actually runs. Dismiss it
+  and the meeting records your microphone only, and says so. The grant is per
+  signature, so an ad-hoc build re-prompts on every update (ADR-0020).
 
 - **Connection** — Recorder host (tolerant: a hostname, an IP, or a pasted
   `wss://host:9000/` all work; Port/TLS stay authoritative), port (default
