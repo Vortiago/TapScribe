@@ -32,7 +32,26 @@ public interface IAudioCapture : IDisposable
     /// <summary>The device's native format. Valid once the instance is constructed.</summary>
     AudioFormat Format { get; }
 
-    /// <summary>Raised on the capture thread with device-format PCM as it arrives.</summary>
+    /// <summary>
+    /// Raised on the capture thread with device-format PCM as it arrives.
+    ///
+    /// Three promises, because the pipeline behind this event depends on all three and only
+    /// ever states them from the consuming side. <see cref="Resampler"/> and
+    /// <see cref="FrameChunker"/> hold plain unsynchronised fields, so:
+    /// <list type="bullet">
+    /// <item>Delivery is SERIALISED: never two invocations at once.</item>
+    /// <item>Delivery is ORDERED, and each invocation happens-before the next.</item>
+    /// <item>A handler MAY block and allocate. A backend whose native callback cannot afford
+    /// that owns the hand-off to a thread that can, rather than raising inline.</item>
+    /// </list>
+    ///
+    /// The last one is why the two backends differ. NAudio hands the Windows backend a managed
+    /// thread it owns and may block; CoreAudio calls an IOProc on a realtime thread under a
+    /// buffer-period deadline, so the macOS backend copies and hands off to a pump of its own.
+    /// Raising from a thread pool would satisfy neither of the first two and would corrupt the
+    /// resampler silently, with no test in this repo failing, because every fake delivers
+    /// inline from the pushing thread.
+    /// </summary>
     event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
     /// <summary>

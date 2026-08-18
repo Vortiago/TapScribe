@@ -15,10 +15,21 @@
     <TargetFramework>net10.0</TargetFramework>
 
     <!-- LibraryImport is the source-generated P/Invoke shape, and the marshalling stubs it
-         emits use pointers, so the generator refuses to run without this (SYSLIB1062). No
-         hand-written unsafe code lives here. MacOSProductVersion states the rule about
-         reaching the OS through P/Invoke at all. -->
+         emits use pointers, so the generator refuses to run without this (SYSLIB1062).
+         CoreAudioHal also writes pointer code by hand: CoreAudio's property API is
+         address-struct in, caller-sized buffer out, and its IOProc callback is a function
+         pointer, so there is no safe spelling of it. MacOSProductVersion states the rule
+         about reaching the OS through P/Invoke at all. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- The other half of the plain-net10.0 bet. Native declarations carry
+         [SupportedOSPlatform("macos")], on the TYPE where a whole class is native
+         (CoreAudioHal) and per-import elsewhere, so CA1416 proves at COMPILE time that no
+         path reaches one without an OperatingSystem.IsMacOS() guard in front of it. Without
+         this line CA1416 is a warning nobody sets TreatWarningsAsErrors on, i.e.
+         decoration; with it, the guard rule MacOSProductVersion states in prose is
+         checked rather than remembered. -->
+    <WarningsAsErrors>CA1416</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
