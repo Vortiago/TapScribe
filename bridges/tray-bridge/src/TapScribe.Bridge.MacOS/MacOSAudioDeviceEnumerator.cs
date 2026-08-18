@@ -3,10 +3,17 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.Bridge.MacOS;
 
 /// <summary>
-/// The macOS <see cref="IAudioDeviceEnumerator"/>: lists the input endpoints the bridge can
-/// tap and opens one as a <see cref="MacOSAudioCapture"/>. It owns the
+/// The macOS <see cref="IAudioDeviceEnumerator"/>: lists the endpoints a meeting can tap and
+/// opens one, as the microphone capture or as the system-audio tap. It owns the
 /// <see cref="ICoreAudioHal"/> it was built with and hands it to every capture it opens,
 /// which is why the seam requires it to OUTLIVE them.
+///
+/// Both flows, like the Windows sibling, but for a different reason underneath: there a render
+/// endpoint IS the loopback client, and here it is the stand-in for a Core Audio process tap,
+/// which has no endpoint of its own (#420). What the seam promises - open a
+/// <see cref="DeviceFlow.Render"/> row and get the system audio - holds either way, which is
+/// what lets <c>BridgeRuntime</c> resolve the operator's two selections without knowing which
+/// platform it is on.
 /// </summary>
 public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
 {
@@ -22,15 +29,10 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
         _hal = hal;
     }
 
-    // Inputs only. The HAL reports every device scope, and an output reaching the picker would
-    // offer an endpoint Open cannot honour: capturing system audio on macOS is a process tap
-    // rather than a device (#420), so there is no loopback flow here to answer with. The
-    // Windows sibling lists both because WASAPI loopback IS a render endpoint.
-    //
-    // One predicate, used by both List and Open, so what the picker OFFERS and what Open
-    // ACCEPTS are the same rule by construction rather than by two edits staying in step.
-    private IEnumerable<CoreAudioDevice> Tappable() =>
-        _hal.ListDevices().Where(d => d.Flow == DeviceFlow.Capture);
+    // Every scope the HAL reports, which is inputs and outputs both. One predicate, used by
+    // List and Open alike, so what the picker OFFERS and what Open ACCEPTS are the same rule by
+    // construction rather than by two edits staying in step.
+    private IEnumerable<CoreAudioDevice> Tappable() => _hal.ListDevices();
 
     public IReadOnlyList<CaptureDevice> List() => [.. Tappable().Select(Portable)];
 
@@ -70,7 +72,15 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
             throw new ArgumentException(
                 $"no active capture endpoint with UID '{device.Id}' ({device.Name})", nameof(device));
 
-        return new MacOSAudioCapture(_hal, found.ObjectId);
+        // A render row names system audio rather than an endpoint to open: what the Mac plays
+        // goes to whichever output is default, and the tap binds to that itself (see
+        // MacOSSystemAudioCapture). So the row is resolved above to confirm it is a live
+        // endpoint of the requested flow, which is what makes a stale saved pin an
+        // ArgumentException here rather than a tap on the wrong thing, and then the object id
+        // is deliberately not used.
+        return found.Flow == DeviceFlow.Render
+            ? new MacOSSystemAudioCapture(_hal)
+            : new MacOSAudioCapture(_hal, found.ObjectId);
     }
 
     public void Dispose()

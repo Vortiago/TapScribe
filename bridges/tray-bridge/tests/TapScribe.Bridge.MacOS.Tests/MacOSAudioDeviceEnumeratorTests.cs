@@ -43,14 +43,13 @@ public class MacOSAudioDeviceEnumeratorTests
     }
 
     [Fact]
-    public void List_FlagsTheSystemDefaultInput_AndOffersNoOutputDevice()
+    public void List_OffersBothFlows_EachWithItsOwnDefault()
     {
-        // Two claims that only mean something together. The HAL reports every device scope,
-        // including outputs, each carrying its OWN default flag; a default output reaching the
-        // list would put an endpoint in the picker that this backend cannot open, because
-        // capturing system audio on macOS is a process tap rather than a device (#420) and is
-        // not this slice. Filtering to inputs is what leaves exactly one flagged default for
-        // the follow-default rule to find.
+        // The HAL reports every device scope, each carrying its OWN default flag, and both
+        // flows reach the picker: a render endpoint is what a meeting's system-audio selection
+        // resolves against, since capturing it on macOS is a process tap rather than a device
+        // (#420). Without a render row here, the default device pair resolves half-way and
+        // EVERY Start posts "Some devices unavailable / Skipped: default system audio".
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
         hal.AddDevice(Devices.Input(57, "Yeti Nano", isDefault: true));
@@ -59,8 +58,58 @@ public class MacOSAudioDeviceEnumeratorTests
 
         IReadOnlyList<CaptureDevice> devices = enumerator.List();
 
-        Assert.Equal(["Built-in Microphone", "Yeti Nano"], devices.Select(d => d.Name));
+        Assert.Equal(
+            ["Built-in Microphone", "Yeti Nano", "MacBook Pro Speakers"], devices.Select(d => d.Name));
+        Assert.Equal(DeviceFlow.Render, devices.Single(d => d.Name == "MacBook Pro Speakers").Flow);
         Assert.Equal("Yeti Nano", CaptureDevice.DefaultFor(devices, DeviceFlow.Capture)?.Name);
+        Assert.Equal("MacBook Pro Speakers", CaptureDevice.DefaultFor(devices, DeviceFlow.Render)?.Name);
+    }
+
+    [Fact]
+    public void Open_ARenderEndpoint_GivesTheSystemAudioTap()
+    {
+        // The seam's Render case, which on Windows is a WASAPI loopback client and here is a
+        // process tap inside an aggregate device. What the caller gets back is an IAudioCapture
+        // either way, which is the whole point of the seam: BridgeRuntime opens the operator's
+        // two selections identically and never learns which platform it is on.
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers", isDefault: true));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        using IAudioCapture capture = enumerator.Open(Assert.Single(enumerator.List()));
+
+        capture.Start();
+        Assert.Equal(1, hal.LiveTaps);
+        Assert.Equal(1, hal.LiveAggregates);
+        Assert.Equal(1, hal.RunningIoProcs);
+    }
+
+    [Fact]
+    public void DefaultDeviceSelection_ResolvesWholeAgainstThisEnumerator()
+    {
+        // The bug this pins is what a first launch looked like: the default pair is a
+        // follow-default microphone and a follow-default system audio, and with no render row
+        // in the list the second one resolved to nothing. So every Start posted "Some devices
+        // unavailable / Skipped: default system audio" and recorded one speaker, on a Mac that
+        // was working perfectly. Asserted through the same two calls BridgeRuntime makes, so it
+        // is the operator's path rather than a restatement of the filter.
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Input(41, "Built-in Microphone", isDefault: true));
+        hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers", isDefault: true));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+        var settings = new BridgeSettings { Identity = "atle" };
+
+        ResolveResult resolution = DeviceSelection.Resolve(
+            settings.EffectiveDevices, enumerator.List(), "atle");
+
+        Assert.Empty(resolution.Missing);
+        Assert.Equal(SelectionVerdict.Ok, resolution.Verdict);
+        Assert.Equal(
+            ["Built-in Microphone", "MacBook Pro Speakers"],
+            resolution.Resolved.Select(r => r.Device.Name));
+        // Two speakers under two identities, which is what the Recorder attributes the meeting
+        // by: the operator, and everyone else.
+        Assert.Equal(["atle", "System audio"], resolution.Resolved.Select(r => r.StreamingIdentity));
     }
 
     [Fact]
@@ -85,11 +134,9 @@ public class MacOSAudioDeviceEnumeratorTests
         Assert.Equal(new AudioFormat(44_100, 1, SampleKind.Int16), capture.Format);
     }
 
-    // Both refusals are the seam's ArgumentException clause, "the id names no active endpoint
-    // of the requested flow", because on this backend they are the same fact. An id that
-    // vanished (the mic was unplugged since the picker was drawn, or a saved selection names a
-    // device that is not here) and an id that names an output both come down to: nothing in
-    // the list matches. ExternalException would be wrong for either, since the platform
+    // Every refusal here is the seam's ArgumentException clause, "the id names no active
+    // endpoint of the requested flow", because on this backend they are the same fact: nothing
+    // in the list matches. ExternalException would be wrong for any of them, since the platform
     // answered fine, and the callers that skip a dead endpoint filter on that one.
     public static TheoryData<string, CaptureDevice> UnopenableDevices() => new()
     {
@@ -98,8 +145,8 @@ public class MacOSAudioDeviceEnumeratorTests
             new CaptureDevice("unplugged-since-the-picker-was-drawn:uid", "Ghost", DeviceFlow.Capture, false)
         },
         {
-            "an output endpoint, which this backend does not capture",
-            new CaptureDevice("MacBook Pro Speakers:uid", "MacBook Pro Speakers", DeviceFlow.Render, true)
+            "an output UID that is no longer here",
+            new CaptureDevice("Unplugged Headphones:uid", "Unplugged Headphones", DeviceFlow.Render, false)
         },
         {
             "a listed input asked for under the wrong flow",
