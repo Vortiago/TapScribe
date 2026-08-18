@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.Core.Tests;
@@ -105,6 +106,30 @@ public class InputLevelMeterTests
         capture.Emit(Fixtures.Loud(20));
 
         Assert.Equal(0.0, meter.Level);
+    }
+
+    [Fact]
+    public void Dispose_WhenTheEndpointWasInvalidated_StillReleasesTheCapture()
+    {
+        // Unplug the mic with the Settings dialog open. The seam lets Stop raise its declared
+        // native failure for exactly that, and the RELEASE is the half that still matters:
+        // skipping it strands an endpoint every time a device goes away, and the throw leaves
+        // the dialog's close path. TapSession.DisposeAsync holds this line already; this is
+        // the other owner of a capture, and it holds it for the same reason.
+        //
+        // Reachable in practice on macOS, whose backend propagates the invalidation; WASAPI
+        // swallows it inside its own Stop, so a Windows host never exercises this at all.
+        var capture = new FakeAudioCapture(Fixtures.RecorderFormat)
+        {
+            StopError = new ExternalException("the endpoint was invalidated", -66748),
+        };
+        var meter = new InputLevelMeter(capture);
+        meter.Start();
+
+        Assert.Null(Record.Exception(meter.Dispose));
+
+        Assert.True(capture.Stopped);
+        Assert.Equal(1, capture.Disposals);
     }
 
     [Theory]

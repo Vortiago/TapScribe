@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
@@ -59,7 +61,25 @@ public sealed class InputLevelMeter : IDisposable
     {
         _disposed = true;
         _capture.DataAvailable -= OnDataAvailable;
-        _capture.Stop();
+        try
+        {
+            _capture.Stop();
+        }
+        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
+        {
+            // The endpoint was invalidated while the meter ran: unplug the mic with Settings
+            // open and stopping it raises the seam's declared native failure. There is nothing
+            // left to stop, and the one thing that still matters - RELEASING the device below -
+            // must not be skipped over it, or the dialog strands an endpoint every time a
+            // device goes away. Swallowed rather than surfaced because this is display-only
+            // teardown with no caller who could act on it. The filter is what the capture seam
+            // lets Stop raise, and it is the same one TapSession.DisposeAsync applies.
+            //
+            // Reachable in practice on macOS, where the backend propagates the invalidation;
+            // the WASAPI one swallows it inside its own Stop, so a Windows host never gets
+            // here.
+        }
+
         _capture.Dispose();
     }
 
