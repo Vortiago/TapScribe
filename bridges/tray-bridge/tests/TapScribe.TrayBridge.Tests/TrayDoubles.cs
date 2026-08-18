@@ -1,5 +1,6 @@
 using System.Text;
 using TapScribe.Bridge.Core;
+using TapScribe.Bridge.Windows;
 
 namespace TapScribe.TrayBridge.Tests;
 
@@ -95,7 +96,8 @@ internal sealed class TrayHarness : IDisposable
     private MeetingHistoryStore? _historyStore;
 
     public BridgeSettingsStore SettingsStore =>
-        _settingsStore ??= new BridgeSettingsStore(new PlainTokenStore(), _directory, "tray-test.json");
+        _settingsStore ??= new BridgeSettingsStore(
+            new PlainTokenStore(), _directory, "tray-test.json", TrayStores.FallbackIdentity);
 
     private BridgeSettingsStore? _settingsStore;
 
