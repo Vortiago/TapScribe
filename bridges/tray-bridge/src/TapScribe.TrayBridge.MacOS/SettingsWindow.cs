@@ -9,8 +9,9 @@ namespace TapScribe.TrayBridge.MacOS;
 /// The Settings window: a two-way binding of AppKit controls onto Core's
 /// <see cref="SettingsDraft"/>, which owns every decision about what the edited state MEANS.
 /// The Mac sibling of WinForms' <c>SettingsForm</c>, and deliberately the smaller half of it:
-/// connection, the microphone row, the shared gate timings and the end-of-meeting behaviour.
-/// The Advanced pin grid and the live level meters are device parity, which slice 9 owns.
+/// connection, the two speaker rows (the microphone and the system-audio tap), the shared gate
+/// timings and the end-of-meeting behaviour. The Advanced pin grid and the live level meters
+/// are device parity, which slice 9 owns.
 ///
 /// Not modal. A modal run loop would sit on the main queue that every runtime callback is
 /// posted to, so a meeting running behind the window would stop being able to report anything.
@@ -18,19 +19,19 @@ namespace TapScribe.TrayBridge.MacOS;
 ///
 /// Disposable for the reason <see cref="MeetingWindow"/> is: ReleaseWhenClosed is off, so
 /// AppKit frees nothing on close, and every handler below captures <c>this</c> through a
-/// control the window retains. Without a release each Settings… leaves a whole nineteen-control
-/// window graph behind, and the tray runs for days.
+/// control the window retains. Without a release each Settings… leaves the whole control graph
+/// behind, and the tray runs for days.
 /// </summary>
 internal sealed class SettingsWindow : IDisposable
 {
     private const int Width = 480;
 
     // The row budget, not a taste: the layout below is a top-down cursor, so this has to cover
-    // every row it places (19 of them, plus a heading's extra air and the two-line notes) or
+    // every row it places (23 of them, plus each heading's extra air and the two-line notes) or
     // the last control is framed below the window and simply is not drawn. Nothing catches
     // that but opening the window, so a row added here comes with a bump to this number and a
     // look at the Save button.
-    private const int Height = 760;
+    private const int Height = 900;
     private const int Padding = 16;
     private const int LabelWidth = 120;
     private const int RowHeight = 22;
@@ -59,6 +60,10 @@ internal sealed class SettingsWindow : IDisposable
     private readonly NSTextField _micName;
     private readonly NSSlider _micSensitivity;
     private readonly NSTextField _micSensitivityReadout;
+    private readonly NSButton _systemEnabled;
+    private readonly NSTextField _systemName;
+    private readonly NSSlider _systemSensitivity;
+    private readonly NSTextField _systemSensitivityReadout;
     private readonly NSTextField _hangover;
     private readonly NSTextField _preRoll;
     private readonly NSButton _processOnEnd;
@@ -122,7 +127,25 @@ internal sealed class SettingsWindow : IDisposable
         _micName = Field(content, "Speaker name", _draft.MicName, ControlWidth);
         _micSensitivity = Slider(content, "Sensitivity", _draft.MicSensitivity);
         _micSensitivityReadout = Note(content, SettingsDraft.SensitivityLabel(_draft.MicSensitivity), lines: 1);
-        _micSensitivity.Activated += OnSensitivity;
+        _micSensitivity.Activated += OnMicSensitivity;
+
+        Section(content, "System audio");
+        _systemEnabled = Check(content, "Record what this Mac plays", _draft.SystemEnabled);
+        _systemName = Field(content, "Speaker name", _draft.SystemName, ControlWidth);
+        _systemSensitivity = Slider(content, "Sensitivity", _draft.SystemSensitivity);
+        _systemSensitivityReadout =
+            Note(content, SettingsDraft.SensitivityLabel(_draft.SystemSensitivity), lines: 1);
+        _systemSensitivity.Activated += OnSystemSensitivity;
+        // The one thing about this row an operator cannot discover by looking at it: the grant
+        // is asked for at the first Start rather than here, so a meeting that records only one
+        // speaker is usually a prompt that was dismissed. Said in the window because the
+        // recovery (System Settings, not this dialog) is somewhere else entirely.
+        Note(
+            content,
+            "macOS asks for permission the first time a meeting records system audio. If only "
+            + "your own voice is recorded, allow TapScribe under System Settings \u203a Privacy "
+            + "& Security \u203a Screen & System Audio Recording.",
+            lines: 3);
 
         Section(content, "Speech gate");
         _hangover = Field(content, "Hangover (ms)", _draft.HangoverMs.ToString(CultureInfo.InvariantCulture), 90);
@@ -130,13 +153,6 @@ internal sealed class SettingsWindow : IDisposable
 
         Section(content, "Meetings");
         _processOnEnd = Check(content, "Transcribe and summarize when the meeting ends", _draft.ProcessOnEnd);
-
-        // Said in the window rather than left for the operator to infer from a meeting that
-        // reports a device it could not find: on this platform system audio is a Core Audio
-        // process tap rather than a loopback endpoint, and that is #420's work. A saved
-        // system-audio selection is carried through Save untouched, which is why there is no
-        // control for it here rather than a disabled one claiming a state.
-        Note(content, "System audio is not captured on macOS yet, so a meeting records this Mac's microphone only.", lines: 2);
 
         _save = Button(content, "Save", Width - Padding - 100, 100);
         _save.Activated += OnSave;
@@ -153,8 +169,11 @@ internal sealed class SettingsWindow : IDisposable
     // through a control AppKit retains is exactly what keeps a closed window alive.
     private void OnTest(object? sender, EventArgs e) => _ = TestConnectionAsync();
 
-    private void OnSensitivity(object? sender, EventArgs e) =>
+    private void OnMicSensitivity(object? sender, EventArgs e) =>
         _micSensitivityReadout.StringValue = SettingsDraft.SensitivityLabel(_micSensitivity.IntValue);
+
+    private void OnSystemSensitivity(object? sender, EventArgs e) =>
+        _systemSensitivityReadout.StringValue = SettingsDraft.SensitivityLabel(_systemSensitivity.IntValue);
 
     private void OnSave(object? sender, EventArgs e) => Save();
 
@@ -163,8 +182,8 @@ internal sealed class SettingsWindow : IDisposable
     /// <summary>Release the window and everything it draws.
     ///
     /// Needed because ReleaseWhenClosed is off, which is what lets the shell ask IsOpen
-    /// after a close. Without a release the graph (window, nineteen controls, the seeded
-    /// token) survives every close, and the four handlers above capture <c>this</c> through
+    /// after a close. Without a release the graph (window, every control, the seeded token)
+    /// survives every close, and the handlers above capture <c>this</c> through
     /// controls AppKit retains, so the cycle runs through objects it holds. The shell
     /// disposes the stale window when a later Settings… builds a new one. Also what stops an
     /// in-flight connection test posting into controls that are already gone.</summary>
@@ -174,7 +193,8 @@ internal sealed class SettingsWindow : IDisposable
             return;
         _disposed = true;
         _test.Activated -= OnTest;
-        _micSensitivity.Activated -= OnSensitivity;
+        _micSensitivity.Activated -= OnMicSensitivity;
+        _systemSensitivity.Activated -= OnSystemSensitivity;
         _save.Activated -= OnSave;
         _cancel.Activated -= OnCancel;
         _window.Dispose();
@@ -223,6 +243,9 @@ internal sealed class SettingsWindow : IDisposable
         _draft.MicEnabled = IsOn(_micEnabled);
         _draft.MicName = _micName.StringValue;
         _draft.MicSensitivity = _micSensitivity.IntValue;
+        _draft.SystemEnabled = IsOn(_systemEnabled);
+        _draft.SystemName = _systemName.StringValue;
+        _draft.SystemSensitivity = _systemSensitivity.IntValue;
         _draft.HangoverMs = SettingsFields.Int(_hangover.StringValue, _draft.HangoverMs, min: 0, max: 5000);
         _draft.PreRollMs = SettingsFields.Int(_preRoll.StringValue, _draft.PreRollMs, min: 0, max: 2000);
         _draft.ProcessOnEnd = IsOn(_processOnEnd);
