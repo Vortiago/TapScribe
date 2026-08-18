@@ -1,3 +1,4 @@
+using System.Globalization;
 using AppKit;
 using CoreGraphics;
 using TapScribe.Bridge.Core;
@@ -14,8 +15,13 @@ namespace TapScribe.TrayBridge.MacOS;
 /// Not modal. A modal run loop would sit on the main queue that every runtime callback is
 /// posted to, so a meeting running behind the window would stop being able to report anything.
 /// Save applies through the runtime and closes; Cancel just closes.
+///
+/// Disposable for the reason <see cref="MeetingWindow"/> is: ReleaseWhenClosed is off, so
+/// AppKit frees nothing on close, and every handler below captures <c>this</c> through a
+/// control the window retains. Without a release each Settings… leaves a whole nineteen-control
+/// window graph behind, and the tray runs for days.
 /// </summary>
-internal sealed class SettingsWindow
+internal sealed class SettingsWindow : IDisposable
 {
     private const int Width = 480;
 
@@ -56,8 +62,11 @@ internal sealed class SettingsWindow
     private readonly NSTextField _hangover;
     private readonly NSTextField _preRoll;
     private readonly NSButton _processOnEnd;
+    private readonly NSButton _save;
+    private readonly NSButton _cancel;
 
     private nfloat _y = Height - Padding;
+    private bool _disposed;
 
     /// <summary>Build the window over the settings in force.</summary>
     /// <param name="current">What the runtime is running on, which is what the window seeds
@@ -99,13 +108,13 @@ internal sealed class SettingsWindow
 
         Section(content, "Recorder");
         _host = Field(content, "Host", _draft.Host, ControlWidth);
-        _port = Field(content, "Port", _draft.Port.ToString(System.Globalization.CultureInfo.InvariantCulture), 90);
+        _port = Field(content, "Port", _draft.Port.ToString(CultureInfo.InvariantCulture), 90);
         _token = Secret(content, "Tap token", _draft.Token);
         _tls = Check(content, "Connect over TLS", _draft.Tls);
         _allowSelfSigned = Check(content, "Accept a self-signed certificate", _draft.AllowSelfSignedCert);
 
         _test = Button(content, "Test connection", ControlLeft, 150);
-        _test.Activated += (_, _) => _ = TestConnectionAsync();
+        _test.Activated += OnTest;
         _testStatus = Note(content, "", lines: 2);
 
         Section(content, "Microphone");
@@ -113,12 +122,11 @@ internal sealed class SettingsWindow
         _micName = Field(content, "Speaker name", _draft.MicName, ControlWidth);
         _micSensitivity = Slider(content, "Sensitivity", _draft.MicSensitivity);
         _micSensitivityReadout = Note(content, SettingsDraft.SensitivityLabel(_draft.MicSensitivity), lines: 1);
-        _micSensitivity.Activated += (_, _) =>
-            _micSensitivityReadout.StringValue = SettingsDraft.SensitivityLabel(_micSensitivity.IntValue);
+        _micSensitivity.Activated += OnSensitivity;
 
         Section(content, "Speech gate");
-        _hangover = Field(content, "Hangover (ms)", _draft.HangoverMs.ToString(System.Globalization.CultureInfo.InvariantCulture), 90);
-        _preRoll = Field(content, "Pre-roll (ms)", _draft.PreRollMs.ToString(System.Globalization.CultureInfo.InvariantCulture), 90);
+        _hangover = Field(content, "Hangover (ms)", _draft.HangoverMs.ToString(CultureInfo.InvariantCulture), 90);
+        _preRoll = Field(content, "Pre-roll (ms)", _draft.PreRollMs.ToString(CultureInfo.InvariantCulture), 90);
 
         Section(content, "Meetings");
         _processOnEnd = Check(content, "Transcribe and summarize when the meeting ends", _draft.ProcessOnEnd);
@@ -130,12 +138,46 @@ internal sealed class SettingsWindow
         // control for it here rather than a disabled one claiming a state.
         Note(content, "System audio is not captured on macOS yet, so a meeting records this Mac's microphone only.", lines: 2);
 
-        NSButton save = Button(content, "Save", Width - Padding - 100, 100);
-        save.Activated += (_, _) => Save();
-        save.KeyEquivalent = "\r"; // Return saves, the way a Mac dialog's default button does
-        NSButton cancel = Button(content, "Cancel", Width - Padding - 100 - Gap - 100, 100, sameRow: true);
-        cancel.Activated += (_, _) => Close();
-        cancel.KeyEquivalent = ""; // Escape closes without applying
+        _save = Button(content, "Save", Width - Padding - 100, 100);
+        _save.Activated += OnSave;
+        _save.KeyEquivalent = "\r"; // Return saves, the way a Mac dialog's default button does
+        _cancel = Button(content, "Cancel", Width - Padding - 100 - Gap - 100, 100, sameRow: true);
+        _cancel.Activated += OnCancel;
+        // U+001B is what Escape sends, and claiming it here is what closes the window on it: a
+        // plain NSWindow has no Escape handling of its own. Escaped rather than written as the
+        // raw control byte, which an editor or an encoding pass can silently eat.
+        _cancel.KeyEquivalent = "\u001b";
+    }
+
+    // Named rather than lambdas so Dispose can unhook them: a handler that captures this
+    // through a control AppKit retains is exactly what keeps a closed window alive.
+    private void OnTest(object? sender, EventArgs e) => _ = TestConnectionAsync();
+
+    private void OnSensitivity(object? sender, EventArgs e) =>
+        _micSensitivityReadout.StringValue = SettingsDraft.SensitivityLabel(_micSensitivity.IntValue);
+
+    private void OnSave(object? sender, EventArgs e) => Save();
+
+    private void OnCancel(object? sender, EventArgs e) => Close();
+
+    /// <summary>Release the window and everything it draws.
+    ///
+    /// Needed because ReleaseWhenClosed is off, which is what lets the shell ask IsOpen
+    /// after a close. Without a release the graph (window, nineteen controls, the seeded
+    /// token) survives every close, and the four handlers above capture <c>this</c> through
+    /// controls AppKit retains, so the cycle runs through objects it holds. The shell
+    /// disposes the stale window when a later Settings… builds a new one. Also what stops an
+    /// in-flight connection test posting into controls that are already gone.</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        _test.Activated -= OnTest;
+        _micSensitivity.Activated -= OnSensitivity;
+        _save.Activated -= OnSave;
+        _cancel.Activated -= OnCancel;
+        _window.Dispose();
     }
 
     /// <summary>Whether the window is still on screen, so a second Settings… raises this one
@@ -164,6 +206,15 @@ internal sealed class SettingsWindow
     // which gate a device keeps.
     private BridgeSettings Collect()
     {
+        // End the edit first. A text field being edited keeps its text in the window's field
+        // editor and hands StringValue the LAST COMMITTED value, and clicking a button does not
+        // move first responder off it (a button only accepts focus under full keyboard access).
+        // So without this, typing a host and clicking Save with the mouse saves the old one, and
+        // says nothing about it. MakeFirstResponder(null) resigns the field editor, which is
+        // what commits its text into the cell. The WinForms sibling's _devices.EndEdit() is the
+        // same call for the same reason.
+        _window.MakeFirstResponder(null);
+
         _draft.Host = _host.StringValue.Trim();
         _draft.Port = SettingsFields.Int(_port.StringValue, _draft.Port, min: 1, max: 65535);
         _draft.Token = _token.StringValue;
@@ -185,11 +236,15 @@ internal sealed class SettingsWindow
     {
         _test.Enabled = false;
         _testStatus.StringValue = "Testing…";
-        TapConnectionOptions options = Collect().ToConnectionOptions();
 
         string outcome;
         try
         {
+            // Inside the try, not before it: this is the point of the filter below. The button
+            // is disabled and the status reads "Testing…" from here, so anything that escapes
+            // leaves both stuck that way for as long as the window is open, with nothing to
+            // report it out of a fire-and-forget click.
+            TapConnectionOptions options = Collect().ToConnectionOptions();
             using var timeout = new CancellationTokenSource(TestTimeout);
             ConnectionTestResult result = await ConnectionTester
                 .TestAsync(options, http: null, timeout.Token)
@@ -209,9 +264,12 @@ internal sealed class SettingsWindow
         }
 
         // Back to the main thread before touching either control: the await above resumed on a
-        // thread pool thread, because macOS has no SynchronizationContext to capture.
+        // thread pool thread, because macOS has no SynchronizationContext to capture. Skipped
+        // once the window is released, since the controls are gone by then.
         _dispatcher.Post(() =>
         {
+            if (_disposed)
+                return;
             _testStatus.StringValue = outcome;
             _test.Enabled = true;
         });
@@ -247,7 +305,7 @@ internal sealed class SettingsWindow
         });
     }
 
-    private void Caption(NSView content, string text, nfloat y)
+    private static void Caption(NSView content, string text, nfloat y)
     {
         content.AddSubview(new NSTextField
         {

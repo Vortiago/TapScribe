@@ -187,14 +187,12 @@ public sealed class SettingsDraft
             Host = Host.Trim(),
             Port = Port,
             Tls = Tls,
-            // Scoped to TLS here rather than in each shell's dialog. InsecureTls states the
-            // rule as a property of the settings ("gate every use on Tls && AllowSelfSignedCert")
-            // and four consumers re-check it downstream, but nothing enforced it where it is
-            // DECIDED: the WinForms dialog re-applied the pairing on collect and the AppKit one
-            // did not, so the same operator gesture persisted differently per platform. Saving
-            // the pair unscoped arms an accept-any validator that the next TLS tick turns on
-            // with no second consent, which is the wrong way for the one security knob here to
-            // fail.
+            // Scoped to TLS here, where it is DECIDED, rather than in each shell's dialog.
+            // InsecureTls states the rule as a property of the settings ("gate every use on
+            // Tls && AllowSelfSignedCert") and four consumers re-check it downstream, but a
+            // dialog that persisted the pair unscoped would arm an accept-any validator that
+            // the next TLS tick turns on with no second consent, and every shell would have to
+            // remember not to. That is the wrong way for the one security knob here to fail.
             AllowSelfSignedCert = Tls && AllowSelfSignedCert,
             Identity = _baseIdentity,
             Name = _baseName,

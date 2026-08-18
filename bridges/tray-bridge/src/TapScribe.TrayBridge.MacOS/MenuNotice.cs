@@ -28,7 +28,17 @@ internal static class MenuNotice
         string body = detail.Length == 0 ? title : $"{title}: {detail}";
         string prefix = kind == NoticeKind.Warning ? "⚠ " : "ℹ ";
         string line = prefix + body;
-        return line.Length <= MaxLength ? line : string.Concat(line.AsSpan(0, MaxLength - 1), "…");
+        return line.Length <= MaxLength ? line : string.Concat(line.AsSpan(0, KeepableLength(line)), "…");
+    }
+
+    // How much of an over-long line may be kept. One short of the budget to leave room for the
+    // ellipsis, and one shorter again when that lands between the halves of a surrogate pair:
+    // exception text carries paths and device names, an emoji or a rarer CJK glyph in one is two
+    // chars, and half of one renders as the replacement box rather than as a truncation.
+    private static int KeepableLength(string line)
+    {
+        int keep = MaxLength - 1;
+        return char.IsHighSurrogate(line[keep - 1]) ? keep - 1 : keep;
     }
 
     // A menu item is one line, so every run of whitespace (the line breaks an IOException

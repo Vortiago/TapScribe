@@ -573,9 +573,10 @@ internal sealed class SettingsForm : Form
         _draft.Host = _host.Text;
         _draft.Port = (int)_port.Value;
         _draft.Tls = _tls.Checked;
-        // Belt-and-suspenders: never carry the insecure opt-in without TLS, even if a race
-        // left the checkbox ticked (it's force-cleared on the TLS toggle in BuildConnectionTab).
-        // Scoping to TLS is SettingsDraft.ToSettings' job now, so both shells inherit it.
+        // The checkbox as ticked, unscoped: SettingsDraft.ToSettings gates the insecure opt-in
+        // on TLS, so the pairing holds for both shells rather than for whichever dialog
+        // remembers it. The UI still greys the box out and force-clears it on the TLS toggle
+        // (BuildConnectionTab), which is the same rule surfaced rather than a second enforcer.
         _draft.AllowSelfSignedCert = _allowSelfSigned.Checked;
         _draft.Token = _token.Text;
         _draft.MicEnabled = _micEnabled.Checked;

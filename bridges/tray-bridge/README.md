@@ -42,8 +42,8 @@ Recorder, Utterance, Session).
   macOS 14.4 floor, the sysctl that reads this Mac's version, and the Mac half
   of the storage layer: `KeychainTapTokenStore` (the tap token in the login
   Keychain, so the settings file carries nothing about it) plus the `TrayStores`
-  binding of the Core stores to `~/Library/Application Support/TapScribe`.
-  Core Audio process-tap capture and device enumeration land here next.
+  binding of the Core stores to `~/Library/Application Support/TapScribe`,
+  and the Core Audio capture and device enumeration behind the portable seams.
   Everything it asks the OS goes through P/Invoke, never the managed ObjC
   bindings (`MacOSProductVersion` states that rule and why), which is why the
   plain TFM is enough and why its tests run on every CI lane rather than only
@@ -188,7 +188,8 @@ knowing before you reach for one:
   variables seed the first run, and a bundle opened from Finder, the Dock or
   `open -a` inherits `launchd`'s environment, not your shell's, so an export in
   `~/.zshrc` is simply not there. Launching the binary inside the bundle from a
-  terminal (`TAPSCRIBE_HOST=… ./TapScribe.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
+  terminal
+  (`TAPSCRIBE_HOST=… TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
   does seed it, and so does typing the values into Settings once, which is the
   supported route.
 - **The Settings window is the smaller half of the Windows dialog for now**:

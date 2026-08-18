@@ -59,6 +59,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _start = new NSMenuItem("Start meeting", (_, _) => OnRuntime(runtime => runtime.Start()));
         _end = new NSMenuItem("End meeting", (_, _) => OnRuntime(runtime => runtime.End())) { Enabled = false };
         _pastMeetings = new NSMenuItem("Past meetings") { Submenu = _pastMeetingsMenu };
+        // Seeded rather than left empty until menuWillOpen: fills it. AppKit will not open a
+        // submenu with no items, so an empty one is a Past-meetings entry that never fires the
+        // delegate that would have populated it. The placeholder is also what an empty history
+        // shows, so the seed is the same line RebuildPastMeetings writes.
+        _pastMeetingsMenu.AddItem(NoPastMeetings());
         var settings = new NSMenuItem("Settings…", (_, _) => OpenSettings());
         var quit = new NSMenuItem("Quit", "q", (_, _) => _ = QuitAsync());
 
@@ -79,17 +84,15 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _menu.AddItem(settings);
         _menu.AddItem(quit);
 
-        // Past meetings (#168) is rebuilt each time the menu opens, so it reflects meetings
-        // ended since it was last shown, including ones another process ended. The parent
-        // menu's opening is the hook rather than the submenu's, because it is the one the
-        // operator's click always crosses. WeakDelegate rather than Delegate: this is already
-        // an NSApplicationDelegate and so cannot also derive from NSMenuDelegate, and the
-        // exported selector below is what AppKit actually looks for.
-        // On the Past-meetings SUBMENU, not the whole menu. AppKit fires menuWillOpen: for
-        // whichever menu carries the delegate, so hanging it on _menu re-read and re-parsed
-        // the history file on every status-item click, whether or not the operator went near
-        // Past meetings. The Windows sibling hooks the item's own DropDownOpening for the
-        // same reason.
+        // Past meetings (#168) is rebuilt each time the submenu opens, so it reflects meetings
+        // ended since it was last shown, including ones another process ended. On the
+        // Past-meetings SUBMENU, not the whole menu: AppKit fires menuWillOpen: for whichever
+        // menu carries the delegate, so hanging it on _menu would re-read and re-parse the
+        // history file on every status-item click, whether or not the operator went near Past
+        // meetings. The Windows sibling hooks the item's own DropDownOpening for the same
+        // reason. WeakDelegate rather than Delegate: this is already an NSApplicationDelegate
+        // and so cannot also derive from NSMenuDelegate, and the exported selector below is
+        // what AppKit actually looks for.
         _pastMeetingsMenu.WeakDelegate = this;
     }
 
@@ -244,6 +247,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             return;
         }
 
+        // The previous window is closed but not freed (ReleaseWhenClosed is off, which is what
+        // makes IsOpen answerable above), so dropping the reference alone would leave its whole
+        // control graph behind once per Settings…, on a tray that runs for days.
+        _settingsWindow?.Dispose();
+
         var window = new SettingsWindow(
             runtime.Settings, ListDevices, runtime.ApplySettings, _dispatcher);
         _settingsWindow = window;
@@ -264,7 +272,7 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         {
             // An empty (or unreadable, which the store degrades to empty) history shows a
             // placeholder rather than a submenu that opens onto nothing.
-            _pastMeetingsMenu.AddItem(new NSMenuItem("(No past meetings)") { Enabled = false });
+            _pastMeetingsMenu.AddItem(NoPastMeetings());
         }
         else
         {
@@ -273,6 +281,8 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
                     new NSMenuItem(record.MenuLabel(), (_, _) => OnRuntime(r => r.OpenPastMeeting(record))));
         }
     }
+
+    private static NSMenuItem NoPastMeetings() => new("(No past meetings)") { Enabled = false };
 
     /// <summary>
     /// Run a command against the runtime, or do nothing if it does not exist yet.
@@ -301,6 +311,10 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             window.Close();
         _windows.Clear();
         _settingsWindow?.Close();
+        // Safe to release inline, unlike a meeting window's: this is the caller of Close rather
+        // than a handler AppKit is still unwinding through.
+        _settingsWindow?.Dispose();
+        _settingsWindow = null;
 
         if (_statusItem is not null)
         {
