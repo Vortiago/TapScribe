@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
@@ -284,7 +283,17 @@ public class MacOSAudioCaptureTests
         var capture = new MacOSAudioCapture(hal, device.ObjectId);
         List<Exception?> failures = [];
         capture.Failed += (_, e) => failures.Add(e);
-        capture.Start();
+        // Released on the way out of a failing arrange too. Disposing is the ACT here, so it
+        // cannot ride a `using`, and Start can throw.
+        try
+        {
+            capture.Start();
+        }
+        catch
+        {
+            capture.Dispose();
+            throw;
+        }
 
         capture.Dispose();
 
@@ -344,34 +353,22 @@ public class MacOSAudioCaptureTests
         // assigns. The tray retries a device that refused, so it is one thread and one ring
         // per attempt for the process lifetime.
         //
-        // Collectability is the observable form of it: the pump's delegate runs an INSTANCE
-        // method, so a live pump roots the capture. Counting OS threads would be the same
-        // claim measured against the thread pool's noise.
+        // Asserted on the pump directly rather than on collectability. A WeakReference plus
+        // GC.Collect says the same thing, but says it about the collector: it needs the
+        // capture out of every frame, so it needs an uninlined helper, and a failure reads as
+        // "something still roots this" rather than naming the pump.
         var hal = new FakeCoreAudioHal
         {
             CreateIoProcError = new CoreAudioException("creating an IOProc on device 41", -66748),
         };
         CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
 
-        WeakReference abandoned = StartAndRelease(hal, device);
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
+        Assert.IsAssignableFrom<ExternalException>(Record.Exception(capture.Start));
 
         Assert.False(
-            abandoned.IsAlive,
-            "a capture whose Start was refused is still rooted, which is its pump thread still parked");
-    }
-
-    // Out of line and NoInlining so the capture cannot stay live in a caller's frame, which
-    // would make the assertion above about the JIT rather than about the pump.
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference StartAndRelease(FakeCoreAudioHal hal, CoreAudioDevice device)
-    {
-        var capture = new MacOSAudioCapture(hal, device.ObjectId);
-        Record.Exception(capture.Start);
-        capture.Dispose();
-        return new WeakReference(capture);
+            capture.IsPumping,
+            "a Start that was refused left its pump thread parked on a semaphore nobody will release");
     }
 
     [Fact]

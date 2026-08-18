@@ -177,6 +177,12 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     /// what a later slice would surface rather than guess at.</summary>
     internal long DroppedBuffers => Interlocked.Read(ref _dropped);
 
+    /// <summary>Whether a pump thread is running for this capture right now. The generation is
+    /// the pump's only root, so this is also the answer to "did a failed Start leave a thread
+    /// parked on a semaphore nobody will release", which is otherwise observable only as a
+    /// collectability question.</summary>
+    internal bool IsPumping => _active is not null;
+
     // Runs on the CoreAudio IO thread, once per buffer. Allocation-free: everything it touches
     // was sized in Start. Its one blocking call is the semaphore release, which is bounded and
     // measured (see the note on the fields above).
