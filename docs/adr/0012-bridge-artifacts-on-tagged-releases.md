@@ -6,12 +6,13 @@ date: 2026-07-15
 # Bridge artifacts are built by CI and attached to tag-driven GitHub Releases
 
 Pushing a `vX.Y.Z` tag fires `.github/workflows/release.yml`, which builds the
-wheel + sdist, the SpatialChat extension zip, the Windows tray exe zip, and a
+wheel + sdist, the SpatialChat extension zip, both tray-Bridge zips, and a
 GHCR image, then attaches the release assets under **stable, unversioned
 filenames**:
 
 - `tapscribe-spacialchat-bridge.zip`
 - `TapScribe.TrayBridge-win-x64.zip`
+- `TapScribe.TrayBridge-osx-arm64.zip`
 
 The dashboard's Settings "Get a bridge" card links to
 `https://github.com/{GITHUB_REPO}/releases/latest/download/<asset>`.
@@ -57,5 +58,8 @@ download the browser can fetch directly.
   links.
 - Cutting a release is a documented ritual (see `RELEASING.md`), never
   automatic.
-- The tray exe is unsigned; the card documents the SmartScreen warning. Code
-  signing / installer / auto-update stay out of scope.
+- Neither tray build is signed, and each OS objects in its own way, so the card
+  documents both: SmartScreen on Windows, and on macOS a quarantine flag that
+  makes a double-click fail as though the download were corrupt (right-click ->
+  Open, or clear the flag). Code signing, notarisation, installers and
+  auto-update all stay out of scope.
