@@ -88,7 +88,11 @@ def _coerce_people(data: Any) -> list[dict[str, Any]]:
         # edited or torn file can't smuggle in a duplicate that would make
         # resolution ambiguous.
         clean_idents = [i for i in idents if isinstance(i, str) and i and i not in seen_idents]
-        if not clean_idents:
+        # An identity-less Person is legitimate when it carries a NAME: a Voice
+        # mapped by typing one creates exactly that, and a session's `voices`
+        # map reaches it by `person_id` (ADR-0021). Unnamed AND unreachable is
+        # still junk.
+        if not clean_idents and not (isinstance(name, str) and name.strip()):
             continue
         seen_ids.add(pid)
         seen_idents.update(clean_idents)
@@ -168,6 +172,14 @@ class PeopleRegistry:
                 self._by_identity[identity] = person
                 changed = True
         return changed
+
+    def create(self, name: str) -> dict[str, Any]:
+        """Mint a named Person owning no Identity — what mapping a Voice to a
+        typed name produces (ADR-0021). Not exposed as a bare route verb: the
+        mapping write creates it, so a Person is never left unattached."""
+        person = {"id": _new_person_id(), "name": name, "identities": []}
+        self._people.append(person)
+        return person
 
     def rename(self, person_id: str, name: str) -> dict[str, Any]:
         person = self.get(person_id)
