@@ -308,7 +308,11 @@ knowing before you reach for one:
 ## Dev loop (the acceptance check)
 
 1. Start a Recorder: `python -m tapscribe --no-auth` (or `./start.ps1`).
-2. `dotnet run --project src/TapScribe.TrayBridge`.
+2. `dotnet run --project src/TapScribe.TrayBridge`. On macOS launch the built
+   bundle instead (`open …/TapScribe.TrayBridge.MacOS.app`, or its inner binary
+   from a terminal when you want the stderr): a process without bundle identity
+   is one macOS refuses to prompt for, so `dotnet run` never reaches the capture
+   paths at all.
 3. Right-click → **Start meeting**. Play meeting audio while you speak,
    pausing between sentences, then **End meeting**.
 4. **Two** sets of WAVs appear under the Recorder's new detached session —
@@ -318,6 +322,19 @@ knowing before you reach for one:
 5. Tokened path: paste the Recorder's token into **Settings… → Connection**,
    Save, then Start meeting against a Recorder started **without**
    `--no-auth`.
+6. **Blip resilience.** Mid-sentence, with an Utterance open, stop the Recorder
+   and start it again. The reconnect ladder keeps the same `utterance_id`,
+   buffers the gap up to its bounded budget and flushes the tail into the next
+   `/tap` that lands, so the sentence arrives as ONE WAV with a hole in it
+   rather than as two Utterances. `../README.md` holds the recipe and the
+   budgets, which are the numbers to check against.
+
+On **macOS** the first **Start meeting** of a fresh install is also where the
+TCC prompts land: the microphone, and then **System Audio Recording** once the
+process tap's IOProc starts. Answer both, or the meeting records the mic alone
+and says so in the status line. A grant is per signature, so an ad-hoc build
+asks again after every rebuild, and a downloaded release asks again after every
+update.
 
 ## Wire contract (summary)
 
