@@ -149,12 +149,8 @@ def test_absorb_invalidates_the_plain_text_transcript_alongside_the_json(rec_roo
 
 
 # ---------------------------------------------------------------------------
-# Voice carry-over (ADR-0021)
-#
-# Absorb is the one operation that ADDS audio to a session's time range, which
-# makes it the one that can invalidate a Voice. It is also destructive: the
-# source folder is rmtree'd, so a `session-voices.json` left behind is gone
-# while the WAVs it describes live on in the target.
+# Voice carry-over (ADR-0021). Absorb rmtree's the source, so a
+# `session-voices.json` left behind dies while its WAVs live on in the target.
 # ---------------------------------------------------------------------------
 
 _T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -162,8 +158,7 @@ _T1 = datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC)
 
 
 def test_absorb_carries_voices_when_the_identities_are_disjoint(rec_root: Path):
-    """Two sessions that diarized different taps merge cleanly — each identity
-    keeps its own Voices and its own `run_id`."""
+    """Different taps on each side: both survive, each with its own run."""
     target = seed_session(rec_root, "tgt", [ALICE_WAV])
     source = seed_session(rec_root, "src", [BOB_WAV])
     voices.record_voices(target, identity=ALICE_IDENTITY, run_id="run-t", spans={"A": [(_T0, _T1)]})
@@ -173,7 +168,7 @@ def test_absorb_carries_voices_when_the_identities_are_disjoint(rec_root: Path):
 
     merged = voices.read_voices(target)
     assert set(merged) == {ALICE_IDENTITY, BOB_IDENTITY}, (
-        "the source's Voices are destroyed with its folder unless absorb carries them"
+        "the source's Voices die with its folder unless absorb carries them"
     )
     assert merged[ALICE_IDENTITY]["run_id"] == "run-t"
     assert merged[BOB_IDENTITY]["run_id"] == "run-s"
@@ -181,10 +176,8 @@ def test_absorb_carries_voices_when_the_identities_are_disjoint(rec_root: Path):
 
 
 def test_absorb_drops_a_colliding_identitys_voices_from_both_sides(rec_root: Path):
-    """A Voice label is SESSION-LOCAL, so the target's Voice `A` for an identity
-    and the source's are different humans with nothing on disk to say so.
-    Keeping either would attribute one person's words to another; absorb drops
-    both and reports the identity so the merged session can be re-diarized."""
+    """Each session's Voice `A` is a different human, so absorb drops both and
+    reports the identity for re-diarizing."""
     target = seed_session(rec_root, "tgt", [ALICE_WAV])
     source = seed_session(rec_root, "src", [BOB_WAV])
     voices.record_voices(target, identity=ALICE_IDENTITY, run_id="run-t", spans={"A": [(_T0, _T1)]})

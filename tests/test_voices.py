@@ -1,8 +1,5 @@
-"""`session-voices.json` — the per-session, machine-written record of the Voices
-a diarization run found inside each multi-person tap's identity (ADR-0021).
-
-Sibling of `test_roster.py`: same per-session sidecar shape, same "a bad file
-degrades to empty, never crashes the poll" contract.
+"""`session-voices.json` — the per-session record of the Voices a diarization
+run found in each multi-person tap (ADR-0021). Sibling of `test_roster.py`.
 """
 
 from __future__ import annotations
@@ -29,9 +26,8 @@ def _at(second: int) -> datetime:
 
 
 def test_write_then_read_round_trips_voices_and_their_spans(session_dir: Path) -> None:
-    """Two Voices under one identity, each with its speech spans in ABSOLUTE
-    session time — the join in `session_merge` is an interval join against
-    these, so the times must survive the disk round-trip exactly."""
+    """Spans are absolute-time, and `session_merge` interval-joins against them,
+    so they must survive the round-trip exactly."""
     voices.record_voices(
         session_dir,
         identity=SYSAUDIO,
@@ -58,8 +54,7 @@ def test_write_then_read_round_trips_voices_and_their_spans(session_dir: Path) -
 
 
 def test_missing_sidecar_reads_as_empty(session_dir: Path) -> None:
-    """An undiarized session is the NORMAL case — most sessions have no
-    multi-person tap at all — so absence is `{}`, never an error."""
+    """An undiarized session is the normal case, so absence is `{}`."""
     assert voices.read_voices(session_dir) == {}
 
 
@@ -78,17 +73,15 @@ def test_missing_sidecar_reads_as_empty(session_dir: Path) -> None:
     ids=["torn", "list", "scalar", "entry", "voices", "half-span", "no-spans", "blank-ident"],
 )
 def test_malformed_sidecar_degrades_to_empty(session_dir: Path, raw: str) -> None:
-    """Every shape failure degrades to "no Voices", which means every segment
-    keeps its plain identity key. A bad sidecar must never crash the merge or
-    the 500 ms poll — the file is regenerable by re-running diarize."""
+    """Junk degrades to "no Voices" (every segment keeps its plain identity
+    key) rather than crashing the merge or the 500 ms poll."""
     (session_dir / "session-voices.json").write_text(raw, encoding="utf-8")
     assert voices.read_voices(session_dir) == {}
 
 
 def test_recording_one_identity_leaves_a_siblings_run_id_untouched(session_dir: Path) -> None:
-    """`run_id` is stamped PER IDENTITY. Re-diarizing one tap must not disturb
-    another's stamp, or every Voice→Person mapping made against the sibling
-    would read as superseded and silently stop being applied."""
+    """Re-diarizing one tap must not bump a sibling's stamp, or every mapping
+    made against that sibling reads as superseded and stops applying."""
     voices.record_voices(session_dir, identity=SYSAUDIO, run_id="run-1", spans={"A": [(_at(0), _at(5))]})
     voices.record_voices(session_dir, identity="mic-alice", run_id="run-2", spans={"A": [(_at(0), _at(9))]})
 
@@ -101,16 +94,14 @@ def test_recording_one_identity_leaves_a_siblings_run_id_untouched(session_dir: 
 
 
 # ---------------------------------------------------------------------------
-# Absorb — the one operation that ADDS audio to a session's time range, and so
-# the one that can invalidate a Voice. (Deleting audio cannot: a span only ever
-# attributes segments that fall inside it, so removing the segments leaves the
-# span inert rather than wrong.)
+# Absorb — the only operation that adds audio to a session's time range, so the
+# only one that can invalidate a Voice. Deleting audio cannot: it removes the
+# segments a span would have attributed, leaving the span inert.
 # ---------------------------------------------------------------------------
 
 
 def test_fold_keeps_both_sides_when_identities_are_disjoint() -> None:
-    """Two sessions that recorded different people merge cleanly — each
-    identity keeps its own Voices and its own `run_id`."""
+    """Different people on each side: both survive, each with its own run."""
     target = {"sysaudio": {"run_id": "run-t", "voices": {"A": {"spans": [{"start": "a", "end": "b"}]}}}}
     source = {"mic-bob": {"run_id": "run-s", "voices": {"A": {"spans": [{"start": "c", "end": "d"}]}}}}
 
@@ -123,11 +114,8 @@ def test_fold_keeps_both_sides_when_identities_are_disjoint() -> None:
 
 
 def test_fold_drops_both_sides_of_a_colliding_identity() -> None:
-    """`Speaker A` is SESSION-LOCAL. Two sessions can both hold `sysaudio`'s
-    Voice A for entirely different humans, and nothing in the file says so —
-    merging the labels would silently attribute one person's words to another.
-    So a collision drops the identity from BOTH sides and reports it, leaving
-    the tap unattributed until someone re-diarizes the merged session."""
+    """Each session's Voice `A` is a different human, so a collision drops the
+    identity from both sides rather than guessing."""
     target = {"sysaudio": {"run_id": "run-t", "voices": {"A": {"spans": [{"start": "a", "end": "b"}]}}}}
     source = {"sysaudio": {"run_id": "run-s", "voices": {"A": {"spans": [{"start": "c", "end": "d"}]}}}}
 

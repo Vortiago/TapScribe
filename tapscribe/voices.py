@@ -1,28 +1,19 @@
 """`session-voices.json` — ONE owner for the Voice sidecar's format and I/O.
 
-A [Voice](../CONTEXT.md#voice) is one speaker the diarizer distinguishes inside
-one multi-person tap, in one session. This module is the single authority over
-the file that records them: the shape gate, the read, the atomic write, and the
-prune that runs when the audio underneath a span goes away (ADR-0021).
-
-Machine-written, so it sits on the `session-roster.json` side of the line
-ADR-0009 draws — it holds no operator input. The operator's Voice→Person
-mapping lives on `session-meta.json`, which is a different file with a
-different writer, deliberately.
+Machine-written, so it sits on the `session-roster.json` side of ADR-0009's
+line. The operator's Voice→Person mapping lives on `session-meta.json`.
 
 Shape, keyed by FULL identity (never the truncated WAV slug):
 
     {"<identity>": {"run_id": "...", "voices": {"A": {"spans": [...]}}}}
 
-`run_id` is stamped **per identity**, not per file: re-diarizing one tap must
-not invalidate another's mappings, and absorbing two sessions has to be able to
-carry both sides' runs. Spans are ISO-8601 instants in ABSOLUTE session time,
-so the merge-time join is a plain interval comparison against a segment's
-`abs_start`/`abs_end` and never has to know which WAV a span came from.
+`run_id` is stamped per identity: re-diarizing one tap must not supersede a
+sibling's mappings. Spans are ISO-8601 instants in absolute session time, so
+the merge-time join is an interval comparison and never needs to know which WAV
+a span came from. ADR-0021.
 
-Seam convention: consumers reach the owner through the module attribute —
-`import tapscribe.voices as voices` — NOT via `from`-import, so monkeypatches
-in tests propagate.
+Reach this module by attribute — `import tapscribe.voices as voices` — so test
+monkeypatches propagate.
 """
 
 from __future__ import annotations
@@ -41,7 +32,6 @@ Span = dict[str, str]
 
 
 def _coerce_spans(value: Any) -> list[Span]:
-    """Keep only well-formed `{"start": str, "end": str}` pairs, in order."""
     if not isinstance(value, list):
         return []
     out: list[Span] = []
@@ -75,10 +65,8 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
 
 
 def coerce_voices(raw: Any) -> dict[str, dict[str, Any]]:
-    """Coerce a raw parsed mapping into `{full identity: entry}`, dropping
-    non-str identities and entries with no usable Voice. Non-dict top level →
-    `{}`. Shared by `read_voices` and the cached poll path so both produce the
-    identical shape."""
+    """Raw parsed mapping → `{full identity: entry}`, dropping junk. Shared by
+    `read_voices` and the cached poll path so both produce one shape."""
     if not isinstance(raw, dict):
         return {}
     out: dict[str, dict[str, Any]] = {}
@@ -90,24 +78,21 @@ def coerce_voices(raw: Any) -> dict[str, dict[str, Any]]:
 
 
 def read_voices(session_dir: Path) -> dict[str, dict[str, Any]]:
-    """The session's Voices as `{full identity: entry}`. Missing, torn, or
-    non-dict top level → `{}`: an undiarized session is the normal case, not an
-    error, and a bad file must never crash the poll."""
+    """`{full identity: entry}`. Missing, torn, or non-dict → `{}`: an
+    undiarized session is the normal case, and the poll must not crash on a bad
+    file. The sidecar is regenerable by re-running diarize."""
     path = session_dir / FILENAME_VOICES_JSON
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        # Missing file (OSError) or torn/garbage JSON (ValueError). The sidecar
-        # is regenerable — re-running diarize rebuilds it — so a read failure
-        # degrades to "no Voices" (every segment keeps its plain identity key)
-        # rather than propagating into the merge or the 500 ms poll.
+        # Missing (OSError) or torn (ValueError) — degrade to "no Voices", which
+        # leaves every segment on its plain identity key.
         return {}
     return coerce_voices(data)
 
 
 def write_voices(session_dir: Path, data: Mapping[str, Any]) -> None:
-    """Atomic whole-file write via the shared helper (tempfile + os.replace, no
-    temp droppings on success)."""
+    """Atomic whole-file write."""
     atomic_write_text(
         session_dir / FILENAME_VOICES_JSON,
         json.dumps(dict(data), indent=2, ensure_ascii=False),
@@ -117,22 +102,13 @@ def write_voices(session_dir: Path, data: Mapping[str, Any]) -> None:
 def fold_voices(
     target: Mapping[str, Any], source: Mapping[str, Any]
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
-    """Merge one session's Voices into another's for `absorb_session`.
+    """Merge two sessions' Voices for `absorb_session` → `(merged, collided)`.
 
-    Returns `(merged, collided)`. Disjoint identities are carried across
-    untouched — two sessions that recorded different people merge cleanly.
-
-    An identity present on BOTH sides is dropped from both and named in
-    `collided`. A Voice label is session-LOCAL: Monday's `sysaudio` Voice `A`
-    and Tuesday's are different humans, and nothing on disk distinguishes them,
-    so keeping either side would silently attribute one person's words to
-    another. Dropping leaves the tap unattributed — `Speaker A` again — which is
-    recoverable by re-diarizing the merged session; a wrong name is not.
-
-    Absorb is the one operation that ADDS audio to a session's time range, which
-    is what makes it the one that can invalidate a Voice. Deleting audio cannot:
-    a span only ever attributes segments falling inside it, so removing those
-    segments leaves the span inert rather than wrong.
+    An identity on both sides is dropped from both and named in `collided`: a
+    Voice label is session-local, so each side's `A` is a different human and
+    nothing on disk says so. Dropping leaves the tap unattributed, recoverable
+    by re-diarizing; keeping either side puts one person's name on another's
+    words.
     """
     collided = {i for i in target if i in source}
     merged = {i: dict(e) for i, e in target.items() if i not in collided}
@@ -147,12 +123,11 @@ def record_voices(
     run_id: str,
     spans: Mapping[str, Iterable[tuple[datetime, datetime]]],
 ) -> None:
-    """Replace ONE identity's Voices with the result of one diarization run.
+    """Replace ONE identity's Voices with one diarization run's result.
 
-    Read-modify-write with no `await` in between, mirroring
-    `roster.record_occurrence`. Scoped to the one identity so re-diarizing a
-    single tap leaves every sibling's `run_id` — and therefore every mapping
-    made against it — untouched.
+    Read-modify-write with no `await` between, like `roster.record_occurrence`.
+    Scoped to one identity so a sibling's `run_id` — and every mapping made
+    against it — survives.
     """
     current = read_voices(session_dir)
     voices = {
