@@ -42,6 +42,7 @@ from .session_paths import (
     FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
+    FILENAME_VOICES_JSON,
     SessionPathError,
     create_session_dir,
     resolve_session_dir,
@@ -58,6 +59,7 @@ from .text import (
     parse_wav_start,
     validate_config_text,
 )
+from .voices import coerce_voices as coerce_voices_sidecar
 from .wav_cache import cache_listing, cache_signature, read_primary_marker, read_primary_payload
 
 # Active-WebSockets and in-flight-job tracking now live on the Recorder
@@ -105,6 +107,21 @@ def _coerce_languages(value: Any) -> list[str]:
     return list(dict.fromkeys(v.strip().lower() for v in value if isinstance(v, str) and v.strip()))
 
 
+def _coerce_voices(value: Any) -> dict[str, dict[str, str]]:
+    """The operator's Voice→Person map (ADR-0021):
+    `identity#<voice> → {person_id, run_id}`. Junk entries drop."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for key, entry in value.items():
+        if not isinstance(key, str) or not key or not isinstance(entry, dict):
+            continue
+        person_id, run_id = entry.get("person_id"), entry.get("run_id")
+        if isinstance(person_id, str) and person_id:
+            out[key] = {"person_id": person_id, "run_id": run_id if isinstance(run_id, str) else ""}
+    return out
+
+
 def _coerce_session_meta(raw: Any) -> dict[str, Any]:
     """Coerce a raw session-meta dict into the standard shape: string-field
     projection, alias coercion, language normalisation. Shared by
@@ -118,6 +135,12 @@ def _coerce_session_meta(raw: Any) -> dict[str, Any]:
     langs = _coerce_languages(raw.get("languages"))
     if langs:
         out["languages"] = langs
+    # Must mirror `write_session_meta`'s allowlist: this projection is what the
+    # READ path emits, so widening only the writer stores a `voices` map that is
+    # then stripped on every read — silently, with nothing failing.
+    voices_map = _coerce_voices(raw.get("voices"))
+    if voices_map:
+        out["voices"] = voices_map
     return out
 
 
@@ -151,10 +174,13 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     losing the operator's label + aliases + overrides all at once)."""
     session_dir = create_session_dir(session)
     existing = read_session_meta(session)
-    allowed = {"aliases", "languages", *_META_STRING_FIELDS}
+    allowed = {"aliases", "languages", "voices", *_META_STRING_FIELDS}
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
     sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
+    voices_map = _coerce_voices(merged.get("voices"))
+    if voices_map:
+        sanitized["voices"] = voices_map
     # The per-meeting candidate-language override (ADR-0010) is a list, not a
     # string field. Validate every code against the catalog at WRITE time (like
     # the global config/languages writer) so a junk code can't reach the
@@ -731,6 +757,16 @@ def _describe_session(
         # (name_resolution.attach_people, called by /api/state). Empty {} for a
         # pre-feature session, which resolves purely via its retained aliases.
         "roster": _read_roster_cached(sd),
+        # Each identity's CURRENT diarization `run_id`. Name resolution compares
+        # it against the run each mapping was stamped with, so a mapping made
+        # before a re-diarize stops being applied (ADR-0021). Spans stay out of
+        # the poll — the pane fetches those lazily.
+        "voice_runs": {
+            identity: entry.get("run_id") or ""
+            for identity, entry in coerce_voices_sidecar(
+                _read_session_json_cached(sd / FILENAME_VOICES_JSON)
+            ).items()
+        },
         "stripped": stripped,
     }
 
@@ -769,6 +805,7 @@ def gather_sessions(
         visited_session_jsons.add(str(sd / DIRNAME_STRIPPED / FILENAME_STRIP_META_JSON))
         visited_session_jsons.add(str(sd / FILENAME_META_JSON))
         visited_session_jsons.add(str(sd / FILENAME_ROSTER_JSON))
+        visited_session_jsons.add(str(sd / FILENAME_VOICES_JSON))
         out.append(
             _describe_session(
                 sd,

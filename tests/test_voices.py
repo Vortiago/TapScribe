@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tapscribe import voices
+from tapscribe.sessions import read_session_meta, write_session_meta
 
 SYSAUDIO = "sysaudio-tray-9f2c1b"
 
@@ -123,3 +124,37 @@ def test_fold_drops_both_sides_of_a_colliding_identity() -> None:
 
     assert collided == {"sysaudio"}
     assert merged == {}, "a collided identity must survive on neither side"
+
+
+# ---------------------------------------------------------------------------
+# The operator Voice->Person map rides on session-meta.json, whose read and
+# write paths each carry their own allowlist. Both must know the key.
+# ---------------------------------------------------------------------------
+
+
+def test_voices_map_survives_a_session_meta_round_trip(recorder_under_test) -> None:
+    """Widening only the writer stores the map and strips it on every read —
+    no error, no failing test, feature silently dead."""
+    write_session_meta(
+        "sv1", {"voices": {"tray-sys#A": {"person_id": "p1", "run_id": "r1"}}, "label": "Standup"}
+    )
+
+    meta = read_session_meta("sv1")
+    assert meta["voices"] == {"tray-sys#A": {"person_id": "p1", "run_id": "r1"}}
+    assert meta["label"] == "Standup"
+
+
+def test_voices_map_drops_entries_without_a_person(recorder_under_test) -> None:
+    write_session_meta("sv2", {"voices": {"tray-sys#A": {"run_id": "r1"}, "": {"person_id": "p1"}}})
+
+    assert read_session_meta("sv2").get("voices", {}) == {}
+
+
+def test_editing_another_meta_field_preserves_the_voices_map(recorder_under_test) -> None:
+    """write_session_meta is merge-preserving; renaming must not drop the map."""
+    write_session_meta("sv3", {"voices": {"tray-sys#A": {"person_id": "p1", "run_id": "r1"}}})
+    write_session_meta("sv3", {"label": "Renamed"})
+
+    meta = read_session_meta("sv3")
+    assert meta["label"] == "Renamed"
+    assert meta["voices"] == {"tray-sys#A": {"person_id": "p1", "run_id": "r1"}}

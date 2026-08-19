@@ -230,3 +230,91 @@ def test_known_names_sorts_participants_for_reproducible_output() -> None:
         ]
     )
     assert known_names(roster=roster, aliases={}, registry=reg) == ["Ann A", "Zoe Z"]
+
+
+# ---- Voice keys must never reach the registry (ADR-0021) -------------------
+
+
+def test_backfill_skips_voice_keys() -> None:
+    """`attach_people_mutation` runs on every /api/state poll and PERSISTS an
+    auto-bound Person per unknown occurrence. A `slug#<voice>` key reaching the
+    backfill would mint a blank Person twice a second, forever."""
+    session = {
+        "roster": {"tray-sysaudio-001": _entry("System audio", slug="sysaudio")},
+        "speakers": ["sysaudio#A", "sysaudio#B"],
+    }
+
+    occ = session_occurrences(session)
+
+    assert set(occ) == {"tray-sysaudio-001"}
+
+
+def test_backfill_still_covers_a_rosterless_plain_slug() -> None:
+    """The guard must not disable ADR-0009's F1 backfill for old recordings."""
+    occ = session_occurrences({"roster": {}, "speakers": ["Alice_Andersen"]})
+
+    assert set(occ) == {"Alice_Andersen"}
+
+
+# ---- Voice -> Person resolution (ADR-0021) ---------------------------------
+
+_SYS = "tray-sysaudio-001"
+_ROSTER = {_SYS: _entry("System audio", slug="sysaudio")}
+_KEYS = ["sysaudio#A", "sysaudio#B"]
+
+
+def _resolve(*, aliases=None, voices=None, voice_runs=None, people=None):
+    return resolve_session_names(
+        roster=_ROSTER,
+        aliases=aliases or {},
+        registry=_reg(people or [{"id": "p1", "name": "Alice Andersen", "identities": []}]),
+        voices=voices or {},
+        voice_runs=voice_runs or {},
+        speaker_keys=_KEYS,
+    )
+
+
+def test_mapped_voice_resolves_to_its_person() -> None:
+    names = _resolve(voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}})
+
+    assert names["sysaudio#A"] == "Alice Andersen"
+
+
+def test_unmapped_voice_renders_a_readable_speaker_label() -> None:
+    """Not the raw `sysaudio#A` — the operator has to recognise the row to map it."""
+    assert _resolve()["sysaudio#B"] == "Speaker B"
+
+
+def test_override_on_a_voice_key_beats_the_person() -> None:
+    names = _resolve(
+        aliases={"sysaudio#A": "Chair"},
+        voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}},
+    )
+
+    assert names["sysaudio#A"] == "Chair"
+
+
+def test_override_on_the_bare_slug_does_not_fan_out_to_its_voices() -> None:
+    names = _resolve(aliases={"sysaudio": "The room"})
+
+    assert names["sysaudio"] == "The room"
+    assert names["sysaudio#A"] == "Speaker A"
+
+
+def test_a_mapping_stamped_with_a_superseded_run_is_not_applied() -> None:
+    """Carrying it over would put a named human on whatever the NEW run calls A."""
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "old"}},
+        voice_runs={_SYS: "new"},
+    )
+
+    assert names["sysaudio#A"] == "Speaker A"
+
+
+def test_a_mapping_matching_the_current_run_is_applied() -> None:
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}},
+        voice_runs={_SYS: "r1"},
+    )
+
+    assert names["sysaudio#A"] == "Alice Andersen"

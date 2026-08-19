@@ -24,6 +24,7 @@ Identity, resolves each session's names in place, and returns the view rows.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .people import PeopleRegistry
@@ -50,6 +51,11 @@ def session_occurrences(session: dict[str, Any]) -> dict[str, dict[str, Any]]:
     occ = dict(session.get("roster") or {})
     covered = {e.get("slug") for e in occ.values() if e.get("slug")}
     for slug in session.get("speakers") or []:
+        # A `slug#<voice>` key is session-local and never a registry member
+        # (ADR-0021). This runs on every /api/state poll and PERSISTS what it
+        # syncs, so backfilling one would mint a blank Person twice a second.
+        if "#" in (slug or ""):
+            continue
         if slug and slug not in covered and slug not in occ:
             occ[slug] = {"name": slug.replace("_", " "), "source": "recorded", "slug": slug, "wavs": []}
     return occ
@@ -60,10 +66,21 @@ def resolve_session_names(
     roster: dict[str, dict[str, Any]],
     aliases: dict[str, str],
     registry: PeopleRegistry,
+    voices: Mapping[str, Any] | None = None,
+    voice_runs: Mapping[str, str] | None = None,
+    speaker_keys: Iterable[str] = (),
 ) -> dict[str, str]:
     """`speaker-key (slug) → display name` for one session. See module docstring
     for the precedence. Keys that resolve to nothing are omitted so the frontend
-    falls back to the raw slug."""
+    falls back to the raw slug.
+
+    `slug#<voice>` keys resolve through the session's own `voices` map
+    (ADR-0021): `voices` is the operator mapping off `session-meta.json`
+    (`identity#<voice> → {person_id, run_id}`) and `voice_runs` is each
+    identity's CURRENT `run_id` from the sidecar. They must agree, or the
+    mapping predates a re-diarization and would put a named human on whatever
+    the new run happens to call `A`.
+    """
     slug_to_identity: dict[str, str] = {}
     default_by_slug: dict[str, str] = {}
     for identity, entry in roster.items():
@@ -87,6 +104,20 @@ def resolve_session_names(
         default = default_by_slug.get(key)
         if default:
             names[key] = default
+
+    # Voice keys are in NEITHER set above, so they need their own pass over the
+    # transcript's own speaker keys.
+    for key in speaker_keys:
+        if key in names or "#" not in key:
+            continue
+        # rsplit: a slug is `#`-free via `safe_name`, a raw identity is not.
+        slug, label = key.rsplit("#", 1)
+        identity = slug_to_identity.get(slug)
+        mapping = (voices or {}).get(f"{identity}#{label}") if identity else None
+        current = (voice_runs or {}).get(identity or "")
+        applies = bool(mapping) and (not current or mapping.get("run_id") == current)
+        person = registry.get(mapping.get("person_id")) if applies else None
+        names[key] = (person or {}).get("name") or f"Speaker {label}"
     return names
 
 
@@ -218,10 +249,14 @@ def attach_people_view(
     """Resolve session names, build people view rows, strip rosters.
     Pure (no I/O) — safe to run on a worker thread."""
     for s, occ in zip(sessions, occs, strict=True):
+        meta = s.get("session_meta") or {}
         s["names"] = resolve_session_names(
             roster=occ,
-            aliases=(s.get("session_meta") or {}).get("aliases") or {},
+            aliases=meta.get("aliases") or {},
             registry=registry,
+            voices=meta.get("voices") or {},
+            voice_runs=s.get("voice_runs") or {},
+            speaker_keys=s.get("speakers") or [],
         )
     people = build_people_view(sessions=sessions, registry=registry, live_identities=live_identities)
     for s in sessions:
