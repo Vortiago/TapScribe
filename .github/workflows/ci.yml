@@ -201,6 +201,12 @@ jobs:
   bridge-e2e:
     name: bridge popup E2E (playwright)
     runs-on: ubuntu-latest
+    # Chromium's download can WEDGE rather than fail, and it does so without
+    # GitHub reporting anything wrong. Unbounded, a browser job then holds a
+    # runner for the 6 hour default while the PR reads as 'still running', which
+    # is indistinguishable from slow. Twenty minutes is several times the honest
+    # runtime of the slowest of the three, so hitting this is a diagnosis.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -234,6 +240,8 @@ jobs:
   bridge-meeting-e2e:
     name: bridge E2E (extension + meeting)
     runs-on: ubuntu-latest
+    # Bounded against a wedged Chromium download, as bridge-e2e above.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -640,6 +648,8 @@ jobs:
   playwright:
     name: browser UI E2E (synthetic only)
     runs-on: ubuntu-latest
+    # Bounded against a wedged Chromium download, as bridge-e2e above.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
