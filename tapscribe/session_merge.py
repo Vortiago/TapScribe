@@ -24,11 +24,14 @@ from pathlib import Path
 from typing import Any
 
 import tapscribe.strip_meta as strip_meta
+import tapscribe.voices as voices
 
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
+from .roster import read_roster
 from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, SessionPathError, _safe_part
 from .text import parse_iso, parse_wav_start
+from .voice_join import attribute_segment, spans_by_slug
 from .wav_cache import read_cached
 
 # ---------------------------------------------------------------------------
@@ -323,6 +326,10 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     # value — the session-level field is just a display hint.
     source_language_label = ""
 
+    # Read once per merge, not per WAV. Empty for an undiarized session, which
+    # is the common case and leaves every segment on its plain slug.
+    voice_spans = spans_by_slug(voices.read_voices(selection.session_dir), read_roster(selection.session_dir))
+
     for wav in selection.wavs:
         cached = read_cached(wav)
         if cached is None:
@@ -338,22 +345,22 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
 
         wav_start = cached.wav_start or datetime.fromtimestamp(wav.stat().st_mtime, tz=UTC)
         speaker = cached.speaker_name or "<anon>"
+        spans = voice_spans.get(speaker, ())
 
         for seg in cached.result.segments:
-            abs_start = wav_start + timedelta(seconds=seg.start)
-            abs_end = wav_start + timedelta(seconds=seg.end)
             low_conf = seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONFIDENCE_LOGPROB_THRESHOLD
-            segments.append(
-                SessionSegment(
-                    abs_start=abs_start,
-                    abs_end=abs_end,
-                    speaker=speaker,
-                    text=seg.text,
-                    source_wav=wav.name,
-                    avg_logprob=seg.avg_logprob,
-                    low_confidence=low_conf,
+            for piece in attribute_segment(seg, wav_start=wav_start, slug=speaker, spans=spans):
+                segments.append(
+                    SessionSegment(
+                        abs_start=piece.abs_start,
+                        abs_end=piece.abs_end,
+                        speaker=piece.speaker,
+                        text=piece.text,
+                        source_wav=wav.name,
+                        avg_logprob=seg.avg_logprob,
+                        low_confidence=low_conf,
+                    )
                 )
-            )
         for sup in cached.result.suppressed_hallucinations:
             abs_start = wav_start + timedelta(seconds=sup.start)
             suppressed.append(
