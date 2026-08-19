@@ -43,8 +43,22 @@ public sealed unsafe partial class CoreAudioHal
 
             // The tap's own UID, read off the object rather than off the description: it is
             // what the aggregate lists the tap by, and CoreAudio is the one that assigned it.
-            string uid = ReadString(tapId, Selector.TapUid);
-            var tap = new ProcessTap(tapId, uid);
+            ProcessTap tap;
+            try
+            {
+                tap = new ProcessTap(tapId, ReadString(tapId, Selector.TapUid));
+            }
+            catch
+            {
+                // The tap EXISTS - only naming it failed. It is not on _taps yet, so Dispose
+                // would never reach it and no caller holds a handle to hand back: leaving it
+                // is a system-wide object stranded for the process lifetime. Status ignored
+                // for the reason every release path here gives, and the read's failure is what
+                // propagates.
+                AudioHardwareDestroyProcessTap(tapId);
+                throw;
+            }
+
             lock (_registrations)
                 _taps.Add(tap);
             return tap;
@@ -223,7 +237,11 @@ public sealed unsafe partial class CoreAudioHal
         try
         {
             IntPtr error = IntPtr.Zero;
-            uint format = 0;
+            // CFPropertyListFormat is CF_ENUM(CFIndex, …), so CoreFoundation writes EIGHT bytes
+            // through this pointer. A 32-bit local would have the other four land on whatever
+            // the frame put next to it - `error` among the candidates, which the check below
+            // then CFReleases. nint is the same CFIndex spelling every other one here uses.
+            nint format = 0;
             IntPtr parsed = CFPropertyListCreateWithData(IntPtr.Zero, data, 0, &format, &error);
             if (error != IntPtr.Zero)
                 CFRelease(error);
@@ -298,7 +316,12 @@ public sealed unsafe partial class CoreAudioHal
     [LibraryImport(CoreFoundationFramework)]
     private static partial IntPtr CFDataCreate(IntPtr allocator, [In] byte[] bytes, nint length);
 
+    // options is a CFOptionFlags (unsigned long) and format points at a CFPropertyListFormat,
+    // which is CF_ENUM(CFIndex, …): both are 64-bit on every Mac this ships to. Declaring
+    // either as uint is the same class of bug CFStringGetCString's bufferSize note describes -
+    // a narrow argument leaves the top half of the register undefined, and a narrow OUT pointer
+    // has the callee write past the caller's slot.
     [LibraryImport(CoreFoundationFramework)]
     private static partial IntPtr CFPropertyListCreateWithData(
-        IntPtr allocator, IntPtr data, uint options, uint* format, IntPtr* error);
+        IntPtr allocator, IntPtr data, nuint options, nint* format, IntPtr* error);
 }

@@ -117,8 +117,6 @@ internal sealed class MacOSAudioCapture : IAudioCapture
             $"the endpoint behind device {_deviceId} was invalidated", CoreAudioStatus.BadDevice));
     }
 
-    // kAudioHardwareBadDeviceError, the four-char code '!dev': the platform's own word for
-
     // Fires on a CoreAudio notification thread. The device's whole notification set reaches
     // one listener, so a volume tweak arrives here too; forward only true mute transitions,
     // or a volume slider churns the pipeline.
@@ -240,10 +238,14 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // there has nobody to act on it.
     private bool ReleaseIoProc()
     {
-        CoreAudioIoProcHandle? ioProc = _ioProc;
+        // Claimed atomically, because the tray thread reaches here through both Stop and
+        // Dispose and a plain read-then-null lets both claim the same registration: CoreAudio
+        // is then asked to stop and destroy one IOProc twice, and the second Stop announces an
+        // end of stream that already ended. The exchange is also the barrier OnDeviceGone's
+        // read needs, since that runs on a CoreAudio notification thread.
+        CoreAudioIoProcHandle? ioProc = Interlocked.Exchange(ref _ioProc, null);
         if (ioProc is null)
             return false;
-        _ioProc = null;
 
         try
         {

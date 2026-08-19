@@ -48,6 +48,12 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     /// <summary>When set, <see cref="CreateAggregateDevice"/> throws it.</summary>
     public Exception? CreateAggregateDeviceError { get; set; }
 
+    /// <summary>When set, <see cref="ReadTapFormat"/> throws it: the tap was built and then
+    /// refused to say what it carries, which is the one step of a rebind that runs AFTER both
+    /// system-wide objects exist and so is the one whose unwind has something to release.
+    /// </summary>
+    public Exception? ReadTapFormatError { get; set; }
+
     /// <summary>When set, <see cref="Dispose"/> throws it. The seam binds disposal to be
     /// throw-free all the way up, and only a HAL that misbehaves can show that the layer above
     /// holds that line.</summary>
@@ -277,7 +283,7 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     public CoreAudioStreamFormat ReadTapFormat(CoreAudioTapHandle tap)
     {
         LiveTap(tap, nameof(ReadTapFormat));
-        return TapFormat;
+        return ReadTapFormatError is null ? TapFormat : throw ReadTapFormatError;
     }
 
     public void DestroyProcessTap(CoreAudioTapHandle tap)

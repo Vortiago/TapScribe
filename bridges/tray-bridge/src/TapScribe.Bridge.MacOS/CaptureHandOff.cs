@@ -61,6 +61,7 @@ internal sealed class CaptureHandOff
     private readonly Action<ReadOnlyMemory<byte>> _deliver;
 
     private long _dropped;              // producer-only, diagnostic; spans generations
+    private long _handlerFaults;        // pump-only, diagnostic; spans generations
 
     // The running generation, or null while stopped. Volatile because the IO thread reads it
     // and Stop clears it; null is also what tells a callback arriving after teardown that
@@ -112,6 +113,12 @@ internal sealed class CaptureHandOff
     /// behind when the ring filled. Non-zero means the machine could not keep up; the count is
     /// what a later slice would surface rather than guess at.</summary>
     internal long DroppedBuffers => Interlocked.Read(ref _dropped);
+
+    /// <summary>How many buffers the handler threw on. The pump runs on a thread of its own,
+    /// so an escaping exception ends the PROCESS rather than the buffer it is about; this is
+    /// the trace containing it leaves, for the reason <c>CoreAudioHal.CallbackFaults</c>
+    /// exists.</summary>
+    internal long HandlerFaults => Interlocked.Read(ref _handlerFaults);
 
     /// <summary>Whether a pump thread is running right now. The generation is the pump's only
     /// root, so this is also the answer to "did a failed Start leave a thread parked on a
@@ -216,7 +223,27 @@ internal sealed class CaptureHandOff
             {
                 ring.Filled.Wait(stopping);
                 int slot = (int)(ring.Read % RingSlots);
-                _deliver(ring.Slots[slot].AsMemory(0, ring.Lengths[slot]));
+                try
+                {
+                    _deliver(ring.Slots[slot].AsMemory(0, ring.Lengths[slot]));
+                }
+                catch (Exception)
+                {
+                    // Contained rather than propagated, because this is a thread of this
+                    // class's own making: an exception leaving it takes the whole tray down,
+                    // and the pipeline behind DataAvailable can raise on one Utterance (a tap
+                    // that will not open) without the meeting being over. The Windows sibling
+                    // never faces this - NAudio owns its record thread and reports a throwing
+                    // handler as RecordingStopped - so containing it is what makes one buffer
+                    // cost the same on both backends. Counted for the reason CoreAudioHal
+                    // counts its trampoline faults: a handler that throws on EVERY buffer is
+                    // otherwise indistinguishable from a device that never fires.
+                    Interlocked.Increment(ref _handlerFaults);
+                }
+
+                // Advanced whether or not the handler returned normally: the slot is finished
+                // with either way, and never returning it would have the producer read the
+                // ring as permanently full and drop every buffer after it.
                 Volatile.Write(ref ring.Read, ring.Read + 1);
             }
         }

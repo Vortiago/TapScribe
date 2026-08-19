@@ -57,7 +57,20 @@ internal sealed class NotifyIconIndicator : ITrayIndicator
     {
         ArgumentNullException.ThrowIfNull(view);
         _icon.Icon = _icons[view.Icon];
-        _icon.Text = view.Tooltip.Length <= TooltipLimit ? view.Tooltip : view.Tooltip[..TooltipLimit];
+        _icon.Text = Fit(view.Tooltip);
+    }
+
+    // The tooltip, cut to what the OS will take. One short again when the cut lands between
+    // the halves of a surrogate pair: a status line carries device names and error text, an
+    // emoji or a rarer CJK glyph in one is two chars, and half of one renders as the
+    // replacement box rather than as a truncation. The macOS shell's MenuNotice makes the same
+    // allowance against its own budget.
+    private static string Fit(string tooltip)
+    {
+        if (tooltip.Length <= TooltipLimit)
+            return tooltip;
+        int keep = char.IsHighSurrogate(tooltip[TooltipLimit - 1]) ? TooltipLimit - 1 : TooltipLimit;
+        return tooltip[..keep];
     }
 
     public void Warn(string title, string message) =>

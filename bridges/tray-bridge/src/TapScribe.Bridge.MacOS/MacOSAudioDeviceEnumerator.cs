@@ -48,15 +48,21 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
     // Inputs are real endpoints and are listed as they come. Output scopes are collapsed into
     // the single synthetic row above: they exist here only to answer "does this Mac play audio
     // at all", since a tap over no output is nothing.
-    private IEnumerable<CoreAudioDevice> Inputs() =>
-        _hal.ListDevices().Where(d => d.Flow == DeviceFlow.Capture);
+    //
+    // Both read ONE walk rather than taking one each. A walk is four property reads per device
+    // in the real HAL, so asking twice for two facts about the same list doubled the native
+    // cost of every List() and every Open() for an answer that cannot differ between them.
+    private static IEnumerable<CoreAudioDevice> Inputs(IReadOnlyList<CoreAudioDevice> devices) =>
+        devices.Where(d => d.Flow == DeviceFlow.Capture);
 
-    private bool HasOutput() => _hal.ListDevices().Any(d => d.Flow == DeviceFlow.Render);
+    private static bool HasOutput(IReadOnlyList<CoreAudioDevice> devices) =>
+        devices.Any(d => d.Flow == DeviceFlow.Render);
 
     public IReadOnlyList<CaptureDevice> List()
     {
-        List<CaptureDevice> rows = [.. Inputs().Select(Portable)];
-        if (HasOutput())
+        IReadOnlyList<CoreAudioDevice> devices = _hal.ListDevices();
+        List<CaptureDevice> rows = [.. Inputs(devices).Select(Portable)];
+        if (HasOutput(devices))
             rows.Add(new CaptureDevice(SystemAudioId, SystemAudioName, DeviceFlow.Render, IsDefault: true));
         return rows;
     }
@@ -83,21 +89,23 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
     {
         ArgumentNullException.ThrowIfNull(device);
 
+        // Re-listed rather than remembered from the last List(): the picker's rows can be
+        // minutes old, and the object id behind a UID changes on a replug, so a cached map
+        // would open the wrong device or a dead one.
+        IReadOnlyList<CoreAudioDevice> devices = _hal.ListDevices();
+
         // System audio first, because it names no endpoint: the tap binds to whichever output
         // is default and follows it, so there is no object id to resolve. Guarded on the Mac
         // still having an output, so a machine with none refuses rather than opening a tap over
         // nothing.
         if (device.Flow == DeviceFlow.Render && string.Equals(device.Id, SystemAudioId, StringComparison.Ordinal))
         {
-            return HasOutput()
+            return HasOutput(devices)
                 ? new MacOSSystemAudioCapture(_hal)
                 : throw new ArgumentException("this Mac has no audio output to tap", nameof(device));
         }
 
-        // Re-listed rather than remembered from the last List(): the picker's rows can be
-        // minutes old, and the object id behind a UID changes on a replug, so a cached map
-        // would open the wrong device or a dead one.
-        CoreAudioDevice? found = Inputs().FirstOrDefault(
+        CoreAudioDevice? found = Inputs(devices).FirstOrDefault(
             d => d.Flow == device.Flow && string.Equals(d.Uid, device.Id, StringComparison.Ordinal));
 
         // ArgumentException, the seam's clause for "the id names no active endpoint of the

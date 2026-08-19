@@ -401,6 +401,29 @@ public class MacOSSystemAudioCaptureTests
     }
 
     [Fact]
+    public void SystemAudio_WhenTheRebuiltTapWillNotSayWhatItCarries_HoldsNothing()
+    {
+        // The one rebind failure that happens AFTER both system-wide objects exist: the tap and
+        // its aggregate were built, and reading the tap's format is what refused. Neither has an
+        // owner at that moment - the old binding is already gone and the new one is not
+        // published - so an unwind that releases only what it can SEE strands a process tap and
+        // a Mac-wide aggregate device for the life of the process, once per output switch.
+        FakeCoreAudioHal hal = WithSpeakers();
+        using var capture = new MacOSSystemAudioCapture(hal);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        hal.ReadTapFormatError = new CoreAudioException("reading the format of the tap", -66748);
+        hal.SetDefaultOutput(Devices.Output(71, "External Headphones"));
+
+        Assert.IsAssignableFrom<ExternalException>(Assert.Single(failures));
+        Assert.Equal(0, hal.RunningIoProcs);
+        Assert.Equal(0, hal.LiveTaps);
+        Assert.Equal(0, hal.LiveAggregates);
+    }
+
+    [Fact]
     public void SystemAudio_DisposedAfterARefusedRebind_StillReleasesCleanly()
     {
         // A capture that lost its binding is still an object its owner will Dispose, from a

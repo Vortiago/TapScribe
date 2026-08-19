@@ -402,6 +402,21 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         try
         {
             next = Bind();
+        }
+        catch (Exception ex) when (ex is ExternalException or NotSupportedException)
+        {
+            // The endpoint moved somewhere this Mac will not tap. Bind hands back a whole
+            // binding or releases what it made, so there is nothing held here.
+            return ex;
+        }
+
+        // Everything from here owns `next`, published or not: a tap is a system-wide object
+        // and an aggregate device is registered with the whole Mac, so a throw that left it
+        // unreleased would strand both for the process lifetime with nothing able to name
+        // them. Same shape as the constructor's own release-and-rethrow around this exact
+        // pair of calls.
+        try
+        {
             AudioFormat arriving = CoreAudioFormat.Classify(_hal.ReadTapFormat(next.Tap));
             // Format is read once, at Open, and the Resampler downstream was built from it and
             // cannot be told otherwise mid-stream. An endpoint whose tap reads differently
@@ -426,15 +441,13 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         }
         catch (Exception ex) when (ex is ExternalException or NotSupportedException)
         {
-            // The endpoint moved somewhere this Mac will not tap, or refused the IOProc on it.
-            // There is nothing left to record the far side with, so the pipeline is told rather
-            // than left with a capture that reports fine and delivers nothing. Whatever the
-            // failed attempt DID make is released by whoever threw, so nothing is held here.
-            if (_bound is { } half)
-            {
-                Unbind(half);
-                _bound = null;
-            }
+            // The new tap's format could not be read or is unreadable, or the endpoint refused
+            // the IOProc on it. There is nothing left to record the far side with, so the
+            // pipeline is told rather than left with a capture that reports fine and delivers
+            // nothing. Unbind covers both halves: a binding already published (StartIo threw)
+            // and one that never was (the format read threw), since it stops whatever is
+            // running and then releases the pair either way.
+            Unbind(next);
             return ex;
         }
 
@@ -472,8 +485,4 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         Failed?.Invoke(this, new CoreAudioException(
             "the aggregate device carrying the system-audio tap was invalidated", CoreAudioStatus.BadDevice));
     }
-
-
-    // kAudioHardwareBadDeviceError, the four-char code '!dev': the platform's own word for
-    // "the device you are asking about is not there". Both failures this class raises on its
 }

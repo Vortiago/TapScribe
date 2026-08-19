@@ -428,12 +428,21 @@ public sealed class BridgeRuntime
         {
             _deps.SettingsStore.Save(updated);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // The settings directory could not be written (permissions, full disk, a file
-            // standing where the directory should be). Keep the new settings for this session
+            // The settings could not be persisted: the directory would not take them
+            // (permissions, full disk, a file standing where the directory should be), or the
+            // platform refused the tap token at rest. Keep the new settings for this session
             // and tell the operator they will not persist: throwing their edit away because
-            // the disk is unavailable would be the worse failure.
+            // the disk or the keychain is unavailable would be the worse failure.
+            //
+            // As wide as BridgeSettingsStore's own token READ, and for the same reason: a Save
+            // reaches a platform secret API (DPAPI raises CryptographicException, a Keychain
+            // binding raises whatever it chooses, the next platform raises something nobody has
+            // listed), and this runs from a menu click, where an escaping exception surfaces as
+            // an unhandled-exception dialog on Windows and takes the process on macOS.
+            // OutOfMemoryException is excluded because the process is doomed regardless and
+            // swallowing it would only hide that.
             _view.ShowNotice("Settings not saved", ex.Message, NoticeKind.Warning);
         }
 
@@ -733,12 +742,14 @@ public sealed class BridgeRuntime
         // view for as long as the process lingered.
         CancellationTokenSource? flow;
         Task? start;
+        Task? end;
         lock (_gate)
         {
             flow = _flowCancellation;
             _flowCancellation = null;
             _quitting = true; // a start in flight must tear itself down, not publish
             start = _startTask;
+            end = _endTask;
         }
         flow?.Cancel();
 
@@ -783,6 +794,18 @@ public sealed class BridgeRuntime
                     meeting.Orchestrator.DisposeAsync().AsTask(),
                     Task.Delay(_budgets.QuitTeardownCap))
                 .ConfigureAwait(false);
+
+        // An End already in flight took the meeting before this method could, so TakeMeeting
+        // above saw nothing and there was nothing here to tear down, but its drain is still
+        // running, and Shutdown below ends the shell's loop and, on both platforms, the
+        // process. Cut short there, the taps never flush and the Recorder strips and
+        // transcribes truncated WAVs: exactly what EndMeetingAsync's barrier exists to
+        // prevent. The drain does not take the flow's token, so the Cancel above only
+        // shortened the poll behind it. Raced against the same cap for the same reason as the
+        // teardown above: overrunning it is an outcome, not an error, and a tray that refuses
+        // to exit is worse than a dropped tail.
+        if (end is { IsCompleted: false })
+            await Task.WhenAny(end, Task.Delay(_budgets.QuitTeardownCap)).ConfigureAwait(false);
 
         // Marshalled like every other view touch. Both awaits above are ConfigureAwait(false),
         // so by here we are on a thread-pool thread: calling straight through would break the
