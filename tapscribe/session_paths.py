@@ -182,6 +182,7 @@ FILENAME_TRANSCRIPT_TXT = "session-transcript.txt"
 FILENAME_SUMMARY_JSON = "session-summary.json"
 FILENAME_META_JSON = "session-meta.json"
 FILENAME_ROSTER_JSON = "session-roster.json"
+FILENAME_VOICES_JSON = "session-voices.json"
 FILENAME_STRIP_META_JSON = "strip-meta.json"
 DIRNAME_STRIPPED = "stripped"
 
