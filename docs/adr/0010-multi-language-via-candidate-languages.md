@@ -70,7 +70,8 @@ than live for this feature.
 - **Per-speaker manual language pins + a single-/multi-person code branch** —
   more UI and code for marginal gain; per-identity aggregation (vote a
   [single-person tap](../../CONTEXT.md#single-person-tap--multi-person-tap)'s
-  regions to one language) lands with diarization (#78).
+  regions to one language) needs only the single/multi declaration
+  (ADR-0021), not diarization itself.
 - **LID-first, single decode** — cheapest, but the LID is exactly the
   confusable da/no decision, and a wrong call leaves no second transcript.
 - **Operator picks a model directly** — forces the capability matrix on the
@@ -80,8 +81,9 @@ than live for this feature.
 
 - The cover runs every model on every region, wasting a decode on monolingual
   taps. Accepted: batch latency is the cheap axis; skipping the ensemble once
-  a single-person tap has voted itself to one language arrives with
-  diarization + per-identity aggregation.
+  a single-person tap has voted itself to one language rides on the
+  per-identity single/multi declaration (ADR-0021), separable from
+  diarization.
 - The candidate set's operator default lives in `config/languages.txt`
   (catalog-validated, same pattern as `batch-model.txt`), with a per-meeting
   override on session-meta; `batch-model.txt` stays the generalist slot.

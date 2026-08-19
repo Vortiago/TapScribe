@@ -676,6 +676,11 @@ A property of each `/tap`: does the audio on this WS carry **one** human or
 the ad-hoc "mic vs. system" / "loopback" framing. Say "multi-person tap," never
 "loopback."
 
+The Bridge **declares** it per tap on the wire; the operator can override it,
+durably per identity. Precedence mirrors name resolution: **operator override ›
+bridge declaration › default single**. It is what gates diarization — only a
+multi-person tap is split into [Voices](#voice) (ADR-0021).
+
 - **Single-person tap** — one human for the whole tap (a SpatialChat
   per-participant tap; the tray Bridge's microphone = the operator). Its
   [candidate languages](#candidate-languages--language-pin) can be narrowed to a
@@ -684,19 +689,30 @@ the ad-hoc "mic vs. system" / "loopback" framing. Say "multi-person tap," never
   Bridge's system-audio capture — the "them" side of a meeting). No single
   language to pin, so each region resolves language on its own (constrained
   auto-detect, or the generalist + Norwegian-specialist selector), and *who*
-  said each part is unknown until **diarization (#78)** lands. The multi-person
-  tap is the single locus where both per-region language selection AND future
-  diarization live; they compose — diarization splits a region by speaker, and
-  language resolves per resulting sub-segment.
+  said each part is unknown until it is diarized into [Voices](#voice). The
+  multi-person tap is the single locus where both per-region language selection
+  AND diarization live; they compose — diarization splits a region by speaker,
+  and language resolves per resulting sub-segment.
 
 This **nuances** the "One `/tap` WS = one speaker at a time" invariant: what a
 WS guarantees is one **attribution identity** (one caption bucket), not
-literally one human. A multi-person tap is one identity that diarization will
-later split into humans; until then its identity (e.g. the tray's
+literally one human. A multi-person tap is one identity that diarization
+splits into humans; undiarized, its identity (e.g. the tray's
 system-audio identity) is
 the coarse "me vs. them" bucket CaptureOrchestrator already draws.
 
-## Person · Identity · Roster · People Registry
+## Voice
+
+One speaker the diarizer distinguishes within one [multi-person
+tap](#single-person-tap--multi-person-tap), in one session.
+*Avoid*: cluster, speaker label, diarized speaker.
+
+A Voice is **session-local** — Monday's `Speaker A` is not Tuesday's — so it is
+never a [Person](#person--identity--roster--people-registry) registry key.
+The operator maps a Voice to a Person on the Transcript stage, and that mapping
+is a `person_id` pointer in the session's own `session-voices.json`, alongside
+the Voice's speech spans in absolute session time. An unmapped Voice renders
+from its label and binds to nobody. ADR-0021.
 
 The canonical, cross-session naming model (ADR-0009). Distinct concepts that
 are easy to conflate:
@@ -715,11 +731,13 @@ are easy to conflate:
   resolution, so the duplicate-identity check and the taps that get opened agree
   on which devices are one speaker.
 - **Occurrence** — one appearance of an Identity in one session (live or
-  recorded). Its **speaker key** is `identity` today; once diarization (#78)
-  splits one Identity into several voices it becomes `identity#cluster`. Auto
-  recognition only joins stable Identities across sessions — diarized clusters
-  are session-local (Monday's `speaker_0` ≠ Tuesday's) and need manual merge.
-  This leaves the [one-`/tap`-WS-=-one-speaker invariant](#invariants) intact.
+  recorded). Its **speaker key** is the `identity`, and stays that way when the
+  tap is diarized: a [Voice](#voice) is session-local, so `identity#<voice>`
+  would not be unique across sessions and is never a registry key. The merged
+  transcript keys a diarized segment `slug#<voice>` and resolves it through the
+  session's `session-voices.json` pointer instead (ADR-0021, amending ADR-0009
+  §4). Auto recognition only joins stable Identities across sessions. This
+  leaves the [one-`/tap`-WS-=-one-speaker invariant](#invariants) intact.
 - **Roster** — a per-session, machine-written sidecar (`session-roster.json`)
   mapping `full identity → { name, source, wav refs }`, written by the tap path
   at open/close. Separate from the operator-editable `session_meta.json` and
