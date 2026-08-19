@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Diarization is a session-scoped stage, joined to the transcript at merge
@@ -24,9 +24,16 @@ as written. What carries per identity is the single/multi declaration below.
 
 ## The artifact, and why it is session-scoped
 
-`session-voices.json` — one machine-written sidecar per session (the
+`session-voices.json` — one **machine-written** sidecar per session (the
 `session-roster.json` family), holding per identity a set of Voices, each with
-speech spans in **absolute session time** and a nullable `person` pointer.
+speech spans in **absolute session time**, under the `run_id` of the diarization
+that produced them.
+
+It holds no operator input. ADR-0009 already draws that line — the Roster is
+machine-written and "separate from the operator-editable `session_meta.json`" —
+and diarization is exactly where ignoring it would hurt: re-diarizing with a
+better engine rewrites every span and label, so a mapping stored alongside them
+is clobbered or, worse, silently re-pointed at a different human.
 
 Clustering runs **over all of an identity's audio in the session at once**, not
 per WAV. A level-gated tap emits one WAV per utterance — hundreds in a meeting —
@@ -47,10 +54,14 @@ Tuesday's Voice A are different humans, so a global membership entry would
 silently claim every future session's Voice A for whoever was mapped first.
 
 So the registry's atom stays the plain **Identity**, and the session-local fact
-lives in the session's own artifact: `session-voices.json` carries a
-`person_id` pointer per Voice. Names still live only in `people.json` (ADR-0009
-§5 intact) — the sidecar holds a pointer, never a name. Deleting a session takes
-its mappings with it, and this is where a voiceprint would later sit.
+lives in the operator-editable half: a `voices` map on `session-meta.json`,
+`identity#<voice> → { person_id, run_id }`. Names still live only in
+`people.json` (ADR-0009 §5 intact) — the map holds a pointer, never a name.
+
+The `run_id` is what makes re-diarization safe: a mapping stamped with a
+superseded run is **not applied**, and surfaces as needing re-mapping. Silently
+carrying it over would attribute Monday's Kari to whoever the new engine happens
+to label `A`.
 
 An unmapped Voice therefore **does not auto-bind** to a Person. ADR-0009 §3's
 auto-bind earns its keep because an Identity is stable across sessions and worth
@@ -60,9 +71,25 @@ speaker `bridges/README.md` already warns about for `__probe__`, once per voice
 per meeting. An unmapped Voice renders as `Speaker A` straight from the sidecar.
 
 Resolution for a diarized tap: transcript key `slug#<voice>` → identity (the
-Roster's existing slug join) → the sidecar's `person` → Person name, falling
-back to the Voice label. `/api/people` gains no verb; mapping is a PUT on the
-session's voices.
+Roster's existing slug join) → the meta map's `person_id` → Person name, falling
+back to the Voice label.
+
+### A Person can exist without an Identity
+
+Mapping a Voice by **typing a name** creates a Person that owns no Identity —
+only a voice pointer. Two things in `people.py` assume that cannot happen:
+
+- `_coerce_people` **drops** any row whose `identities` list is empty
+  (people.py:91-92), so a typed-name Person would be written and then vanish on
+  the next load. That drop is correct today — an identity-less Person is
+  unreachable — but reachability now also comes from a session's `voices` map,
+  so the rule must widen rather than stay.
+- There is no **create** verb: `POST` does not exist in ADR-0009's API, because
+  creation was always auto-bind's job. Rather than add a bare create, the
+  voice-mapping PUT accepts a name and creates the Person **as part of the
+  mapping** — so a Person still never exists unattached, and there is no orphan
+  window. Session maintenance prunes a Person left with neither an Identity nor
+  a live voice pointer.
 
 ## Mapping happens on the Transcript stage
 
@@ -142,15 +169,18 @@ segmentation + embedding pair fits that mould; pyannote's torch stack does not.
 - `name_resolution.session_occurrences`' slug backfill must skip `slug#<voice>`
   keys, or every Voice in a merged transcript's `speakers` backfills a junk
   Person — the thing this ADR just spent a section avoiding.
+- A per-session **Override** (`session_meta.aliases`) matches the transcript key
+  **exactly**: `sysaudio#A` overrides that one Voice, `sysaudio` overrides only
+  the undiarized key. An override must never fan out from a base slug to its
+  Voices — they are different humans. ADR-0009's ladder (Override › Person ›
+  default) is otherwise unchanged.
 - Pipeline order is strip → **diarize** → transcribe → summarize; diarize is a
   no-op for a session with no multi-person tap.
 - Live captions stay undiarized, consistent with ADR-0010's live exclusion.
 
-## Open — needs a call before this leaves `proposed`
+## Left to implementation
 
-1. **Voice vs. cluster.** Adopting Voice amends ADR-0009 §4 (already amended
-   above on a harder point) and CONTEXT.md:718.
-2. **Engine package**, and whether its models are vendorable or must be fetched.
-   Wants a spike against the wheel matrix and the model licences.
-3. **Where the per-identity single/multi override persists.** It needs a durable
-   store keyed on the full identity; `TapSettings` is in-memory by design.
+The **engine package** (wheel matrix, whether its models are vendorable or must
+be fetched — wants a spike) and the **durable store for the per-identity
+single/multi override** (`TapSettings` is in-memory by design). Neither changes
+a decision above.

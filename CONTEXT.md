@@ -709,10 +709,11 @@ tap](#single-person-tap--multi-person-tap), in one session.
 
 A Voice is **session-local** — Monday's `Speaker A` is not Tuesday's — so it is
 never a [Person](#person--identity--roster--people-registry) registry key.
-The operator maps a Voice to a Person on the Transcript stage, and that mapping
-is a `person_id` pointer in the session's own `session-voices.json`, alongside
-the Voice's speech spans in absolute session time. An unmapped Voice renders
-from its label and binds to nobody. ADR-0021.
+Its speech spans live in absolute session time in the machine-written
+`session-voices.json`; the operator maps it to a Person on the Transcript stage,
+and that mapping is a `person_id` pointer in the operator-editable
+`session-meta.json`, stamped with the diarization run it belongs to. An unmapped
+Voice renders from its label and binds to nobody. ADR-0021.
 
 The canonical, cross-session naming model (ADR-0009). Distinct concepts that
 are easy to conflate:
@@ -735,9 +736,9 @@ are easy to conflate:
   tap is diarized: a [Voice](#voice) is session-local, so `identity#<voice>`
   would not be unique across sessions and is never a registry key. The merged
   transcript keys a diarized segment `slug#<voice>` and resolves it through the
-  session's `session-voices.json` pointer instead (ADR-0021, amending ADR-0009
-  §4). Auto recognition only joins stable Identities across sessions. This
-  leaves the [one-`/tap`-WS-=-one-speaker invariant](#invariants) intact.
+  session's own `voices` pointer instead (ADR-0021, amending ADR-0009 §4). Auto
+  recognition only joins stable Identities across sessions. This leaves the
+  [one-`/tap`-WS-=-one-speaker invariant](#invariants) intact.
 - **Roster** — a per-session, machine-written sidecar (`session-roster.json`)
   mapping `full identity → { name, source, wav refs }`, written by the tap path
   at open/close. Separate from the operator-editable `session_meta.json` and
