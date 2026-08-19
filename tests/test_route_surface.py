@@ -114,6 +114,7 @@ _GOLDEN = frozenset(
         ("PUT", "/api/summarize/config", "api_summarize_config_put"),
         ("GET", "/api/summarize/models", "api_summarize_models"),
         ("PUT", "/api/tap-settings", "api_tap_settings_put"),
+        ("PUT", "/api/tap-mode", "api_tap_mode_put"),
         ("GET", "/api/tap-token", "api_tap_token"),
         ("POST", "/api/tap/new-session", "api_tap_new_session"),
         ("GET", "/api/tap/sessions/{session}/pipeline", "api_tap_pipeline_poll"),

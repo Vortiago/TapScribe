@@ -1239,3 +1239,51 @@ def test_the_operator_override_beats_the_declaration_at_tap_open(client, recorde
     entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=single")
 
     assert entry["mode"] == "multi"
+
+
+# ---------------------------------------------------------------------------
+# The per-identity single/multi override (ADR-0021)
+#
+# Strict where the wire is lenient: a bridge predating the feature legitimately
+# sends nothing, but an operator typing a bad value deserves a 400 rather than
+# a silent fall-through to single.
+
+
+def test_the_tap_mode_route_stores_an_override(client, recorder_with_fake_wlk) -> None:
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["mode"] == "multi"
+    assert tap_mode.overrides()["sysaudio"] == "multi"
+
+
+def test_the_tap_mode_route_clears_an_override_with_null(client, recorder_with_fake_wlk) -> None:
+    client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": None})
+
+    assert r.status_code == 200, r.text
+    assert tap_mode.overrides() == {}
+
+
+def test_the_tap_mode_route_rejects_a_value_that_is_not_a_mode(client, recorder_with_fake_wlk) -> None:
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "sideways"})
+
+    assert r.status_code == 400
+    assert tap_mode.overrides() == {}
+
+
+def test_the_tap_mode_route_requires_an_identity(client, recorder_with_fake_wlk) -> None:
+    assert client.put("/api/tap-mode", json={"mode": "multi"}).status_code == 400
+
+
+def test_the_effective_mode_shows_on_api_state(client, recorder_with_fake_wlk) -> None:
+    """The overlay reports what is effective NOW, so flipping a tap is visible
+    even though it only binds on the next WS."""
+    frame = b"\x10\x00" * 320
+    client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    with client.websocket_connect("/tap?identity=sysaudio&name=System+audio") as ws:
+        ws.send_bytes(frame)
+        rows = client.get("/api/state").json()["active"]
+        assert [row["mode"] for row in rows if row["identity"] == "sysaudio"] == ["multi"]

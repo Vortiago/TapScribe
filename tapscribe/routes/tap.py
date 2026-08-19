@@ -7,6 +7,7 @@
   POST    /api/tap/sessions/{session}/pipeline    trigger the pipeline (tap bearer)
   GET     /api/tap/sessions/{session}/pipeline    poll the pipeline (tap bearer)
   PUT     /api/tap-settings                       per-identity record/live preferences
+  PUT     /api/tap-mode                           per-identity single/multi-person override
   POST    /api/recording/toggle                   the global recording pause
 
 The two auth schemes sit side by side on purpose (ADR-0018). Routes under
@@ -282,6 +283,27 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
         "record": setting.record,
         "live": setting.live,
     }
+
+
+@router.put("/api/tap-mode")
+async def api_tap_mode_put(req: Request):
+    """Override one identity's single/multi-person mode, or clear it. Body:
+    `{"identity": "...", "mode": "single" | "multi" | null}`.
+
+    Strict, unlike the wire: the `/tap` param is lenient because a bridge
+    predating the feature sends nothing, but an operator typing a bad value
+    deserves a 400 rather than a silent fall-through to `single`. Durable and
+    per identity, so it outlives a restart; takes effect on the NEXT /tap WS.
+    """
+    body = await json_body(req)
+    identity = body.get("identity")
+    if not isinstance(identity, str) or not identity:
+        raise HTTPException(400, "identity required")
+    mode = body.get("mode")
+    if mode is not None and not tap_mode.is_mode(mode):
+        raise HTTPException(400, f"mode must be single, multi, or null (got {mode!r})")
+    tap_mode.set_override(identity, mode)
+    return {"ok": True, "identity": identity, "mode": mode}
 
 
 @router.post("/api/recording/toggle")

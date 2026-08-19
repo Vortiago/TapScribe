@@ -25,6 +25,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from .tap_mode import TAP_MODE_SINGLE
+
 # ---------------------------------------------------------------------------
 # ActiveStreams — /record WebSocket connections currently writing WAVs
 # ---------------------------------------------------------------------------
@@ -70,6 +72,9 @@ class ActiveStream:
     # Session this tap was writing to at open time. None for test fixtures
     # that don't simulate a real tap; production TapFanOut always sets it.
     session: str | None = None
+    # Single- vs multi-person, resolved at WS open (ADR-0021). `active_rows`
+    # overlays the CURRENTLY effective value, like record/live.
+    mode: str = TAP_MODE_SINGLE
 
 
 _ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
