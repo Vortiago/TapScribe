@@ -59,7 +59,12 @@ download the browser can fetch directly.
 - Cutting a release is a documented ritual (see `RELEASING.md`), never
   automatic.
 - Neither tray build is signed, and each OS objects in its own way, so the card
-  documents both: SmartScreen on Windows, and on macOS a quarantine flag that
-  makes a double-click fail as though the download were corrupt (right-click ->
-  Open, or clear the flag). Code signing, notarisation, installers and
-  auto-update all stay out of scope.
+  documents both. Windows shows SmartScreen, which is a click-through. macOS is
+  harder: the bundle carries only an ad-hoc signature, so a quarantined copy is
+  reported as DAMAGED with Move to Trash as the only offer, and right-click ->
+  Open does not bypass that (it bypasses the milder unidentified-developer
+  prompt, which needs a real signature). Clearing the quarantine attribute is
+  the only route, so the card gives the command rather than a gesture.
+  Notarisation is what would remove the step, and it needs a paid Apple
+  Developer account; that, code signing, installers and auto-update all stay
+  out of scope for v1.
