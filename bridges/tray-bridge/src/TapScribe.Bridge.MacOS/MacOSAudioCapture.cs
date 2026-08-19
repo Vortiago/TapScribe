@@ -28,8 +28,9 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // and the gate reads it on another.
     private volatile bool _muted;
 
-    // The running IOProc, or null while stopped.
-    private CoreAudioIoProcHandle? _ioProc;
+    // The IOProc and the ordering rules around it, shared with the system-audio capture.
+    private readonly IoProcRun _run;
+
 
     // Everything behind DataAvailable runs off CoreAudio's realtime IO thread, which has a
     // buffer-period deadline this class may not spend. CaptureHandOff owns that rule for
@@ -67,6 +68,7 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         _deviceId = deviceId;
         _handOff = new CaptureHandOff(
             $"tapscribe-capture-{deviceId}", audio => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(audio)));
+        _run = new IoProcRun(hal, _handOff);
         // Classify FIRST: an unreadable layout throws, and doing it before anything is
         // subscribed means the throw leaves this instance owning nothing to release. Same
         // ordering, for the same reason, as the Windows sibling's ctor.
@@ -106,10 +108,10 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         // Only while a stream is actually running. The seam says Failed means capture ended
         // unexpectedly MID-STREAM, and a device that leaves while nothing is capturing has
         // ended no stream; the next Start fails on its own, which is where that belongs.
-        if (_ioProc is null)
+        if (!_run.Running)
             return;
 
-        // Deliberately not a ReleaseIoProc: the endpoint is gone, so stopping and destroying
+        // Deliberately releases nothing: the endpoint is gone, so stopping and destroying
         // its IOProc is a call CoreAudio will refuse, and the owner's response to this signal
         // is to tear the pipeline down through Dispose anyway - which is where that release
         // happens, once, on the thread that owns it.
@@ -141,59 +143,11 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     {
         // InvalidOperationException, not the native failure type: a double start is a bug in
         // the caller rather than a dead endpoint, so the orchestrator's skip-and-carry-on
-        // filter must not swallow it. Guarding here also keeps a second registration from
-        // overwriting the handle below and leaking the first.
-        if (_ioProc is not null)
+        // filter must not swallow it.
+        if (_run.Running)
             throw new InvalidOperationException($"device {_deviceId} is already capturing");
 
-        // Everything the IO thread will touch, allocated before it can run, and the pump
-        // started BEFORE the IOProc so the first buffer has somewhere to go.
-        _handOff.Start(Format);
-
-        // BOTH native calls inside the guard, because the pump is already running: a
-        // CreateIoProc that refuses leaves a thread parked on a semaphore nothing will ever
-        // release, holding its ring, and Dispose cannot collect it either since it releases
-        // through _ioProc, which a failed Start never assigns. The tray retries a device that
-        // refused, so that is a thread and a ring per attempt for the process lifetime.
-        CoreAudioIoProcHandle? ioProc = null;
-        try
-        {
-            ioProc = _hal.CreateIoProc(_deviceId, _handOff.Write);
-            _hal.StartIo(ioProc);
-        }
-        catch
-        {
-            try
-            {
-                // Registered but not running. Unregister before letting the failure out: the
-                // tray retries a device that refused, so keeping it would leak one
-                // registration per attempt for the process lifetime. Assigning _ioProc only
-                // AFTER the start succeeds is the other half - a failed Start leaves this
-                // instance holding nothing, so a later Stop has nothing to release and
-                // announces nothing.
-                if (ioProc is not null)
-                    _hal.DestroyIoProc(ioProc);
-            }
-            catch (CoreAudioException)
-            {
-                // The device that just refused to start is refusing this too, which is what a
-                // half-gone endpoint does. Swallowed so it cannot mask the start failure the
-                // caller filters on; what is lost is one registration on a device already
-                // failing, which goes when the device does.
-            }
-            finally
-            {
-                // In a finally, and after the IOProc is down rather than before, for the two
-                // reasons ReleaseIoProc gives: a live IOProc must never outlive the pump it
-                // publishes into, and the pump must come down on EVERY way out of here or the
-                // thread and its ring outlive the capture nobody will ever hold.
-                _handOff.Stop();
-            }
-
-            throw;
-        }
-
-        _ioProc = ioProc;
+        _run.Start(_deviceId, Format);
     }
 
     public void Stop()
@@ -201,7 +155,7 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         // Announced only when this call is what ENDED a running stream. A blind Stop from a
         // teardown path, or a second one, released nothing, so there is no end of stream to
         // report and a Failed here would have the pipeline announce a device that never ran.
-        if (ReleaseIoProc())
+        if (_run.Stop())
             Failed?.Invoke(this, null);
     }
 
@@ -209,7 +163,9 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     {
         try
         {
-            ReleaseIoProc();
+            // Abandon rather than Stop: this path has no other owner and is contract-bound not
+            // to throw, so it takes the release that carries on regardless.
+            _run.Abandon();
         }
         catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
         {
@@ -231,45 +187,4 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         GC.SuppressFinalize(this);
     }
 
-    // Stop and unregister the IOProc, in that order: CoreAudio refuses to destroy a running
-    // one. Returns whether there was one to release, which is what tells a clean stop apart
-    // from a stop that stopped nothing. Deliberately does NOT raise Failed: Dispose releases
-    // through here too, and by then the owner has let go of the events, so a signal raised
-    // there has nobody to act on it.
-    private bool ReleaseIoProc()
-    {
-        // Claimed atomically, because the tray thread reaches here through both Stop and
-        // Dispose and a plain read-then-null lets both claim the same registration: CoreAudio
-        // is then asked to stop and destroy one IOProc twice, and the second Stop announces an
-        // end of stream that already ended. The exchange is also the barrier OnDeviceGone's
-        // read needs, since that runs on a CoreAudio notification thread.
-        CoreAudioIoProcHandle? ioProc = Interlocked.Exchange(ref _ioProc, null);
-        if (ioProc is null)
-            return false;
-
-        try
-        {
-            _hal.StopIo(ioProc);
-        }
-        finally
-        {
-            try
-            {
-                _hal.DestroyIoProc(ioProc);
-            }
-            catch (CoreAudioException)
-            {
-                // The endpoint is gone, so there is no registration left for CoreAudio to
-                // remove and it says so. Swallowed rather than propagated because it would
-                // mask whatever StopIo reported, which is the failure the caller can actually
-                // act on; nothing is lost, since a registration on a dead device dies with it.
-            }
-            // After the IOProc is down, never before: the producer writes to the ring and
-            // releases the semaphore, so tearing this down first would leave a live IO thread
-            // publishing into a pump that has gone.
-            _handOff.Stop();
-        }
-
-        return true;
-    }
 }

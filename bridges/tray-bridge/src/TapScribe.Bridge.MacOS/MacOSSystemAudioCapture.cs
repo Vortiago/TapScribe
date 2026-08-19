@@ -42,6 +42,9 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     // buffer-period deadline this class may not spend. CaptureHandOff owns that rule.
     private readonly CaptureHandOff _handOff;
 
+    // The IOProc and the ordering rules around it, shared with the microphone capture.
+    private readonly IoProcRun _run;
+
     // Fires when the Mac starts playing through a different endpoint, which is the one thing
     // that can invalidate this capture's whole binding.
     private readonly IDisposable _defaultOutputListener;
@@ -53,7 +56,6 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     private readonly Lock _binding = new();
 
     private Bound? _bound;
-    private bool _streaming;
     private bool _disposed;
 
     /// <summary>The tap, its aggregate device and the listener watching that device leave: one
@@ -73,7 +75,6 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     {
         /// <summary>The running IOProc, or null while stopped. Mutable because it is the one
         /// part of a binding that comes and goes with Start/Stop.</summary>
-        internal CoreAudioIoProcHandle? IoProc { get; set; }
     }
 
     public AudioFormat Format { get; }
@@ -109,6 +110,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         _hal = hal;
         _handOff = new CaptureHandOff(
             "tapscribe-system-audio", audio => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(audio)));
+        _run = new IoProcRun(hal, _handOff);
 
         Bound bound = Bind();
         try
@@ -158,15 +160,14 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // refused: it already reported the platform failure through Failed, and reporting
             // it a second time as a start failure would have the runtime classify one dead tap
             // as two.
-            if (_streaming)
+            if (_run.Running)
                 throw new InvalidOperationException("system audio is already being captured");
             if (_bound is not { } bound)
                 throw new InvalidOperationException("system audio has no tap left to start");
 
-            StartIo(bound);
+            _run.Start(bound.Aggregate.DeviceId, Format);
             // Set only once the IOProc is actually running, so a refused Start leaves this
             // capture stopped and retryable rather than claiming a stream it does not have.
-            _streaming = true;
         }
     }
 
@@ -174,7 +175,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     {
         bool ended;
         lock (_binding)
-            ended = StopIo();
+            ended = _run.Stop();
 
         // Announced outside the lock, and only when this call is what ENDED a running stream:
         // a blind Stop from a teardown path released nothing, so there is no end of stream to
@@ -193,7 +194,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
 
             // Deliberately raises nothing: by the time an owner releases the capture it has
             // let go of the events, so a signal here has nobody to act on it.
-            StopIo();
+            _run.Abandon();
             if (_bound is { } bound)
                 Release(bound);
             _bound = null;
@@ -284,66 +285,6 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     // ---- the IOProc ------------------------------------------------------------------------
 
     // Caller holds the lock.
-    private void StartIo(Bound bound)
-    {
-        // Everything the IO thread will touch, allocated before it can run, and the pump
-        // started BEFORE the IOProc so the first buffer has somewhere to go.
-        _handOff.Start(Format);
-        CoreAudioIoProcHandle? ioProc = null;
-        try
-        {
-            ioProc = _hal.CreateIoProc(bound.Aggregate.DeviceId, _handOff.Write);
-            _hal.StartIo(ioProc);
-        }
-        catch
-        {
-            // Registered but not running: the tray retries a device that refused, so keeping it
-            // would leak one registration per attempt for the process lifetime.
-            if (ioProc is not null)
-                SwallowRelease(() => _hal.DestroyIoProc(ioProc));
-            // In a finally's place, and AFTER the IOProc is down rather than before: a live
-            // IOProc must never outlive the pump it publishes into, and the pump must come
-            // down on every way out of here or the thread and its ring outlive the capture.
-            _handOff.Stop();
-            throw;
-        }
-
-        bound.IoProc = ioProc;
-    }
-
-    // Stop and unregister the IOProc, in that order: CoreAudio refuses to destroy a running
-    // one. Returns whether there was one to release, which is what tells a clean stop apart
-    // from a stop that stopped nothing. Caller holds the lock.
-    private bool StopIo()
-    {
-        _streaming = false;
-        if (_bound?.IoProc is not { } ioProc)
-            return false;
-        _bound.IoProc = null;
-
-        try
-        {
-            _hal.StopIo(ioProc);
-        }
-        catch (CoreAudioException)
-        {
-            // The aggregate was invalidated while the meeting ran, so there is nothing left to
-            // stop and CoreAudio says so. Swallowed rather than propagated because every caller
-            // reaches this from a teardown or a rebind that has to carry on regardless; what is
-            // lost is a report about a device that is already gone.
-        }
-        finally
-        {
-            SwallowRelease(() => _hal.DestroyIoProc(ioProc));
-            // After the IOProc is down, never before: the producer writes to the ring and
-            // releases the semaphore, so tearing this down first would leave a live IO thread
-            // publishing into a pump that has gone.
-            _handOff.Stop();
-        }
-
-        return true;
-    }
-
     // ---- what the notifications mean ---------------------------------------------------------
 
     // Fires on a CoreAudio notification thread when the Mac starts playing through a different
@@ -391,7 +332,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         if (string.Equals(moved, current.OutputDeviceUid, StringComparison.Ordinal))
             return null;
 
-        bool wasStreaming = _streaming;
+        bool wasStreaming = _run.Running;
         // The old binding goes FIRST, before anything of the new one exists. A tap is a
         // system-wide object and an aggregate device is registered with the whole Mac, so
         // building the replacement while the old pair is still live would leave two of each on
@@ -435,16 +376,15 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             _bound = next;
             if (wasStreaming)
             {
-                StartIo(next);
-                _streaming = true;
-            }
+                _run.Start(next.Aggregate.DeviceId, Format);
+                }
         }
         catch (Exception ex) when (ex is ExternalException or NotSupportedException)
         {
             // The new tap's format could not be read or is unreadable, or the endpoint refused
             // the IOProc on it. There is nothing left to record the far side with, so the
             // pipeline is told rather than left with a capture that reports fine and delivers
-            // nothing. Unbind covers both halves: a binding already published (StartIo threw)
+            // nothing. Unbind covers both halves: a binding already published (the start threw)
             // and one that never was (the format read threw), since it stops whatever is
             // running and then releases the pair either way.
             Unbind(next);
@@ -458,7 +398,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     // nothing. Caller holds the lock.
     private void Unbind(Bound bound)
     {
-        StopIo();
+        _run.Abandon();
         Release(bound);
         _bound = null;
     }
@@ -475,9 +415,9 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // Only while a stream was actually running. The seam says Failed means capture
             // ended unexpectedly MID-STREAM, and a binding that was never started has ended
             // nothing; the next Start fails on its own, which is where that belongs.
-            if (!_streaming)
+            if (!_run.Running)
                 return;
-            StopIo();
+            _run.Abandon();
         }
 
         // Outside the lock: the pipeline's handler is the one that tears the whole session
