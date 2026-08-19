@@ -708,12 +708,10 @@ tap](#single-person-tap--multi-person-tap), in one session.
 *Avoid*: cluster, speaker label, diarized speaker.
 
 A Voice is **session-local** — Monday's `Speaker A` is not Tuesday's — so it is
-never a [Person](#person--identity--roster--people-registry) registry key.
-Its speech spans live in absolute session time in the machine-written
-`session-voices.json`; the operator maps it to a Person on the Transcript stage,
-and that mapping is a `person_id` pointer in the operator-editable
-`session-meta.json`, stamped with the diarization run it belongs to. An unmapped
-Voice renders from its label and binds to nobody. ADR-0021.
+never a [Person](#person--identity--roster--people-registry) registry key. Its
+speech spans live in `session-voices.json`; the operator maps it to a Person on
+the Transcript stage, and that mapping is a run-stamped `person_id` pointer in
+`session-meta.json`. An unmapped Voice binds to nobody. ADR-0021.
 
 The canonical, cross-session naming model (ADR-0009). Distinct concepts that
 are easy to conflate:

@@ -32,13 +32,11 @@ A **canonical, global Person model**, recognised by the bridge-stamped
 3. **Auto-bind.** Every new Identity binds to its own Person on first
    sighting, default-named from the bridge-sent display `name`. The registry
    is never empty; the work is *rename + merge*, not *create from scratch*.
-4. **Identity is the only membership atom.** A diarized tap does not change
-   that: a Voice is session-local, so `identity#<voice>` is not unique across
-   sessions and never enters the registry — a diarized segment resolves
-   through the session's own `session-voices.json` pointer (ADR-0021, which
-   amends this clause's original `identity#cluster` plan). Auto recognition
-   joins stable Identities only. The one-`/tap`-WS-=-one-speaker invariant is
-   unchanged.
+4. **Identity is the only membership atom.** A Voice is session-local, so
+   `identity#<voice>` is not unique across sessions and never enters the
+   registry; a diarized segment resolves through the session's own `voices`
+   map (ADR-0021). Auto recognition joins stable Identities only. The
+   one-`/tap`-WS-=-one-speaker invariant is unchanged.
 5. **Single source of truth (server-resolved).** Names live in one global
    `people.json`; the **server** resolves `identity → Person → name` when
    building `/api/state` and the merged transcript, shipping the name-map
