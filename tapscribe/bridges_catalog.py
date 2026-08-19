@@ -28,10 +28,11 @@ class BridgeArtifact(NamedTuple):
     filename: str  # the release asset name (HARD contract with release.yml)
 
 
-# The two distributable Bridges. Unversioned, stable filenames so
+# The distributable Bridges. Unversioned, stable filenames so
 # `releases/latest/download/<filename>` always resolves to the newest tagged
 # release's asset (D7 in the plan). Order is the card's display order.
 BRIDGE_ARTIFACTS: tuple[BridgeArtifact, ...] = (
     BridgeArtifact(id="spacialchat", filename="tapscribe-spacialchat-bridge.zip"),
     BridgeArtifact(id="windows-tray", filename="TapScribe.TrayBridge-win-x64.zip"),
+    BridgeArtifact(id="macos-tray", filename="TapScribe.TrayBridge-osx-arm64.zip"),
 )

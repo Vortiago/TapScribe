@@ -46,12 +46,12 @@ def client(recorder_under_test):
     app.dependency_overrides.clear()
 
 
-def test_api_bridges_returns_two_items_with_expected_shape(client):
+def test_api_bridges_returns_three_items_with_expected_shape(client):
     r = client.get("/api/bridges")
     assert r.status_code == 200
     body = r.json()
     assert isinstance(body, list)
-    assert len(body) == 2
+    assert len(body) == 3
     for row in body:
         assert set(row) == {"id", "filename", "download_url"}
         assert all(isinstance(row[k], str) and row[k] for k in row)
@@ -71,6 +71,12 @@ def test_api_bridges_download_urls_point_at_latest_release_assets(client):
     assert (
         by_id["windows-tray"]["download_url"]
         == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-win-x64.zip"
+    )
+
+    assert by_id["macos-tray"]["filename"] == "TapScribe.TrayBridge-osx-arm64.zip"
+    assert (
+        by_id["macos-tray"]["download_url"]
+        == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-osx-arm64.zip"
     )
 
 
