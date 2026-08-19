@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import tapscribe.strip_meta as strip_meta
+import tapscribe.voices as voices
 
 from . import config, tap_registry
 from .roster import read_roster
@@ -405,6 +406,22 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             json.dumps(tgt_roster, indent=2, ensure_ascii=False),
         )
 
+    # Carry the source's Voices across (ADR-0021). Absorb is the ONE operation
+    # that adds audio to a session's time range, which makes it the one that can
+    # invalidate a Voice — and it is destructive, so a `session-voices.json` left
+    # behind is rmtree'd while the WAVs it describes live on in the target.
+    #
+    # Disjoint identities merge cleanly. A collision cannot: a Voice label is
+    # session-LOCAL, so the target's Voice `A` for an identity and the source's
+    # are different humans with nothing on disk to distinguish them. `fold_voices`
+    # drops those from both sides rather than attributing one person's words to
+    # another; re-diarizing the merged session recovers them.
+    src_voices = voices.read_voices(source_dir)
+    tgt_voices = voices.read_voices(target_dir)
+    voices_merged, collided = voices.fold_voices(tgt_voices, src_voices)
+    if src_voices or collided:
+        voices.write_voices(target_dir, voices_merged)
+
     # The target's merged transcript predates the just-moved WAVs, so it's
     # now stale. Drop it — both the JSON and the plain-text rendering
     # `batch_transcribe` writes beside it — so the operator's next "transcribe
@@ -448,6 +465,11 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         "stripped_moved": len(moved_stripped),
         "aliases_added": aliases_added,
         "roster_merged": roster_merged,
+        # Identities whose Voices were dropped from BOTH sides as unmergeable.
+        # Surfaced so the operator knows that tap now renders `Speaker A` again
+        # and needs re-diarizing — silently losing the mapping would look like
+        # the feature failing rather than refusing to guess.
+        "voices_collided": sorted(collided),
         "transcript_invalidated": transcript_invalidated,
         "summary_invalidated": summary_invalidated,
     }
