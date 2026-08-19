@@ -201,10 +201,15 @@ public class MacOSSystemAudioCaptureTests
         // the fake refuses to model one that could: a capture whose IOProc outlived its owner
         // is a meeting still streaming PCM after the operator ended it.
         FakeCoreAudioHal hal = WithSpeakers();
-        var capture = new MacOSSystemAudioCapture(hal);
-        capture.Start();
-        uint aggregate = capture.AggregateDeviceId;
-        capture.Dispose();
+        uint aggregate;
+        // Scoped rather than method-scoped, because disposing IS the act here and the assertion
+        // below has to run AFTER it. A bare `using var` would release at the end of the method,
+        // i.e. after the push had already been attempted against a live handle.
+        {
+            using var capture = new MacOSSystemAudioCapture(hal);
+            capture.Start();
+            aggregate = capture.AggregateDeviceId;
+        }
 
         Assert.Throws<InvalidOperationException>(() => hal.PushAudio(aggregate, [1, 2, 3, 4]));
     }
