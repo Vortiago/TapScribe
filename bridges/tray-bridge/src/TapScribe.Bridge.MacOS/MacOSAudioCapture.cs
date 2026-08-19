@@ -161,25 +161,11 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Dispose()
     {
-        try
-        {
-            // Abandon rather than Stop: this path has no other owner and is contract-bound not
-            // to throw, so it takes the release that carries on regardless.
-            _run.Abandon();
-        }
-        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
-        {
-            // ExternalException: the endpoint was invalidated while capture ran (unplugged,
-            // disabled, default switched), so CoreAudio refuses to stop what is already gone.
-            // InvalidOperationException: the HAL was released first, so it no longer holds the
-            // registration this is handing back - an ownership order the seam forbids, but one
-            // a teardown path must survive rather than diagnose. Swallowed because Dispose is
-            // contract-bound not to throw: every teardown path reaches it from a finally or
-            // from the tray's bounded Quit, and a throw here strands the device AND skips the
-            // listener detach below for the process lifetime. What is lost is the report,
-            // which Stop would have propagated to an owner that could still act on it. The
-            // filter is the same one TapSession.DisposeAsync applies to Stop.
-        }
+        // Abandon rather than Stop: this path has no other owner and Dispose is contract-bound
+        // not to throw, so it takes the release that carries on regardless. Bare rather than
+        // wrapped, because that guarantee is IoProcRun's to make and it makes it; a catch here
+        // would be the second owner of a policy the extraction exists to give one.
+        _run.Abandon();
 
         // Detaching is what stops a late notification landing mid-teardown.
         _muteListener?.Dispose();

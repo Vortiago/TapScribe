@@ -64,7 +64,13 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
             throw;
         }
 
-        Volatile.Write(ref _ioProc, ioProc);
+        // CompareExchange rather than a plain write: a second Start over a live run would
+        // strand the first registration, its pinned callback, its pump thread and its ring for
+        // the process lifetime, with a live IO thread still writing into the orphaned one. Both
+        // callers guard before reaching here, so a non-null return is a bug in this class's
+        // owner rather than a state a device can produce.
+        if (Interlocked.CompareExchange(ref _ioProc, ioProc, null) is not null)
+            throw new InvalidOperationException("an IOProc is already running for this capture");
     }
 
     /// <summary>Stop and unregister the IOProc, reporting what CoreAudio said about the stop.
@@ -91,10 +97,13 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
 
         try
         {
-            if (propagate)
-                hal.StopIo(ioProc);
-            else
-                Swallow(() => hal.StopIo(ioProc));
+            hal.StopIo(ioProc);
+        }
+        catch (Exception ex) when (!propagate && ex is ExternalException or InvalidOperationException)
+        {
+            // Abandon's half of the split: the caller has no other owner and must carry on, so
+            // the report goes nowhere. Stop's half lets the same failure out, because
+            // IAudioCapture.Stop declares it.
         }
         finally
         {
@@ -108,16 +117,21 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
         return true;
     }
 
-    // The two shapes a release can meet: CoreAudio refusing an object it no longer has, and the
-    // HAL refusing a handle it no longer holds because its own Dispose swept it first. Neither
-    // leaves anything to do, and both reach here from paths bound not to throw.
+    // The two shapes a release can meet: the platform refusing an object it no longer has, and
+    // the HAL refusing a handle it no longer holds because its own Dispose swept it first.
+    // Neither leaves anything to do, and both reach here from paths bound not to throw.
+    //
+    // Filtered on ExternalException rather than CoreAudioException, which is the type the SEAM
+    // declares: CoreAudioException exists only because ExternalException is what IAudioCapture
+    // names. Filtering at the concrete type would let a different ExternalException out of a
+    // method documented never to throw, and Abandon's callers reach it from Dispose.
     private static void Swallow(Action release)
     {
         try
         {
             release();
         }
-        catch (Exception ex) when (ex is CoreAudioException or InvalidOperationException)
+        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
         {
         }
     }

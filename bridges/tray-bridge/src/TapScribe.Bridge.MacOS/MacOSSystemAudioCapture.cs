@@ -71,11 +71,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         CoreAudioTapHandle Tap,
         CoreAudioAggregateHandle Aggregate,
         string OutputDeviceUid,
-        IDisposable Gone)
-    {
-        /// <summary>The running IOProc, or null while stopped. Mutable because it is the one
-        /// part of a binding that comes and goes with Start/Stop.</summary>
-    }
+        IDisposable Gone);
 
     public AudioFormat Format { get; }
 
@@ -165,9 +161,9 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             if (_bound is not { } bound)
                 throw new InvalidOperationException("system audio has no tap left to start");
 
+            // A refused Start leaves the run holding nothing, so this capture stays stopped
+            // and retryable rather than claiming a stream it does not have.
             _run.Start(bound.Aggregate.DeviceId, Format);
-            // Set only once the IOProc is actually running, so a refused Start leaves this
-            // capture stopped and retryable rather than claiming a stream it does not have.
         }
     }
 
@@ -282,9 +278,6 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         }
     }
 
-    // ---- the IOProc ------------------------------------------------------------------------
-
-    // Caller holds the lock.
     // ---- what the notifications mean ---------------------------------------------------------
 
     // Fires on a CoreAudio notification thread when the Mac starts playing through a different
@@ -377,7 +370,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             if (wasStreaming)
             {
                 _run.Start(next.Aggregate.DeviceId, Format);
-                }
+            }
         }
         catch (Exception ex) when (ex is ExternalException or NotSupportedException)
         {

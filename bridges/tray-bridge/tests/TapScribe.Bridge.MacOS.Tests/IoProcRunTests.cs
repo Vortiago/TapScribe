@@ -9,9 +9,12 @@ namespace TapScribe.Bridge.MacOS.Tests;
 /// previously written twice and had drifted. A rule with one owner and no test is no better
 /// than a rule with two owners: the extraction only helps if breaking it goes red.
 ///
-/// Driven through a purpose-built double rather than <c>FakeCoreAudioHal</c>, because these
-/// assertions are about WHEN a call happens relative to the pump, which the shared fake has no
-/// way to observe.
+/// Driven through <c>FakeCoreAudioHal</c> wrapped in a recorder, not a double of its own: these
+/// assertions are about WHEN a call arrives relative to the pump, which the shared fake has no
+/// way to observe, but every rule it DOES enforce still applies here. A standalone double would
+/// have to restate handle validation to keep them, and the one written first did not: its
+/// destroy was a no-op, so nothing here could observe a registration that CoreAudio refused to
+/// destroy.
 /// </summary>
 public class IoProcRunTests
 {
@@ -90,6 +93,24 @@ public class IoProcRunTests
     }
 
     [Fact]
+    public void Release_LeavesNoRegistrationBehind()
+    {
+        // Asserted on the registration rather than on the call order, because a leak is what an
+        // inverted teardown actually produces: CoreAudio refuses to destroy an IOProc that was
+        // not stopped first, and Release swallows that refusal (correctly, since a destroy can
+        // also fail because the object is already gone). The refusal is therefore invisible and
+        // only the surviving registration says the order was wrong.
+        var handOff = new CaptureHandOff("test-pump", _ => { });
+        var hal = new OrderingHal(handOff);
+        var run = new IoProcRun(hal, handOff);
+        run.Start(deviceId: 41, Stereo);
+
+        run.Stop();
+
+        Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
     public void Release_ClaimsTheHandleOnce_SoTwoCallersCannotBothStopIt()
     {
         // Stop and Dispose both reach the release, and a read-then-null lets both claim one
@@ -105,13 +126,19 @@ public class IoProcRunTests
         Assert.Equal(1, hal.Stops);
     }
 
-    // Records what the pump was doing at the moment each call arrived, which is the only way to
-    // assert an ordering from outside.
+    // FakeCoreAudioHal with the one thing it cannot report added: what the pump was doing at the
+    // moment each call arrived, which is the only way to assert an ordering from outside. Every
+    // call forwards, so the fake's handle validation still governs, including the refusal to
+    // destroy an IOProc that was not stopped first.
     private sealed class OrderingHal(CaptureHandOff handOff) : ICoreAudioHal
     {
-        internal CoreAudioException? CreateError { get; init; }
+        private readonly FakeCoreAudioHal _inner = new();
 
-        internal CoreAudioException? StopError { get; init; }
+        internal Exception? CreateError { get => _inner.CreateIoProcError; init => _inner.CreateIoProcError = value; }
+
+        internal Exception? StopError { get => _inner.StopIoError; init => _inner.StopIoError = value; }
+
+        internal int LiveIoProcs => _inner.LiveIoProcs;
 
         internal bool PumpingWhenCreated { get; private set; }
 
@@ -122,48 +149,44 @@ public class IoProcRunTests
         public CoreAudioIoProcHandle CreateIoProc(uint deviceId, CoreAudioIoCallback callback)
         {
             PumpingWhenCreated = handOff.IsPumping;
-            return CreateError is null ? new Handle() : throw CreateError;
+            return _inner.CreateIoProc(deviceId, callback);
         }
 
-        public void StartIo(CoreAudioIoProcHandle ioProc) => PumpingWhenStarted = handOff.IsPumping;
+        public void StartIo(CoreAudioIoProcHandle ioProc)
+        {
+            PumpingWhenStarted = handOff.IsPumping;
+            _inner.StartIo(ioProc);
+        }
 
         public void StopIo(CoreAudioIoProcHandle ioProc)
         {
             Stops++;
-            if (StopError is not null)
-                throw StopError;
+            _inner.StopIo(ioProc);
         }
 
-        public void DestroyIoProc(CoreAudioIoProcHandle ioProc)
-        {
-        }
+        public void DestroyIoProc(CoreAudioIoProcHandle ioProc) => _inner.DestroyIoProc(ioProc);
 
-        // Not reached: this double exists for the IOProc lifecycle alone, and a call landing
-        // here means a test is asking IoProcRun to do something outside its job.
-        public IReadOnlyList<CoreAudioDevice> ListDevices() => throw new NotSupportedException();
+        public IReadOnlyList<CoreAudioDevice> ListDevices() => _inner.ListDevices();
 
-        public CoreAudioStreamFormat ReadStreamFormat(uint deviceId) => throw new NotSupportedException();
+        public CoreAudioStreamFormat ReadStreamFormat(uint deviceId) => _inner.ReadStreamFormat(deviceId);
 
-        public bool? TryReadMute(uint deviceId) => throw new NotSupportedException();
+        public bool? TryReadMute(uint deviceId) => _inner.TryReadMute(deviceId);
 
         public IDisposable AddPropertyListener(uint objectId, CoreAudioPropertyKind kind, Action handler) =>
-            throw new NotSupportedException();
+            _inner.AddPropertyListener(objectId, kind, handler);
 
-        public CoreAudioTapHandle CreateProcessTap() => throw new NotSupportedException();
+        public CoreAudioTapHandle CreateProcessTap() => _inner.CreateProcessTap();
 
-        public void DestroyProcessTap(CoreAudioTapHandle tap) => throw new NotSupportedException();
+        public void DestroyProcessTap(CoreAudioTapHandle tap) => _inner.DestroyProcessTap(tap);
 
-        public CoreAudioStreamFormat ReadTapFormat(CoreAudioTapHandle tap) => throw new NotSupportedException();
+        public CoreAudioStreamFormat ReadTapFormat(CoreAudioTapHandle tap) => _inner.ReadTapFormat(tap);
 
         public CoreAudioAggregateHandle CreateAggregateDevice(string outputDeviceUid, CoreAudioTapHandle tap) =>
-            throw new NotSupportedException();
+            _inner.CreateAggregateDevice(outputDeviceUid, tap);
 
-        public void DestroyAggregateDevice(CoreAudioAggregateHandle aggregate) => throw new NotSupportedException();
+        public void DestroyAggregateDevice(CoreAudioAggregateHandle aggregate) =>
+            _inner.DestroyAggregateDevice(aggregate);
 
-        public void Dispose()
-        {
-        }
-
-        private sealed class Handle : CoreAudioIoProcHandle;
+        public void Dispose() => _inner.Dispose();
     }
 }

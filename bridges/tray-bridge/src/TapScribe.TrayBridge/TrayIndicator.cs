@@ -60,18 +60,10 @@ internal sealed class NotifyIconIndicator : ITrayIndicator
         _icon.Text = Fit(view.Tooltip);
     }
 
-    // The tooltip, cut to what the OS will take. One short again when the cut lands between
-    // the halves of a surrogate pair: a status line carries device names and error text, an
-    // emoji or a rarer CJK glyph in one is two chars, and half of one renders as the
-    // replacement box rather than as a truncation. The macOS shell's MenuNotice makes the same
-    // allowance against its own budget.
-    private static string Fit(string tooltip)
-    {
-        if (tooltip.Length <= TooltipLimit)
-            return tooltip;
-        int keep = char.IsHighSurrogate(tooltip[TooltipLimit - 1]) ? TooltipLimit - 1 : TooltipLimit;
-        return tooltip[..keep];
-    }
+    // The tooltip, cut to what the OS will take. DisplayText.Clamp owns the surrogate-pair
+    // allowance, because the macOS shell's MenuNotice needs the identical rule against its own
+    // budget and the two are one Unicode decision rather than two toolkit ones.
+    private static string Fit(string tooltip) => DisplayText.Clamp(tooltip, TooltipLimit);
 
     public void Warn(string title, string message) =>
         _icon.ShowBalloonTip(4000, title, message, ToolTipIcon.Warning);
