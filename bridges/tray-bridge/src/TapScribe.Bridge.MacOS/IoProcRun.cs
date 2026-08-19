@@ -31,6 +31,15 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
 {
     private CoreAudioIoProcHandle? _ioProc;
 
+    private long _teardownFaults;
+
+    /// <summary>How many teardown calls this run swallowed. Both release paths are bound not
+    /// to throw, so a registration CoreAudio refused to give up leaves no other trace: the run
+    /// still reports a clean release, and the leak shows up only as a device that stays busy.
+    /// The counterpart of <c>CaptureHandOff.HandlerFaults</c> and
+    /// <c>CoreAudioHal.CallbackFaults</c>, for the same reason.</summary>
+    internal long TeardownFaults => Interlocked.Read(ref _teardownFaults);
+
     /// <summary>Whether an IOProc is registered and running right now. Read from CoreAudio
     /// notification threads as well as the tray thread, hence the volatile read.</summary>
     internal bool Running => Volatile.Read(ref _ioProc) is not null;
@@ -102,8 +111,9 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
         catch (Exception ex) when (!propagate && ex is ExternalException or InvalidOperationException)
         {
             // Abandon's half of the split: the caller has no other owner and must carry on, so
-            // the report goes nowhere. Stop's half lets the same failure out, because
-            // IAudioCapture.Stop declares it.
+            // the report goes nowhere but the counter. Stop's half lets the same failure out,
+            // because IAudioCapture.Stop declares it.
+            Interlocked.Increment(ref _teardownFaults);
         }
         finally
         {
@@ -125,7 +135,7 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
     // declares: CoreAudioException exists only because ExternalException is what IAudioCapture
     // names. Filtering at the concrete type would let a different ExternalException out of a
     // method documented never to throw, and Abandon's callers reach it from Dispose.
-    private static void Swallow(Action release)
+    private void Swallow(Action release)
     {
         try
         {
@@ -133,6 +143,7 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
         }
         catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
         {
+            Interlocked.Increment(ref _teardownFaults);
         }
     }
 }

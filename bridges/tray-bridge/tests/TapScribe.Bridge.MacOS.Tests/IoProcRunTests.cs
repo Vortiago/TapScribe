@@ -93,6 +93,36 @@ public class IoProcRunTests
     }
 
     [Fact]
+    public void Abandon_WhatItSwallows_IsStillCounted()
+    {
+        // Abandon reports nothing by contract, which is the right call for a path with no other
+        // owner and the wrong one for a device that has quietly stayed busy since the meeting
+        // ended. The counter is the only trace such a teardown leaves.
+        var handOff = new CaptureHandOff("test-pump", _ => { });
+        var hal = new OrderingHal(handOff) { StopError = new CoreAudioException("stopping", -66748) };
+        var run = new IoProcRun(hal, handOff);
+        run.Start(deviceId: 41, Stereo);
+
+        run.Abandon();
+
+        Assert.Equal(1, run.TeardownFaults);
+    }
+
+    [Fact]
+    public void Release_ThatCoreAudioAccepts_CountsNoFaults()
+    {
+        // The other direction, so the count above cannot be "always one" and still pass.
+        var handOff = new CaptureHandOff("test-pump", _ => { });
+        var hal = new OrderingHal(handOff);
+        var run = new IoProcRun(hal, handOff);
+        run.Start(deviceId: 41, Stereo);
+
+        run.Stop();
+
+        Assert.Equal(0, run.TeardownFaults);
+    }
+
+    [Fact]
     public void Release_LeavesNoRegistrationBehind()
     {
         // Asserted on the registration rather than on the call order, because a leak is what an
