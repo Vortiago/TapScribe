@@ -204,9 +204,12 @@ jobs:
     # Chromium's download can WEDGE rather than fail, and it does so without
     # GitHub reporting anything wrong. Unbounded, a browser job then holds a
     # runner for the 6 hour default while the PR reads as 'still running', which
-    # is indistinguishable from slow. Twenty minutes is several times the honest
-    # runtime of the slowest of the three, so hitting this is a diagnosis.
-    timeout-minutes: 20
+    # is indistinguishable from slow. The slowest of the three has run 5 to 9
+    # minutes, and its span is mostly downloads (Chromium, then the ASR models),
+    # so the bound is set well clear of a slow network rather than snugly: a
+    # timeout that can fire on a bad day teaches people to re-run it, which is
+    # the habit that lets a real wedge through.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -241,7 +244,7 @@ jobs:
     name: bridge E2E (extension + meeting)
     runs-on: ubuntu-latest
     # Bounded against a wedged Chromium download, as bridge-e2e above.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -649,7 +652,7 @@ jobs:
     name: browser UI E2E (synthetic only)
     runs-on: ubuntu-latest
     # Bounded against a wedged Chromium download, as bridge-e2e above.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
