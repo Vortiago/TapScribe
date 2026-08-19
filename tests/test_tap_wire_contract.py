@@ -400,6 +400,7 @@ _SOURCE_MODULES = {
     "tapscribe/speech_gate.py",
     "tapscribe/config.py",
     "tapscribe/tap_fan_out.py",
+    "tapscribe/tap_mode.py",
 }
 
 #: Names that would make a private copy of a wire constant — DERIVED from the

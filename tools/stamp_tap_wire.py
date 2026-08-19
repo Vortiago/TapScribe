@@ -439,7 +439,7 @@ def recorder_contract() -> dict[str, Any]:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
-    from tapscribe import auth, speech_gate, tap_fan_out
+    from tapscribe import auth, speech_gate, tap_fan_out, tap_mode
     from tapscribe.audio import RECORDER_CHANNELS, RECORDER_SAMPLE_RATE, RECORDER_SAMPLE_WIDTH
 
     return {
@@ -450,6 +450,10 @@ def recorder_contract() -> dict[str, Any]:
         "frame_samples": speech_gate.FRAME_SAMPLES,
         "frame_bytes": speech_gate.FRAME_BYTES,
         "probe_identity": tap_fan_out.PROBE_IDENTITY,
+        # Reserved `tap_mode` spellings. Two keys, not one: no Spelling writes a
+        # list, and a file declaring one key twice raises SiteDisagreesWithItself.
+        "tap_mode_single": tap_mode.TAP_MODE_SINGLE,
+        "tap_mode_multi": tap_mode.TAP_MODE_MULTI,
         # Derived, and that is exactly why it needs stamping. CODE derives
         # the frame duration where it needs it; PROSE states "20 ms"
         # outright, five times across four docs. A frame-size change would
@@ -504,6 +508,23 @@ STAMPS: tuple[Site, ...] = (
         "probe_identity",
         anchored(r"Identity = (?P<v>\"[^\"]*\")", called="Identity"),
         TEXT,
+    ),
+    # --- tap_mode: the single/multi declaration (ADR-0021) ------------------
+    Site(_TRAY / "TapConnectionOptions.cs", "tap_mode_single", cs_const("TapModeSingle"), TEXT),
+    Site(_TRAY / "TapConnectionOptions.cs", "tap_mode_multi", cs_const("TapModeMulti"), TEXT),
+    Site(_LTB, "tap_mode_single", py_assign("TAP_MODE_SINGLE"), TEXT),
+    Site(_SC / "content.js", "tap_mode_single", js_const("TAP_MODE_SINGLE"), TEXT),
+    Site(
+        _BRIDGES_README,
+        "tap_mode_single",
+        anchored(r"Exactly \*\*`(?P<v>[a-z]+)`\*\* or", called="`single` in the tap_mode bullet"),
+        RAW,
+    ),
+    Site(
+        _BRIDGES_README,
+        "tap_mode_multi",
+        anchored(r"or \*\*`(?P<v>[a-z]+)`\*\*; absent", called="`multi` in the tap_mode bullet"),
+        RAW,
     ),
     # --- JS: the SpatialChat bridge, both worlds ---------------------------
     Site(_SC / "control-client.js", "subprotocol_prefix", js_const("TAP_SUBPROTOCOL_PREFIX"), TEXT),

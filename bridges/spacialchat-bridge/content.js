@@ -204,11 +204,17 @@
     publishStatus();
   }
 
+  // Reserved `tap_mode` value. A SpatialChat tap is per-participant, so it
+  // always carries one human. Stamped from the Recorder by
+  // tools/stamp_tap_wire.py; never hand-edit.
+  const TAP_MODE_SINGLE = "single";
+
   const tapWsUrl = (identity, name, utteranceId, sessionId) => {
     const qp = new URLSearchParams({
       identity,
       name: name || "",
       utterance_id: utteranceId,
+      tap_mode: TAP_MODE_SINGLE,
     });
     // Route into the meeting's detached Session when this utterance was
     // affiliated to one (snapshotted at utterance start; see ensureUtterance).
