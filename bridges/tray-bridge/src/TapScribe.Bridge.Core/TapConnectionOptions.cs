@@ -69,6 +69,14 @@ public sealed record TapConnectionOptions
     public string Mode { get; init; } = TapModeSingle;
 
     /// <summary>
+    /// The single/multi default for a device flow: a Capture device is the
+    /// operator's mic, a Render device is loopback carrying the far end of the
+    /// meeting. Mirrors GateSettings.DefaultForFlow.
+    /// </summary>
+    public static string TapModeForFlow(DeviceFlow flow) =>
+        flow == DeviceFlow.Render ? TapModeMulti : TapModeSingle;
+
+    /// <summary>
     /// Build the `/tap` WebSocket URI with query params. utterance_id and session
     /// are only sent when set (the Recorder 404s an unknown session id).
     /// </summary>

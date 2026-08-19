@@ -169,7 +169,9 @@ def active_rows(
         # Effective NOW, not at WS open: an operator who flips a tap to
         # multi-person should see it, even though the change only affects the
         # next tap's Roster entry (ADR-0021).
-        row["mode"] = tap_mode.resolve(declared=stream.mode, override=mode_overrides.get(stream.identity))
+        row["mode"] = tap_mode.resolve(
+            declared=stream.declared_mode, override=mode_overrides.get(stream.identity)
+        )
         row["level"] = round(row["level"], 2)
         row["bytes_received"] = (
             (row["bytes_received"] + TAP_BYTES_BUCKET // 2) // TAP_BYTES_BUCKET * TAP_BYTES_BUCKET

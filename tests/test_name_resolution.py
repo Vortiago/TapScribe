@@ -10,6 +10,7 @@ Resolution precedence: per-session Override (session_meta.aliases) > Person name
 from __future__ import annotations
 
 from tapscribe.name_resolution import (
+    attach_people_view,
     build_people_view,
     known_names,
     resolve_session_names,
@@ -318,3 +319,32 @@ def test_a_mapping_matching_the_current_run_is_applied() -> None:
     )
 
     assert names["sysaudio#A"] == "Alice Andersen"
+
+
+def test_attach_people_view_feeds_voice_keys_from_the_TRANSCRIPT_not_the_wav_slugs() -> None:
+    """`session["speakers"]` is WAV-filename slugs, which `safe_name` makes
+    `#`-free — a voice key can never appear there. Reading that list left the
+    whole voice branch dead on the /api/state path with every unit test still
+    green, because they all passed `speaker_keys` by hand."""
+    reg = _reg([{"id": "p1", "name": "Alice Andersen", "identities": []}])
+    session = {
+        "roster": _ROSTER,
+        "speakers": ["sysaudio"],  # WAV slugs: no `#`, ever
+        "session_transcript": {"speakers": ["sysaudio#A"]},
+        "session_meta": {"voices": {f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}}},
+        "voice_runs": {_SYS: "r1"},
+    }
+
+    attach_people_view([session], reg, [session_occurrences(session)], live_identities=set())
+
+    assert session["names"]["sysaudio#A"] == "Alice Andersen"
+
+
+def test_attach_people_view_survives_a_session_with_no_transcript() -> None:
+    """The synthetic current-session entry carries `session_transcript: None`."""
+    session = {"roster": _ROSTER, "speakers": [], "session_transcript": None, "session_meta": {}}
+
+    attach_people_view([session], _reg([]), [session_occurrences(session)], live_identities=set())
+
+    # Resolves normally (the roster default), and no voice keys to resolve.
+    assert session["names"] == {"sysaudio": "System audio"}

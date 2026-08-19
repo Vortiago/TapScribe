@@ -1214,23 +1214,19 @@ def _tap_then_roster(client, recorder, query: str):
     return read_roster(recorder.session_dir)["sysaudio"]
 
 
-def test_a_tap_declaring_multi_is_recorded_as_multi(client, recorder_with_fake_wlk, fake_wlk):
-    entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=multi")
-
-    assert entry["mode"] == "multi"
-
-
-def test_a_tap_declaring_nothing_is_recorded_as_single(client, recorder_with_fake_wlk, fake_wlk):
-    """Every bridge predating this feature sends no declaration."""
-    entry = _tap_then_roster(client, recorder_with_fake_wlk, "")
-
-    assert entry["mode"] == "single"
-
-
-def test_an_unrecognised_declaration_is_recorded_as_single(client, recorder_with_fake_wlk, fake_wlk):
-    entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=sideways")
-
-    assert entry["mode"] == "single"
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("&tap_mode=multi", "multi"),
+        # A bridge predating this feature sends no declaration.
+        ("", "single"),
+        # Junk must never mean multi — that manufactures Voices from one human.
+        ("&tap_mode=sideways", "single"),
+    ],
+    ids=["multi", "absent", "junk"],
+)
+def test_the_roster_records_the_declared_mode(client, recorder_with_fake_wlk, fake_wlk, query, expected):
+    assert _tap_then_roster(client, recorder_with_fake_wlk, query)["mode"] == expected
 
 
 def test_the_operator_override_beats_the_declaration_at_tap_open(client, recorder_with_fake_wlk, fake_wlk):
@@ -1280,10 +1276,9 @@ def test_the_tap_mode_route_requires_an_identity(client, recorder_with_fake_wlk)
 def test_the_effective_mode_shows_on_api_state(client, recorder_with_fake_wlk) -> None:
     """The overlay reports what is effective NOW, so flipping a tap is visible
     even though it only binds on the next WS."""
-    frame = b"\x10\x00" * 320
     client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
 
     with client.websocket_connect("/tap?identity=sysaudio&name=System+audio") as ws:
-        ws.send_bytes(frame)
+        ws.send_bytes(_FRAME)
         rows = client.get("/api/state").json()["active"]
         assert [row["mode"] for row in rows if row["identity"] == "sysaudio"] == ["multi"]

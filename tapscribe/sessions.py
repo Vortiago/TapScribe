@@ -59,7 +59,7 @@ from .text import (
     parse_wav_start,
     validate_config_text,
 )
-from .voices import coerce_voices as coerce_voices_sidecar
+from .voices import run_ids as voice_run_ids
 from .wav_cache import cache_listing, cache_signature, read_primary_marker, read_primary_payload
 
 # Active-WebSockets and in-flight-job tracking now live on the Recorder
@@ -761,12 +761,7 @@ def _describe_session(
         # it against the run each mapping was stamped with, so a mapping made
         # before a re-diarize stops being applied (ADR-0021). Spans stay out of
         # the poll — the pane fetches those lazily.
-        "voice_runs": {
-            identity: entry.get("run_id") or ""
-            for identity, entry in coerce_voices_sidecar(
-                _read_session_json_cached(sd / FILENAME_VOICES_JSON)
-            ).items()
-        },
+        "voice_runs": voice_run_ids(_read_session_json_cached(sd / FILENAME_VOICES_JSON)),
         "stripped": stripped,
     }
 

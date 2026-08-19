@@ -300,9 +300,10 @@ async def api_tap_mode_put(req: Request):
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
     mode = body.get("mode")
-    if mode is not None and not tap_mode.is_mode(mode):
-        raise HTTPException(400, f"mode must be single, multi, or null (got {mode!r})")
-    tap_mode.set_override(identity, mode)
+    try:
+        tap_mode.set_override(identity, mode)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
     return {"ok": True, "identity": identity, "mode": mode}
 
 
@@ -408,10 +409,8 @@ async def tap(ws: WebSocket):
     # default single (ADR-0021). Lenient like every other param here: absent or
     # unrecognised means single, because junk meaning multi would manufacture
     # Voices out of one human.
-    mode = tap_mode.resolve(
-        declared=ws.query_params.get(tap_mode.TAP_MODE_PARAM),
-        override=tap_mode.overrides().get(identity),
-    )
+    declared_mode = ws.query_params.get(tap_mode.TAP_MODE_PARAM) or ""
+    mode = tap_mode.resolve(declared=declared_mode, override=tap_mode.overrides().get(identity))
 
     async with await TapFanOut.open(
         recorder,
@@ -421,6 +420,7 @@ async def tap(ws: WebSocket):
         do_record=tap_pref.record,
         do_live=tap_pref.live,
         mode=mode,
+        declared_mode=declared_mode,
         session=tap_session,
         session_dir=tap_session_dir,
     ) as fan_out:

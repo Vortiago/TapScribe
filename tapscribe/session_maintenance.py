@@ -412,7 +412,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     src_voices = voices.read_voices(source_dir)
     tgt_voices = voices.read_voices(target_dir)
     voices_merged, collided = voices.fold_voices(tgt_voices, src_voices)
-    if src_voices or collided:
+    if src_voices:
         voices.write_voices(target_dir, voices_merged)
 
     # The target's merged transcript predates the just-moved WAVs, so it's

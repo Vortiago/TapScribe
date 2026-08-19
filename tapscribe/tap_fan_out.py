@@ -68,6 +68,7 @@ class TapFanOut:
         do_record: bool,
         do_live: bool,
         mode: str = TAP_MODE_SINGLE,
+        declared_mode: str = "",
         session: str | None = None,
         session_dir: Path | None = None,
         tap_relay: TapRelay | None = None,
@@ -95,9 +96,12 @@ class TapFanOut:
         # render one human as two speakers.
         self._filename_name = name or ""
         self._utterance_id = utterance_id
-        # Snapshotted at open, like record/live: the Roster records what was in
-        # effect for THIS tap, so diarization is a property of the recording.
+        # Two different facts, both snapshotted at open: `_mode` is the RESOLVED
+        # value the Roster stores (diarization is a property of the recording),
+        # `_declared_mode` is what the bridge actually said, which the /api/state
+        # overlay re-resolves against the CURRENT override.
         self._mode = mode
+        self._declared_mode = declared_mode
         # A fresh per-connection token. Two /tap WSes can briefly share one
         # utterance_id (a reconnect firing before the old WS is seen closed),
         # so the UtteranceIndex record and the ActiveStream row are keyed by
@@ -160,6 +164,7 @@ class TapFanOut:
         do_record: bool,
         do_live: bool,
         mode: str = TAP_MODE_SINGLE,
+        declared_mode: str = "",
         session: str | None = None,
         session_dir: Path | None = None,
         tap_relay: TapRelay | None = None,
@@ -172,6 +177,7 @@ class TapFanOut:
             do_record=do_record,
             do_live=do_live,
             mode=mode,
+            declared_mode=declared_mode,
             session=session,
             session_dir=session_dir,
             tap_relay=tap_relay,
@@ -415,6 +421,7 @@ class TapFanOut:
                     bytes_received=self._bytes_received,
                     record=self._do_record,
                     live=self._do_live,
+                    declared_mode=self._declared_mode,
                     session=self._session,
                 )
             )

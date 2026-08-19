@@ -28,6 +28,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .people import PeopleRegistry
+from .text import is_voice_key, split_voice_key, voice_key
 
 # Cap on the known-people hint injected into a summarize (see `known_names`). A
 # large registry would bloat the prompt and dilute the signal; this bounds the
@@ -51,13 +52,13 @@ def session_occurrences(session: dict[str, Any]) -> dict[str, dict[str, Any]]:
     occ = dict(session.get("roster") or {})
     covered = {e.get("slug") for e in occ.values() if e.get("slug")}
     for slug in session.get("speakers") or []:
-        # A `slug#<voice>` key is session-local and never a registry member
-        # (ADR-0021). This runs on every /api/state poll and PERSISTS what it
-        # syncs, so backfilling one would mint a blank Person twice a second.
-        if "#" in (slug or ""):
+        # `is_voice_key` is defence in depth: these are WAV-filename slugs, which
+        # `safe_name` already makes `#`-free. It matters because this runs on
+        # every /api/state poll and PERSISTS what it syncs, so one voice key
+        # reaching it would mint a blank Person twice a second (ADR-0021).
+        if not slug or is_voice_key(slug) or slug in covered or slug in occ:
             continue
-        if slug and slug not in covered and slug not in occ:
-            occ[slug] = {"name": slug.replace("_", " "), "source": "recorded", "slug": slug, "wavs": []}
+        occ[slug] = {"name": slug.replace("_", " "), "source": "recorded", "slug": slug, "wavs": []}
     return occ
 
 
@@ -105,18 +106,20 @@ def resolve_session_names(
         if default:
             names[key] = default
 
-    # Voice keys are in NEITHER set above, so they need their own pass over the
+    # Voice keys are in NEITHER set above, so they get their own pass over the
     # transcript's own speaker keys.
+    voices = voices or {}
+    voice_runs = voice_runs or {}
     for key in speaker_keys:
-        if key in names or "#" not in key:
+        if key in names or not is_voice_key(key):
             continue
-        # rsplit: a slug is `#`-free via `safe_name`, a raw identity is not.
-        slug, label = key.rsplit("#", 1)
+        slug, label = split_voice_key(key)
         identity = slug_to_identity.get(slug)
-        mapping = (voices or {}).get(f"{identity}#{label}") if identity else None
-        current = (voice_runs or {}).get(identity or "")
-        applies = bool(mapping) and (not current or mapping.get("run_id") == current)
-        person = registry.get(mapping.get("person_id")) if applies else None
+        mapping = voices.get(voice_key(identity, label)) or {} if identity else {}
+        current = voice_runs.get(identity or "")
+        if current and mapping.get("run_id") != current:
+            mapping = {}  # stamped against a superseded run
+        person = registry.get(mapping.get("person_id", "")) if mapping else None
         names[key] = (person or {}).get("name") or f"Speaker {label}"
     return names
 
@@ -256,7 +259,10 @@ def attach_people_view(
             registry=registry,
             voices=meta.get("voices") or {},
             voice_runs=s.get("voice_runs") or {},
-            speaker_keys=s.get("speakers") or [],
+            # The TRANSCRIPT's keys, not `s["speakers"]` — that is the WAV
+            # filename slugs, which `safe_name` makes `#`-free, so no voice key
+            # could ever appear there.
+            speaker_keys=(s.get("session_transcript") or {}).get("speakers") or [],
         )
     people = build_people_view(sessions=sessions, registry=registry, live_identities=live_identities)
     for s in sessions:

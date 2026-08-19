@@ -148,7 +148,7 @@ public class TapConnectionOptionsTests
     public void TapModeForFlow_TreatsLoopbackAsMultiPersonAndTheMicAsSingle()
     {
         // A Render device is the far end of the meeting; Capture is the operator.
-        Assert.Equal(TapConnectionOptions.TapModeMulti, ResolveResult.TapModeForFlow(DeviceFlow.Render));
-        Assert.Equal(TapConnectionOptions.TapModeSingle, ResolveResult.TapModeForFlow(DeviceFlow.Capture));
+        Assert.Equal(TapConnectionOptions.TapModeMulti, TapConnectionOptions.TapModeForFlow(DeviceFlow.Render));
+        Assert.Equal(TapConnectionOptions.TapModeSingle, TapConnectionOptions.TapModeForFlow(DeviceFlow.Capture));
     }
 }

@@ -77,6 +77,20 @@ def coerce_voices(raw: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def run_ids(raw: Any) -> dict[str, str]:
+    """`{identity: run_id}` from a raw parsed sidecar — the poll's whole
+    interest in this file. Deliberately NOT `coerce_voices(...)` then project:
+    that walks and rebuilds every span dict on every tick to read one string
+    per identity, which is O(spans) for an O(identities) answer."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        identity: entry.get("run_id") or ""
+        for identity, entry in raw.items()
+        if isinstance(identity, str) and identity and isinstance(entry, dict)
+    }
+
+
 def read_voices(session_dir: Path) -> dict[str, dict[str, Any]]:
     """`{full identity: entry}`. Missing, torn, or non-dict → `{}`: an
     undiarized session is the normal case, and the poll must not crash on a bad
@@ -110,10 +124,9 @@ def fold_voices(
     by re-diarizing; keeping either side puts one person's name on another's
     words.
     """
-    collided = {i for i in target if i in source}
-    merged = {i: dict(e) for i, e in target.items() if i not in collided}
-    merged.update({i: dict(e) for i, e in source.items() if i not in collided})
-    return merged, collided
+    collided = target.keys() & source.keys()
+    merged = {i: e for i, e in (*target.items(), *source.items()) if i not in collided}
+    return merged, set(collided)
 
 
 def record_voices(

@@ -75,10 +75,9 @@ def build_tap_url(
     tls: bool = False,
     utterance_id: str | None = None,
     session: str | None = None,
-    tap_mode: str = TAP_MODE_SINGLE,
 ) -> str:
     # This bridge taps the local mic, so it is always one human.
-    params: dict[str, str] = {"identity": identity, "name": name, "tap_mode": tap_mode}
+    params: dict[str, str] = {"identity": identity, "name": name, "tap_mode": TAP_MODE_SINGLE}
     if utterance_id:
         params["utterance_id"] = utterance_id
     if session:

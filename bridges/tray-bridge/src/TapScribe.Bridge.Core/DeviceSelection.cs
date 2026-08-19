@@ -138,16 +138,6 @@ public sealed record ResolveResult(
     /// <paramref name="session"/> — so the meeting is
     /// isolated from anything else on the Recorder (per-bridge Sessions, ADR-0005).
     /// </summary>
-    /// <summary>
-    /// Single- vs multi-person default for a device flow: a Capture device is
-    /// the operator's mic, a Render device is loopback carrying the far end of
-    /// the meeting. Mirrors GateSettings.DefaultForFlow.
-    /// </summary>
-    public static string TapModeForFlow(DeviceFlow flow) =>
-        flow == DeviceFlow.Render
-            ? TapConnectionOptions.TapModeMulti
-            : TapConnectionOptions.TapModeSingle;
-
     public IReadOnlyList<TapConnectionOptions> ToTapOptions(
         string session, TapConnectionOptions baseOptions)
     {
@@ -167,7 +157,7 @@ public sealed record ResolveResult(
                     Identity = r.StreamingIdentity,
                     Name = name,
                     Session = session,
-                    Mode = TapModeForFlow(r.Device.Flow),
+                    Mode = TapConnectionOptions.TapModeForFlow(r.Device.Flow),
                 };
             })
             .ToList();

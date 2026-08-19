@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from .text import parse_iso
+from .text import parse_iso, voice_key
 from .transcribers.base import TranscriptionSegment
 
 
@@ -89,11 +89,7 @@ def attribute_segment(
     """
     abs_start = wav_start + timedelta(seconds=seg.start)
     abs_end = wav_start + timedelta(seconds=seg.end)
-    plain = [Piece(abs_start=abs_start, abs_end=abs_end, speaker=slug, text=seg.text)]
-    if not spans:
-        return plain
-
-    runs = _word_runs(seg, wav_start, spans) if seg.words else []
+    runs = _word_runs(seg, wav_start, spans) if (spans and seg.words) else []
     if len(runs) > 1:
         return [
             Piece(
@@ -105,20 +101,17 @@ def attribute_segment(
             for label, words in runs
         ]
 
-    # One run, no words, or words that all land on one Voice: attribute whole,
-    # on the segment's own bounds and text rather than a rejoin of the words.
-    # Without words this is the only option — Voxtral emits none — so a crossing
-    # segment goes to the dominant Voice rather than losing its text.
+    # One run, no words, or nothing overlapping: attribute whole, on the
+    # segment's own bounds and text rather than a rejoin of the words. Without
+    # words this is the only option — Voxtral emits none — so a crossing segment
+    # goes to the dominant Voice rather than losing its text.
     label = runs[0][0] if runs else _dominant(abs_start, abs_end, spans)
-    if label is None:
-        return plain
     return [Piece(abs_start=abs_start, abs_end=abs_end, speaker=_key(slug, label), text=seg.text)]
 
 
 def _key(slug: str, label: str | None) -> str:
-    """`slug#<voice>`, or the bare slug when nothing owns the span. Decompose
-    with `rsplit("#", 1)`: a slug is `#`-free via `safe_name`, an identity is not."""
-    return f"{slug}#{label}" if label else slug
+    """`slug#<voice>`, or the bare slug when no Voice owns the span."""
+    return voice_key(slug, label) if label else slug
 
 
 def _word_runs(seg, wav_start, spans):

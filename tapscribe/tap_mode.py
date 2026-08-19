@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 from . import config
-from .text import atomic_write_text
+from .text import atomic_write_text, file_stat_sig
 
 #: Reserved wire spellings. Stamped into every bridge by
 #: `tools/stamp_tap_wire.py` — never hand-edit the copies under `bridges/`.
@@ -46,24 +46,53 @@ def is_mode(value: object) -> bool:
 
 def resolve(*, declared: str | None, override: str | None) -> str:
     """The effective mode for one tap."""
-    if is_mode(override):
-        return override  # type: ignore[return-value]
-    if is_mode(declared):
-        return declared  # type: ignore[return-value]
+    for value in (override, declared):
+        if is_mode(value):
+            return str(value)
     return TAP_MODE_SINGLE
 
 
-def overrides() -> dict[str, str]:
-    """Every stored per-identity override. Missing or torn → `{}`."""
+#: Single slot, keyed on `file_stat_sig`. `overrides()` is read on every
+#: `/api/state` tick AND every `/tap` open (per utterance, for the SpatialChat
+#: bridge), on the event loop in both cases — the same reason `config_store`
+#: caches its reads. A hit costs one `stat()` instead of a read + parse.
+_OVERRIDES_CACHE: dict[str, tuple[tuple | None, dict[str, str]]] = {}
+
+
+def _parse_overrides(text: str) -> dict[str, str]:
     try:
-        raw = json.loads(_store_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # Missing (OSError) or torn (ValueError): fall back to the bridges'
-        # declarations rather than failing a tap open.
+        raw = json.loads(text)
+    except ValueError:
+        # Torn file: fall back to the bridges' declarations rather than
+        # failing a tap open.
         return {}
     if not isinstance(raw, dict):
         return {}
     return {k: v for k, v in raw.items() if isinstance(k, str) and k and is_mode(v)}
+
+
+def overrides() -> dict[str, str]:
+    """Every stored per-identity override. Missing or torn → `{}`.
+
+    Returns a COPY: the cached dict must outlive the call unmutated, and the
+    map is a handful of entries at most, so the copy is free next to the read
+    and parse it replaces."""
+    path = _store_path()
+    sig = file_stat_sig(path, include_path=True)
+    if sig is None:
+        # Missing is the common case (no operator has overridden anything).
+        # Don't cache it — re-statting is already the whole cost.
+        _OVERRIDES_CACHE.pop("_slot", None)
+        return {}
+    hit = _OVERRIDES_CACHE.get("_slot")
+    if hit is not None and hit[0] == sig:
+        return dict(hit[1])
+    try:
+        parsed = _parse_overrides(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    _OVERRIDES_CACHE["_slot"] = (sig, parsed)
+    return dict(parsed)
 
 
 def set_override(identity: str, mode: str | None) -> dict[str, str]:
@@ -77,4 +106,7 @@ def set_override(identity: str, mode: str | None) -> dict[str, str]:
     else:
         current[identity] = mode
     atomic_write_text(_store_path(), json.dumps(current, indent=2, ensure_ascii=False))
+    # Structural invalidation, like PeopleRegistry.save: a route that writes then
+    # reads back within one request must not see the pre-write slot.
+    _OVERRIDES_CACHE.pop("_slot", None)
     return current
