@@ -43,26 +43,61 @@ public class MacOSAudioDeviceEnumeratorTests
     }
 
     [Fact]
-    public void List_OffersBothFlows_EachWithItsOwnDefault()
+    public void List_OffersEveryInput_AndExactlyOneSystemAudioRow()
     {
-        // The HAL reports every device scope, each carrying its OWN default flag, and both
-        // flows reach the picker: a render endpoint is what a meeting's system-audio selection
-        // resolves against, since capturing it on macOS is a process tap rather than a device
-        // (#420). Without a render row here, the default device pair resolves half-way and
-        // EVERY Start posts "Some devices unavailable / Skipped: default system audio".
+        // Inputs are real endpoints and reach the picker as they are. Outputs do NOT: on macOS
+        // what the Mac plays is a process tap that follows whichever output is default, so
+        // every output row would open the same thing. Listing them all would let an operator
+        // pin "MacBook Pro Speakers" and silently record the default output instead, and a
+        // follow-default row plus a pinned one would run two taps recording one mixdown twice
+        // under two identities. One synthetic row means a pin says what follow-default says.
+        //
+        // The row has to exist, though: without a Render row the default pair resolves half-way
+        // and EVERY Start posts "Some devices unavailable / Skipped: default system audio".
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
         hal.AddDevice(Devices.Input(57, "Yeti Nano", isDefault: true));
         hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers", isDefault: true));
+        hal.AddDevice(Devices.Output(64, "External Headphones"));
         using var enumerator = new MacOSAudioDeviceEnumerator(hal);
 
         IReadOnlyList<CaptureDevice> devices = enumerator.List();
 
         Assert.Equal(
-            ["Built-in Microphone", "Yeti Nano", "MacBook Pro Speakers"], devices.Select(d => d.Name));
-        Assert.Equal(DeviceFlow.Render, devices.Single(d => d.Name == "MacBook Pro Speakers").Flow);
+            ["Built-in Microphone", "Yeti Nano", "System audio"], devices.Select(d => d.Name));
+        Assert.Equal(DeviceFlow.Render, devices.Single(d => d.Name == "System audio").Flow);
         Assert.Equal("Yeti Nano", CaptureDevice.DefaultFor(devices, DeviceFlow.Capture)?.Name);
-        Assert.Equal("MacBook Pro Speakers", CaptureDevice.DefaultFor(devices, DeviceFlow.Render)?.Name);
+        Assert.Equal("System audio", CaptureDevice.DefaultFor(devices, DeviceFlow.Render)?.Name);
+    }
+
+    [Fact]
+    public void Open_APinOnARealOutputEndpoint_IsRefusedRatherThanTappingTheDefault()
+    {
+        // The shape a saved settings file from any other backend has, and the one an operator
+        // would write by hand: a pin naming a specific output. This backend cannot honour it,
+        // because the tap follows the default rather than binding to an endpoint, so refusing
+        // is the honest answer. Silently tapping the default instead is the failure this row
+        // collapse exists to make unreachable.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice speakers = hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers", isDefault: true));
+        hal.AddDevice(Devices.Output(64, "External Headphones"));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        var pinned = new CaptureDevice(speakers.Uid, speakers.Name, DeviceFlow.Render, IsDefault: false);
+
+        Assert.Throws<ArgumentException>(() => enumerator.Open(pinned));
+    }
+
+    [Fact]
+    public void List_OnAMacWithNoOutput_OffersNoSystemAudioRow()
+    {
+        // A tap over no output is nothing to record, so the row is not offered at all rather
+        // than offered and failing at Start.
+        var hal = new FakeCoreAudioHal();
+        hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var enumerator = new MacOSAudioDeviceEnumerator(hal);
+
+        Assert.DoesNotContain(enumerator.List(), d => d.Flow == DeviceFlow.Render);
     }
 
     [Fact]
@@ -105,7 +140,7 @@ public class MacOSAudioDeviceEnumeratorTests
         Assert.Empty(resolution.Missing);
         Assert.Equal(SelectionVerdict.Ok, resolution.Verdict);
         Assert.Equal(
-            ["Built-in Microphone", "MacBook Pro Speakers"],
+            ["Built-in Microphone", "System audio"],
             resolution.Resolved.Select(r => r.Device.Name));
         // Two speakers under two identities, which is what the Recorder attributes the meeting
         // by: the operator, and everyone else.

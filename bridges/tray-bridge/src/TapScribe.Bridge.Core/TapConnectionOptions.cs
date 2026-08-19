@@ -31,9 +31,13 @@ public sealed record TapConnectionOptions
     /// The tray's frozen per-speaker slug, deliberately keeping its pre-rename spelling (the
     /// bridges/tray-bridge/ directory rename left it alone). Changing it re-attributes the tray
     /// as a brand-new speaker, so it needs a migration, not a rename: the same contract class as
-    /// <c>TrayStores.SettingsFileName</c>. Named rather than repeated, because it is also what
-    /// <see cref="BridgeSettings"/> seeds when the OS offers no username, and the two must
-    /// move together or they are a migration bug rather than two defaults.
+    /// <c>TrayStores.SettingsFileName</c>.
+    ///
+    /// Two things now read it, and they are NOT one thing: this type's own default identity,
+    /// and the WINDOWS shell's declared fallback (<c>Bridge.Windows.TrayStores</c>). Each shell
+    /// states its own, which is why the Mac's is <c>mac-tray</c> and not this: a Mac operator
+    /// whose machine offers no username must not have their recordings filed under a Windows
+    /// tray.
     /// </summary>
     public const string TrayIdentity = "windows-tray";
 

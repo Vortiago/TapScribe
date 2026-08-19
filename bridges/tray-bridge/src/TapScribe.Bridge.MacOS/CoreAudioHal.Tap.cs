@@ -176,12 +176,20 @@ public sealed unsafe partial class CoreAudioHal
     // [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]] - everything the
     // Mac plays, in stereo, excluding nothing, left audible (the initialiser's own default
     // mute behaviour, which is why nothing here sets one).
+    // Loaded once. The ObjC runtime only knows CATapDescription after the framework defining
+    // it is mapped, and this is the one call that needs that guarantee; reloading per tap took
+    // the dyld loader lock again for an image already in memory and leaked a refcount nothing
+    // balances, since the handle was discarded.
+    private static readonly IntPtr CoreAudioImage = NativeLibrary.Load(CoreAudioFramework);
+
+    private static void EnsureCoreAudioLoaded() => _ = CoreAudioImage;
+
     private static IntPtr NewGlobalStereoTapDescription()
     {
         // Loaded explicitly rather than relied upon: the ObjC class lives in CoreAudio, and the
         // LibraryImports below bring the framework in lazily, so without this the very first
         // call could ask the runtime for a class from an image nothing has opened yet.
-        NativeLibrary.Load(CoreAudioFramework);
+        EnsureCoreAudioLoaded();
 
         IntPtr tapDescription = objc_getClass("CATapDescription");
         if (tapDescription == IntPtr.Zero)

@@ -146,9 +146,6 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     /// <see cref="CaptureHandOff.IsPumping"/>.</summary>
     internal bool IsPumping => _handOff.IsPumping;
 
-    /// <summary>Buffers CoreAudio delivered that the pump never got to. See
-    /// <see cref="CaptureHandOff.DroppedBuffers"/>.</summary>
-    internal long DroppedBuffers => _handOff.DroppedBuffers;
 
     public void Start()
     {
@@ -251,7 +248,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // The seam's declared native failure, so the runtime skips this device and records
             // the meeting on the microphone alone rather than refusing to start at all.
             ?? throw new CoreAudioException(
-                "finding an output endpoint to tap: this Mac reports none", NoSuchDevice);
+                "finding an output endpoint to tap: this Mac reports none", CoreAudioStatus.BadDevice);
     }
 
     private void Release(Bound bound)
@@ -473,12 +470,10 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         // Outside the lock: the pipeline's handler is the one that tears the whole session
         // down, and it is entitled to reach back into this capture.
         Failed?.Invoke(this, new CoreAudioException(
-            "the aggregate device carrying the system-audio tap was invalidated", NoSuchDevice));
+            "the aggregate device carrying the system-audio tap was invalidated", CoreAudioStatus.BadDevice));
     }
 
 
     // kAudioHardwareBadDeviceError, the four-char code '!dev': the platform's own word for
     // "the device you are asking about is not there". Both failures this class raises on its
-    // own are that, one before the binding exists and one after it went away.
-    private const int NoSuchDevice = 560227702;
 }

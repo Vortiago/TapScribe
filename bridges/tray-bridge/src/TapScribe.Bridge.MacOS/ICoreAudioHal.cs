@@ -103,6 +103,18 @@ public sealed class CoreAudioException : ExternalException
         : base($"{what} failed with OSStatus {status}", status) { }
 }
 
+/// <summary>The handful of <c>OSStatus</c> values this backend raises on its own behalf, as
+/// opposed to passing one back from a failed call. One home, because a hand-typed magic decimal
+/// that is one digit wrong still filters correctly as an <see cref="ExternalException"/> and
+/// logs something that means a different thing.</summary>
+public static class CoreAudioStatus
+{
+    /// <summary><c>kAudioHardwareBadDeviceError</c>: the platform's own word for "the device you
+    /// are asking about is not there", which is what both captures raise when the endpoint
+    /// behind them goes away mid-stream.</summary>
+    public const int BadDevice = 560227702;
+}
+
 /// <summary>
 /// Every native call this backend makes, behind one facade.
 ///

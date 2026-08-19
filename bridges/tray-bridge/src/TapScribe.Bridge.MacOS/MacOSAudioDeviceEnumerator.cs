@@ -29,12 +29,37 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
         _hal = hal;
     }
 
-    // Every scope the HAL reports, which is inputs and outputs both. One predicate, used by
-    // List and Open alike, so what the picker OFFERS and what Open ACCEPTS are the same rule by
-    // construction rather than by two edits staying in step.
-    private IEnumerable<CoreAudioDevice> Tappable() => _hal.ListDevices();
+    /// <summary>The id of the one row that stands for system audio.
+    ///
+    /// A UID rather than a real device's, because on macOS there is nothing to name: what the
+    /// Mac plays is a process tap, and the tap follows whichever output is default rather than
+    /// binding to an endpoint. Listing the real outputs instead would offer the operator rows
+    /// that all open the same thing, so pinning "External Headphones" would silently record the
+    /// default output, and a follow-default row plus a pinned one would run two taps recording
+    /// one mixdown twice under two identities, which DuplicateIdentity cannot catch because the
+    /// names differ. One row means a pin on it says exactly what following the default says.
+    /// </summary>
+    internal const string SystemAudioId = "tapscribe:system-audio";
 
-    public IReadOnlyList<CaptureDevice> List() => [.. Tappable().Select(Portable)];
+    /// <summary>The name that row carries, matching the identity the runtime files it under.
+    /// </summary>
+    internal const string SystemAudioName = "System audio";
+
+    // Inputs are real endpoints and are listed as they come. Output scopes are collapsed into
+    // the single synthetic row above: they exist here only to answer "does this Mac play audio
+    // at all", since a tap over no output is nothing.
+    private IEnumerable<CoreAudioDevice> Inputs() =>
+        _hal.ListDevices().Where(d => d.Flow == DeviceFlow.Capture);
+
+    private bool HasOutput() => _hal.ListDevices().Any(d => d.Flow == DeviceFlow.Render);
+
+    public IReadOnlyList<CaptureDevice> List()
+    {
+        List<CaptureDevice> rows = [.. Inputs().Select(Portable)];
+        if (HasOutput())
+            rows.Add(new CaptureDevice(SystemAudioId, SystemAudioName, DeviceFlow.Render, IsDefault: true));
+        return rows;
+    }
 
     /// <summary>The portable descriptor for one CoreAudio device row.
     ///
@@ -58,29 +83,33 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
     {
         ArgumentNullException.ThrowIfNull(device);
 
+        // System audio first, because it names no endpoint: the tap binds to whichever output
+        // is default and follows it, so there is no object id to resolve. Guarded on the Mac
+        // still having an output, so a machine with none refuses rather than opening a tap over
+        // nothing.
+        if (device.Flow == DeviceFlow.Render && string.Equals(device.Id, SystemAudioId, StringComparison.Ordinal))
+        {
+            return HasOutput()
+                ? new MacOSSystemAudioCapture(_hal)
+                : throw new ArgumentException("this Mac has no audio output to tap", nameof(device));
+        }
+
         // Re-listed rather than remembered from the last List(): the picker's rows can be
         // minutes old, and the object id behind a UID changes on a replug, so a cached map
         // would open the wrong device or a dead one.
-        CoreAudioDevice? found = Tappable().FirstOrDefault(
+        CoreAudioDevice? found = Inputs().FirstOrDefault(
             d => d.Flow == device.Flow && string.Equals(d.Uid, device.Id, StringComparison.Ordinal));
 
         // ArgumentException, the seam's clause for "the id names no active endpoint of the
-        // requested flow". A vanished mic and an output endpoint are the same fact here:
-        // nothing in the list matches. Not the native failure type, since the platform
-        // answered fine and the callers that skip a dead endpoint filter on that one.
+        // requested flow". A vanished mic and a saved pin on a real output endpoint (which this
+        // backend no longer offers) are the same fact here: nothing in the list matches. Not the
+        // native failure type, since the platform answered fine and the callers that skip a dead
+        // endpoint filter on that one.
         if (found is null)
             throw new ArgumentException(
                 $"no active capture endpoint with UID '{device.Id}' ({device.Name})", nameof(device));
 
-        // A render row names system audio rather than an endpoint to open: what the Mac plays
-        // goes to whichever output is default, and the tap binds to that itself (see
-        // MacOSSystemAudioCapture). So the row is resolved above to confirm it is a live
-        // endpoint of the requested flow, which is what makes a stale saved pin an
-        // ArgumentException here rather than a tap on the wrong thing, and then the object id
-        // is deliberately not used.
-        return found.Flow == DeviceFlow.Render
-            ? new MacOSSystemAudioCapture(_hal)
-            : new MacOSAudioCapture(_hal, found.ObjectId);
+        return new MacOSAudioCapture(_hal, found.ObjectId);
     }
 
     public void Dispose()

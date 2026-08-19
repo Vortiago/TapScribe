@@ -114,12 +114,10 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         // is to tear the pipeline down through Dispose anyway - which is where that release
         // happens, once, on the thread that owns it.
         Failed?.Invoke(this, new CoreAudioException(
-            $"the endpoint behind device {_deviceId} was invalidated", DeviceGone));
+            $"the endpoint behind device {_deviceId} was invalidated", CoreAudioStatus.BadDevice));
     }
 
     // kAudioHardwareBadDeviceError, the four-char code '!dev': the platform's own word for
-    // "the device you are asking about is not there".
-    private const int DeviceGone = 560227702;
 
     // Fires on a CoreAudio notification thread. The device's whole notification set reaches
     // one listener, so a volume tweak arrives here too; forward only true mute transitions,
