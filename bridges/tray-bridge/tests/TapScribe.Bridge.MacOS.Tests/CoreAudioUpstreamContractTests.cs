@@ -91,6 +91,38 @@ public class CoreAudioUpstreamContractTests
         Assert.True(missing.Count == 0, $"no longer exported: {string.Join(", ", missing)}");
     }
 
+    [RequiresMacOS("create a real Core Audio process tap")]
+    public void TwoProcessTaps_CanBeLiveAtOnce()
+    {
+        // The one claim about this backend that symbol resolution cannot make: that the calls
+        // WORK, not merely that they exist. Creating a tap goes through CATapDescription via
+        // objc_msgSend against a class Microsoft.macOS does not bind, so a rename or an ABI
+        // mistake in that path is invisible to every other test here and shows up as a meeting
+        // that records one speaker.
+        //
+        // Two of them, because the system-audio level meter would open a second while a meeting
+        // holds the first, and nothing else establishes that the OS permits it. Measured
+        // PERMITTED on macOS 26.4; if a future release refuses, this is where that is learned.
+        //
+        // Deliberately does NOT run an IOProc: reading audio through a tap needs the Audio
+        // Capture grant, which no CI runner can answer. Creating one does not, which is what
+        // makes this runnable unattended.
+        if (!OperatingSystem.IsMacOS())
+            return;   // unreachable: [RequiresMacOS] skips first. Here for CA1416 only.
+
+        using var hal = new CoreAudioHal();
+        CoreAudioTapHandle first = hal.CreateProcessTap();
+        try
+        {
+            CoreAudioTapHandle second = hal.CreateProcessTap();
+            hal.DestroyProcessTap(second);
+        }
+        finally
+        {
+            hal.DestroyProcessTap(first);
+        }
+    }
+
     [Fact]
     public void TheBoundSet_MatchesWhatTheHalActuallyDeclares()
     {
