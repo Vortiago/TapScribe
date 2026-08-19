@@ -134,9 +134,78 @@ jobs:
           path: TapScribe.TrayBridge-win-x64.zip
           if-no-files-found: error
 
+  tray-macos:
+    name: publish macos tray bridge
+    # A `net10.0-macos` app bundle is produced by the macos workload against
+    # Xcode's SDK, so this MUST run on macos-latest (matching ci.yml's
+    # `dotnet-build-macos` job). arm64-only and self-contained are the csproj's
+    # decisions (ADR-0020) and are deliberately not restated here.
+    runs-on: macos-latest
+    env:
+      # Where the macos SDK writes the bundle: the RID output directory. Not
+      # `publish/`, which receives only the installer package.
+      APP: bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: bridges/tray-bridge/global.json
+
+      # Not on the runner image, and the shell does not build without it.
+      - name: Install the macos workload
+        run: dotnet workload install macos
+
+      - name: Derive version from tag
+        run: echo "VER=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      # `-p:Version=` is the whole way a version reaches this bundle: the
+      # Info.plist carries no version literal and the csproj derives
+      # ApplicationDisplayVersion / ApplicationVersion from `$(Version)`, so
+      # omitting it stamps the SDK's own 1.0 and fails nothing.
+      #
+      # CreatePackage=false suppresses the .pkg that a macos publish otherwise
+      # builds: the asset is a zipped .app, and the package's filename carries
+      # the version, which the permanent-URL contract (ADR-0012) rules out.
+      - name: Publish the app bundle
+        run: >
+          dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS
+          -c Release
+          -p:CreatePackage=false
+          -p:Version=${{ env.VER }}
+          -p:InformationalVersion=${{ env.VER }}
+
+      # The only gate that proves the stamping. `InfoPlistTests` can assert
+      # presence and no more, because every non-release build is legitimately
+      # given no `-p:Version=` and reads the SDK's default, so a publish that
+      # lost the flag looks identical to CI.
+      - name: Verify the bundle carries the tag's version
+        run: |
+          set -euo pipefail
+          got=$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")
+          if [ "$got" != "${{ env.VER }}" ]; then
+            echo "CFBundleShortVersionString is '$got', expected '${{ env.VER }}'"
+            echo "the publish above did not receive -p:Version="
+            exit 1
+          fi
+
+      # ditto, never `zip -r`: a .app is symlinks and executable bits, and a
+      # naive zip drops both, producing an archive that unpacks into something
+      # macOS refuses to launch.
+      - name: Zip the app bundle
+        run: ditto -c -k --keepParent "$APP" TapScribe.TrayBridge-osx-arm64.zip
+
+      - name: Upload macos tray artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-tray-macos
+          path: TapScribe.TrayBridge-osx-arm64.zip
+          if-no-files-found: error
+
   # Docker→GHCR is deliberately NOT a `needs` of `github-release`: a GHCR
-  # hiccup must not hold back the Release (notes + wheel + sdist + both
-  # bridge zips). This job runs in parallel and publishes the image
+  # hiccup must not hold back the Release (notes + wheel + sdist + every
+  # bridge zip). This job runs in parallel and publishes the image
   # independently; a failure here leaves a complete GitHub Release intact.
   docker:
     name: build + push docker image (ghcr)
@@ -268,7 +337,7 @@ jobs:
 
   github-release:
     name: github release
-    needs: [build, extension, tray, bundle]
+    needs: [build, extension, tray, tray-macos, bundle]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -291,6 +360,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: bridge-tray
+          path: bridge-artifacts/
+
+      - name: Download macos tray artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: bridge-tray-macos
           path: bridge-artifacts/
 
       # NOT under bridge-artifacts/: a Bundle is not a Bridge (CONTEXT.md). It
@@ -321,6 +396,7 @@ jobs:
             dist/*
             bridge-artifacts/tapscribe-spacialchat-bridge.zip
             bridge-artifacts/TapScribe.TrayBridge-win-x64.zip
+            bridge-artifacts/TapScribe.TrayBridge-osx-arm64.zip
             bundle-artifacts/TapScribe-Setup-win-x64.exe
           fail_on_unmatched_files: true
 
