@@ -1,14 +1,17 @@
 # tray-bridge
 
-Home of the **tray Bridge** family (CONTEXT.md → Tray Bridge). Its one shell
-today is the Windows one: it captures the default microphone **and the system
-audio output (WASAPI loopback)** and streams each to the Recorder over the
-standard `/tap` wire contract as its own speaker, so both sides of a meeting
-land as separately-attributed WAVs in one **detached session**. A macOS shell
-is being built alongside it (ADR-0020, #419); today it is the bundle and the
-version floor, no UI yet. See `../README.md` for the wire contract every
-Bridge speaks and `../../CONTEXT.md` for the vocabulary (Bridge, Tap,
-Recorder, Utterance, Session).
+Home of the **tray Bridge** family (CONTEXT.md → Tray Bridge). A shell captures
+the default microphone **and the system audio the machine is playing** and
+streams each to the Recorder over the standard `/tap` wire contract as its own
+speaker, so both sides of a meeting land as separately-attributed WAVs in one
+**detached session**. Two shells share that job: the Windows tray, which takes
+system audio off a WASAPI loopback, and the macOS menu bar, which uses a Core
+Audio process tap because macOS has no loopback endpoint (ADR-0020). Each ships
+as a zip on the newest release, which the dashboard's Settings → **Get a
+bridge** card links; see Packaging below for what an operator does with one.
+See `../README.md` for the wire contract every Bridge speaks and
+`../../CONTEXT.md` for the vocabulary (Bridge, Tap, Recorder, Utterance,
+Session).
 
 ## What's here
 
@@ -159,7 +162,14 @@ and `--no-auth`) against an in-process Kestrel server, and
 Recorder (self-skips where faster-whisper isn't importable) — so wire
 regressions are caught in CI without a live Recorder on your desk.
 
-## Packaging: a self-contained single-file exe
+## Packaging
+
+Both shells are built by `.github/workflows/release.yml` on a `v*` tag and
+attached to the GitHub Release under stable, unversioned filenames, which is
+what makes `releases/latest/download/<asset>` a permanent URL (ADR-0012). The
+commands below are what those jobs run, minus the `-p:Version=<tag>` they add.
+
+### Windows: a self-contained single-file exe
 
 ```powershell
 # from this directory (bridges/tray-bridge/)
@@ -172,7 +182,59 @@ dotnet publish src/TapScribe.TrayBridge -c Release -r win-x64 `
 The exe lands at
 `src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`
 and runs on a clean Windows 10/11 box (use `-r win-arm64` for ARM). No
-installer, code signing, or auto-update — it's a copy-and-run exe.
+installer, code signing, or auto-update — it's a copy-and-run exe. Ships as
+`TapScribe.TrayBridge-win-x64.zip`.
+
+### macOS: a zipped app bundle
+
+```bash
+# from this directory (bridges/tray-bridge/)
+dotnet publish src/TapScribe.TrayBridge.MacOS -c Release -p:CreatePackage=false
+ditto -c -k --keepParent \
+  src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app \
+  TapScribe.TrayBridge-osx-arm64.zip
+```
+
+Three things about those two lines, each of which silently ships a broken
+artifact if it is wrong:
+
+- The bundle lands in the RID output directory, **not** `publish/`. That one
+  receives only the installer package, which `CreatePackage=false` suppresses
+  because its filename carries the version a permanent URL cannot have.
+- **`ditto`, never `zip -r`**: a `.app` is symlinks and executable bits, and a
+  naive zip drops both, producing an archive that unpacks into something macOS
+  will not launch.
+- The release job adds `-p:Version=<tag>` and then asserts the bundle's
+  `CFBundleShortVersionString` against the tag. The `Info.plist` declares no
+  version of its own and the csproj derives both version keys from `$(Version)`,
+  so a publish missing the flag stamps the SDK's own default without failing.
+
+### Installing the Mac build
+
+1. Download `TapScribe.TrayBridge-osx-arm64.zip` from Settings → **Get a
+   bridge** (or the Releases page), unzip it, and move
+   `TapScribe.TrayBridge.MacOS.app` into `/Applications`.
+2. Clear the download quarantine, once per copy:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app
+   ```
+
+3. Open it. The icon appears in the **menu bar** — no Dock icon and no window,
+   which is what `LSUIElement` buys.
+
+**Step 2 is not optional.** v1 is unsigned and un-notarised (ADR-0020), so the
+bundle carries an ad-hoc signature that Gatekeeper rejects outright: opening a
+quarantined copy reports the app as damaged and offers Move to Trash, which
+reads like a broken download rather than the policy decision it is.
+Right-click → **Open** is the bypass for the milder "unidentified developer"
+dialog, which is what a signed-but-not-notarised app gets; it does not rescue
+an ad-hoc one. The attribute arrives with the download, so a later version
+needs the step again.
+
+Apple silicon only, and macOS 14.4 or newer: Launch Services refuses the bundle
+on an older Mac from its `LSMinimumSystemVersion`, and the shell's own floor
+check catches the copies Launch Services never sees.
 
 ## Configuration
 

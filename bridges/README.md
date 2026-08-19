@@ -12,7 +12,7 @@ its own README for platform specifics.
 bridges/
 ├── spacialchat-bridge/      Chrome MV3 extension for spatial.chat
 ├── local-test-bridge/       Python dev tool: mic-to-Recorder for local testing
-├── tray-bridge/             Native tray Bridge (C# / .NET): core + Windows shell
+├── tray-bridge/             Native tray Bridge (C# / .NET): core + Windows and macOS shells
 ├── <future>-bridge/         drop another platform's bridge here
 └── README.md                this file
 ```
