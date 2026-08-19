@@ -314,7 +314,7 @@
 
     <!-- GET A BRIDGE — download the recorder Bridges as GitHub-Release assets.
          Static card built ONCE by settings.js (like Models / Connect a bridge
-         above): the two anchors' hrefs are filled from a single best-effort
+         above): the anchors' hrefs are filled from a single best-effort
          GET /api/bridges on build, never on a poll tick, so there is no
          renderRegion here — nothing is rebuilt per-tick to guard. The links
          point at releases/latest/download/<asset>, which 404 until the first
@@ -330,10 +330,15 @@
           <div class="dim" style="margin-bottom:6px">Unzip, then open chrome://extensions, enable Developer mode, and Load unpacked the spacialchat-bridge folder.</div>
           <a class="act act--sm act--primary" data-slot="bridgeDlSpatial">Download extension (.zip)</a>
         </div>
-        <div class="field">
+        <div class="field" style="margin-bottom:11px">
           <label>Windows tray bridge</label>
           <div class="dim" style="margin-bottom:6px">Copy-and-run .exe (unsigned; Windows SmartScreen may warn — choose More info, Run anyway).</div>
           <a class="act act--sm act--primary" data-slot="bridgeDlTray">Download tray app (.zip)</a>
+        </div>
+        <div class="field">
+          <label>macOS tray bridge <span class="dim">— menu bar, Apple silicon, macOS 14.4+</span></label>
+          <div class="dim" style="margin-bottom:6px">Unzip into /Applications, then clear the download quarantine once — the app is unsigned, so macOS otherwise refuses it as damaged: <span class="mono">xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app</span></div>
+          <a class="act act--sm act--primary" data-slot="bridgeDlMac">Download menu-bar app (.zip)</a>
         </div>
         <div class="dim mono" data-slot="bridgeDlHint" style="margin-top:9px"></div>
       </div>
