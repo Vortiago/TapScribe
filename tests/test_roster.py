@@ -143,3 +143,42 @@ def test_an_all_control_name_does_not_blank_an_existing_one(session_dir: Path) -
     roster.record_occurrence(session_dir, identity="erin", name="Erin", recorded=False)
     roster.record_occurrence(session_dir, identity="erin", name="\n\t\x00", recorded=False)
     assert roster.read_roster(session_dir)["erin"]["name"] == "Erin"
+
+
+# ---- the tap's resolved mode (ADR-0021) ------------------------------------
+
+
+def test_the_roster_records_the_resolved_tap_mode(session_dir: Path) -> None:
+    """Diarization runs AFTER the meeting, possibly after a restart, while the
+    per-identity setting is live and mutable. Without a session-local record
+    the stage would have to ask "is this multi-person NOW?" — wrong, and not
+    reproducible."""
+    roster.record_occurrence(
+        session_dir, identity="tray-sysaudio-1", name="System audio", recorded=True, mode="multi"
+    )
+
+    assert roster.read_roster(session_dir)["tray-sysaudio-1"]["mode"] == "multi"
+
+
+def test_an_occurrence_without_a_mode_defaults_to_single(session_dir: Path) -> None:
+    roster.record_occurrence(session_dir, identity="mic-alice", name="Alice", recorded=True)
+
+    assert roster.read_roster(session_dir)["mic-alice"]["mode"] == "single"
+
+
+def test_a_later_utterance_does_not_downgrade_a_multi_person_tap(session_dir: Path) -> None:
+    """`record_occurrence` is called per utterance; only an explicit new value
+    should move the mode."""
+    roster.record_occurrence(session_dir, identity="tray-sysaudio-1", recorded=True, mode="multi")
+
+    roster.record_occurrence(session_dir, identity="tray-sysaudio-1", recorded=True)
+
+    assert roster.read_roster(session_dir)["tray-sysaudio-1"]["mode"] == "multi"
+
+
+def test_a_pre_feature_roster_entry_reads_as_single(session_dir: Path) -> None:
+    (session_dir / "session-roster.json").write_text(
+        '{"old": {"name": "X", "source": "recorded", "slug": "X", "wavs": []}}', encoding="utf-8"
+    )
+
+    assert roster.read_roster(session_dir)["old"]["mode"] == "single"

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .session_paths import FILENAME_ROSTER_JSON
+from .tap_mode import TAP_MODE_SINGLE, is_mode
 from .text import atomic_write_text, parse_wav_speaker_slug
 
 _VALID_SOURCES = ("recorded", "live")
@@ -89,11 +90,16 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
         return None
     source = value.get("source")
     wavs = value.get("wavs")
+    mode = value.get("mode")
     return {
         "name": value["name"] if isinstance(value.get("name"), str) else "",
         "source": source if source in _VALID_SOURCES else "live",
         "slug": value["slug"] if isinstance(value.get("slug"), str) else "",
         "wavs": [w for w in wavs if isinstance(w, str)] if isinstance(wavs, list) else [],
+        # The mode in effect when this tap opened, so diarization is a property
+        # of the recording rather than of whatever the setting says later
+        # (ADR-0021). A pre-feature entry reads as single.
+        "mode": mode if is_mode(mode) else TAP_MODE_SINGLE,
     }
 
 
@@ -134,6 +140,7 @@ def record_occurrence(
     name: str = "",
     recorded: bool,
     wav: str | None = None,
+    mode: str | None = None,
 ) -> None:
     """Upsert one Identity's presence in this session. Idempotent and
     merge-on-write: a reconnect or a later utterance accrues WAVs (deduped)
@@ -146,9 +153,19 @@ def record_occurrence(
     if not identity:
         return
     roster = read_roster(session_dir)
-    entry = roster.get(identity) or {"name": "", "source": "live", "slug": "", "wavs": []}
+    entry = roster.get(identity) or {
+        "name": "",
+        "source": "live",
+        "slug": "",
+        "wavs": [],
+        "mode": TAP_MODE_SINGLE,
+    }
     if clean_name := sanitise_name(name):
         entry["name"] = clean_name
+    # Only an explicit value moves it: this runs per utterance, and a later call
+    # that says nothing must not downgrade a multi-person tap.
+    if is_mode(mode):
+        entry["mode"] = mode
     if recorded:
         entry["source"] = "recorded"
         if wav:

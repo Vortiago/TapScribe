@@ -25,8 +25,10 @@ from fastapi.testclient import TestClient
 from route_inventory import registered_routes  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
+from tapscribe import tap_mode
 from tapscribe.app import app, get_recorder
 from tapscribe.recorder import Recorder
+from tapscribe.roster import read_roster
 
 # ---------------------------------------------------------------------------
 # Fixtures (the `fake_wlk` fixture is shared via conftest.py so the
@@ -1195,3 +1197,45 @@ def test_pick_tap_subprotocol_empty_token_always_rejects(arbitrary_offer: str):
     from tapscribe.auth import pick_tap_subprotocol
 
     assert pick_tap_subprotocol([arbitrary_offer], "") is None
+
+
+# ---------------------------------------------------------------------------
+# Single- vs multi-person declaration on the wire (ADR-0021). The Roster is
+# what remembers it, so diarization is a property of the RECORDING rather than
+# of whatever the per-identity setting says days later.
+# ---------------------------------------------------------------------------
+
+_FRAME = b"\x10\x00" * 320
+
+
+def _tap_then_roster(client, recorder, query: str):
+    with client.websocket_connect(f"/tap?identity=sysaudio&name=System+audio{query}") as ws:
+        ws.send_bytes(_FRAME)
+    return read_roster(recorder.session_dir)["sysaudio"]
+
+
+def test_a_tap_declaring_multi_is_recorded_as_multi(client, recorder_with_fake_wlk, fake_wlk):
+    entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=multi")
+
+    assert entry["mode"] == "multi"
+
+
+def test_a_tap_declaring_nothing_is_recorded_as_single(client, recorder_with_fake_wlk, fake_wlk):
+    """Every bridge predating this feature sends no declaration."""
+    entry = _tap_then_roster(client, recorder_with_fake_wlk, "")
+
+    assert entry["mode"] == "single"
+
+
+def test_an_unrecognised_declaration_is_recorded_as_single(client, recorder_with_fake_wlk, fake_wlk):
+    entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=sideways")
+
+    assert entry["mode"] == "single"
+
+
+def test_the_operator_override_beats_the_declaration_at_tap_open(client, recorder_with_fake_wlk, fake_wlk):
+    tap_mode.set_override("sysaudio", "multi")
+
+    entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=single")
+
+    assert entry["mode"] == "multi"

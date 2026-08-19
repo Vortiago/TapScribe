@@ -37,7 +37,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
-from .. import auth, config
+from .. import auth, config, tap_mode
 from ..batch_pipeline import PipelineRequest, start_pipeline
 from ..recorder import Recorder
 from ..session_maintenance import (
@@ -382,6 +382,15 @@ async def tap(ws: WebSocket):
     # them.
     tap_pref = recorder.tap_settings.get(identity)
 
+    # Single- vs multi-person, resolved operator override › bridge declaration ›
+    # default single (ADR-0021). Lenient like every other param here: absent or
+    # unrecognised means single, because junk meaning multi would manufacture
+    # Voices out of one human.
+    mode = tap_mode.resolve(
+        declared=ws.query_params.get(tap_mode.TAP_MODE_PARAM),
+        override=tap_mode.overrides().get(identity),
+    )
+
     async with await TapFanOut.open(
         recorder,
         identity=identity,
@@ -389,6 +398,7 @@ async def tap(ws: WebSocket):
         utterance_id=utterance_id,
         do_record=tap_pref.record,
         do_live=tap_pref.live,
+        mode=mode,
         session=tap_session,
         session_dir=tap_session_dir,
     ) as fan_out:

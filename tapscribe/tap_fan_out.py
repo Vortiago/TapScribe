@@ -25,6 +25,7 @@ from uuid import uuid4
 from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
 from .recorder import ActiveStream, Recorder, SessionBusy, UtteranceRecord
+from .tap_mode import TAP_MODE_SINGLE
 from .tap_registry import mark_session_in_flight, register_tap, release_session_mark, unregister_tap
 from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
@@ -66,6 +67,7 @@ class TapFanOut:
         utterance_id: str,
         do_record: bool,
         do_live: bool,
+        mode: str = TAP_MODE_SINGLE,
         session: str | None = None,
         session_dir: Path | None = None,
         tap_relay: TapRelay | None = None,
@@ -93,6 +95,9 @@ class TapFanOut:
         # render one human as two speakers.
         self._filename_name = name or ""
         self._utterance_id = utterance_id
+        # Snapshotted at open, like record/live: the Roster records what was in
+        # effect for THIS tap, so diarization is a property of the recording.
+        self._mode = mode
         # A fresh per-connection token. Two /tap WSes can briefly share one
         # utterance_id (a reconnect firing before the old WS is seen closed),
         # so the UtteranceIndex record and the ActiveStream row are keyed by
@@ -154,6 +159,7 @@ class TapFanOut:
         utterance_id: str,
         do_record: bool,
         do_live: bool,
+        mode: str = TAP_MODE_SINGLE,
         session: str | None = None,
         session_dir: Path | None = None,
         tap_relay: TapRelay | None = None,
@@ -165,6 +171,7 @@ class TapFanOut:
             utterance_id=utterance_id,
             do_record=do_record,
             do_live=do_live,
+            mode=mode,
             session=session,
             session_dir=session_dir,
             tap_relay=tap_relay,
@@ -373,6 +380,7 @@ class TapFanOut:
                 name=self._name,
                 recorded=self._do_record,
                 wav=fname if self._do_record else None,
+                mode=self._mode,
             )
 
         # Include the per-connection owner token so two taps sharing one
