@@ -19,8 +19,8 @@ Roster and `session-meta.json`.
 
 Clustering runs over **all of an identity's audio in the session at once**. A
 level-gated tap emits one WAV per utterance — hundreds in a meeting — and
-independently diarized WAVs produce labels that do not join (the label churn
-#383 flags for chunked diarization, at session scale).
+independently diarized WAVs produce labels that do not join: the label churn
+that #383 flags for chunked diarization, at session scale.
 
 Absolute time makes the join free: every recorder WAV and region clip carries
 its absolute start in its filename (`build_recorder_wav_name`,
