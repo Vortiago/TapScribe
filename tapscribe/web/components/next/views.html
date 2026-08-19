@@ -336,8 +336,8 @@
           <a class="act act--sm act--primary" data-slot="bridgeDlTray">Download tray app (.zip)</a>
         </div>
         <div class="field">
-          <label>macOS tray bridge <span class="dim">— menu bar, Apple silicon, macOS 14.4+</span></label>
-          <div class="dim" style="margin-bottom:6px">Unzip into /Applications, then clear the download quarantine once — the app is unsigned, so macOS otherwise refuses it as damaged: <span class="mono">xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app</span></div>
+          <label>macOS tray bridge <span class="dim">(menu bar, Apple silicon, macOS 14.4+)</span></label>
+          <div class="dim" style="margin-bottom:6px">Unzip into /Applications, then clear the download quarantine once, because the app is unsigned and macOS otherwise refuses it as damaged: <span class="mono">xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app</span></div>
           <a class="act act--sm act--primary" data-slot="bridgeDlMac">Download menu-bar app (.zip)</a>
         </div>
         <div class="dim mono" data-slot="bridgeDlHint" style="margin-top:9px"></div>

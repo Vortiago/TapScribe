@@ -220,8 +220,8 @@ artifact if it is wrong:
    xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app
    ```
 
-3. Open it. The icon appears in the **menu bar** — no Dock icon and no window,
-   which is what `LSUIElement` buys.
+3. Open it. The icon appears in the **menu bar**, with no Dock icon and no
+   window, which is what `LSUIElement` buys.
 
 **Step 2 is not optional.** v1 is unsigned and un-notarised (ADR-0020), so the
 bundle carries an ad-hoc signature that Gatekeeper rejects outright: opening a

@@ -32,7 +32,7 @@ fires `.github/workflows/release.yml`, which builds and publishes everything.
 - **`tapscribe-spacialchat-bridge.zip`** — the SpatialChat Chrome extension
   (unzip → `chrome://extensions` → Developer mode → Load unpacked).
 - **`TapScribe.TrayBridge-win-x64.zip`** — the self-contained Windows tray exe.
-- **`TapScribe.TrayBridge-osx-arm64.zip`** — the macOS menu-bar app bundle
+- **`TapScribe.TrayBridge-osx-arm64.zip`**: the macOS menu-bar app bundle
   (Apple silicon, macOS 14.4+). Zipped with `ditto`, which a `.app`'s symlinks
   and executable bits require. First open needs the download quarantine
   cleared: [bridges/tray-bridge/README.md](bridges/tray-bridge/README.md).
