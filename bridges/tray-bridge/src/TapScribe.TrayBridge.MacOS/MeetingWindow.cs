@@ -18,11 +18,11 @@ namespace TapScribe.TrayBridge.MacOS;
 /// closed flag and the <see cref="Closed"/> event are then this class's own, and there is one
 /// less NSObject in a shell whose NSObjects cannot be constructed under a test host.
 ///
-/// The summary body renders as plain text. Core hands it markdown and says so
-/// (<see cref="MeetingFormView.BodyIsMarkdown"/>); the Windows sibling paints that through
-/// <c>SummaryRichText</c>, and the Mac half of it belongs with the meeting card in slice 8.
-/// Rendering it verbatim in the meantime is the honest reading: a raw recorder error is never
-/// reinterpreted as markup either way.
+/// The summary body is painted through <see cref="SummaryAttributedText"/> over Core's
+/// <see cref="SummaryLayout"/>, the same runs the WinForms sibling paints, and only when Core
+/// says the body IS markdown (<see cref="MeetingFormView.BodyIsMarkdown"/>). A raw recorder
+/// error goes through <see cref="SummaryMarkdown.Plain"/> instead, so an asterisk in a path
+/// stays an asterisk.
 /// </summary>
 internal sealed class MeetingWindow : IMeetingWindow, IDisposable
 {
@@ -169,7 +169,11 @@ internal sealed class MeetingWindow : IMeetingWindow, IDisposable
         if (view.Body != _rawBody)
         {
             _rawBody = view.Body;
-            _body.Value = view.Body;
+            // Parsed only when Core says the body IS markdown. A raw recorder error is not,
+            // and reinterpreting one as markup would turn a path with an asterisk in it into
+            // emphasis and silently eat the asterisk.
+            _body.TextStorage!.SetString(SummaryAttributedText.Build(
+                view.BodyIsMarkdown ? SummaryMarkdown.Parse(view.Body) : SummaryMarkdown.Plain(view.Body)));
         }
         _copy.Enabled = view.CanCopy;
     }

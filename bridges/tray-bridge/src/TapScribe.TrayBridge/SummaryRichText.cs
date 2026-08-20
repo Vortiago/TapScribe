@@ -1,22 +1,27 @@
 using System.Drawing;
+using System.Windows.Forms;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.TrayBridge;
 
 /// <summary>
-/// Renders the Core <see cref="SummaryMarkdown"/> block model onto a read-only
-/// <see cref="RichTextBox"/> with native styled runs — headings in a larger bold font,
-/// bullet/numbered prefixes, inline <c>**bold**</c>/<c>*italic*</c>, and monospace
-/// <c>`code`</c> on a tinted background. Presentation only: every parsing/structure decision
-/// lives in Core, so this just maps blocks to selection fonts/colours via the standard
-/// "move the caret to the end, set the selection font, AppendText" pattern. A plain static
-/// helper (not a custom <see cref="Control"/> subclass) so it adds no public Control property
-/// and never trips the WFO1000 WinForms designer analyser.
+/// Paints Core's <see cref="SummaryLayout"/> runs into a <see cref="RichTextBox"/>.
+///
+/// Everything this used to decide now lives in Core, where the Mac shell reads the same
+/// answers and a test can reach them: a RichTextBox cannot be constructed in the test suite,
+/// so the separator rule and the heading ramp shipped uncovered while they were here. What is
+/// left is the one genuinely WinForms part, the "move the caret to the end, set the selection
+/// font, AppendText" pattern that RichTextBox requires for mixed formatting.
+///
+/// A plain static class rather than a control subclass: nothing here holds state beyond the
+/// font cache, and the caller already owns the box.
 /// </summary>
 internal static class SummaryRichText
 {
     private const string UiFamily = "Segoe UI";
     private const string MonoFamily = "Consolas";
+
+    // What Core's SummaryRun.SizePlus is relative to.
     private const float BodySize = 10f;
 
     private static readonly Color CodeBack = Color.FromArgb(242, 242, 242);
@@ -29,34 +34,18 @@ internal static class SummaryRichText
     {
         box.Clear();
 
-        MarkdownBlockKind? prev = null;
-        foreach (MarkdownBlock block in blocks)
+        foreach (SummaryRun run in SummaryLayout.Flatten(blocks))
         {
-            if (prev is not null)
-                Append(box, Separator(prev.Value, block.Kind), UiFamily, BodySize, FontStyle.Regular);
-            prev = block.Kind;
-
-            switch (block.Kind)
-            {
-                case MarkdownBlockKind.Heading:
-                    float size = block.Level switch { 1 => 16f, 2 => 14f, 3 => 12f, _ => 11f };
-                    AppendSpans(box, block.Spans, UiFamily, size, FontStyle.Bold);
-                    break;
-
-                case MarkdownBlockKind.Bullet or MarkdownBlockKind.Numbered:
-                    string marker = block.Kind == MarkdownBlockKind.Bullet ? "•  " : $"{block.Level}.  ";
-                    Append(box, marker, UiFamily, BodySize, FontStyle.Regular);
-                    AppendSpans(box, block.Spans, UiFamily, BodySize, FontStyle.Regular);
-                    break;
-
-                case MarkdownBlockKind.Code:
-                    Append(box, block.Text, MonoFamily, BodySize, FontStyle.Regular, CodeBack);
-                    break;
-
-                default: // Paragraph
-                    AppendSpans(box, block.Spans, UiFamily, BodySize, FontStyle.Regular);
-                    break;
-            }
+            box.SelectionStart = box.TextLength;
+            box.SelectionLength = 0;
+            box.SelectionFont = Font(
+                run.Mono ? MonoFamily : UiFamily,
+                BodySize + run.SizePlus,
+                Style(run.Emphasis));
+            // Shading follows the monospace face, which is the convention Core's Mono flag
+            // carries: inline code and code blocks are the only shaded runs a summary has.
+            box.SelectionBackColor = run.Mono ? CodeBack : box.BackColor;
+            box.AppendText(run.Text);
         }
 
         // Open scrolled to the top so the reader starts at the summary's first line.
@@ -65,49 +54,14 @@ internal static class SummaryRichText
         box.ScrollToCaret();
     }
 
-    // Blank line between block-level elements; a single newline keeps a run of same-kind
-    // list items tight, the way a markdown <ul>/<ol> reads.
-    private static string Separator(MarkdownBlockKind prev, MarkdownBlockKind cur)
+    private static FontStyle Style(SummaryEmphasis emphasis)
     {
-        bool tightList =
-            (prev == MarkdownBlockKind.Bullet && cur == MarkdownBlockKind.Bullet) ||
-            (prev == MarkdownBlockKind.Numbered && cur == MarkdownBlockKind.Numbered);
-        return tightList ? "\n" : "\n\n";
-    }
-
-    private static void AppendSpans(
-        RichTextBox box, IReadOnlyList<MarkdownSpan> spans, string family, float size, FontStyle baseStyle)
-    {
-        foreach (MarkdownSpan span in spans)
-        {
-            switch (span.Style)
-            {
-                case MarkdownInline.Bold:
-                    Append(box, span.Text, family, size, baseStyle | FontStyle.Bold);
-                    break;
-                case MarkdownInline.Italic:
-                    Append(box, span.Text, family, size, baseStyle | FontStyle.Italic);
-                    break;
-                case MarkdownInline.Code:
-                    Append(box, span.Text, MonoFamily, size, FontStyle.Regular, CodeBack);
-                    break;
-                default:
-                    Append(box, span.Text, family, size, baseStyle);
-                    break;
-            }
-        }
-    }
-
-    private static void Append(
-        RichTextBox box, string text, string family, float size, FontStyle style, Color? back = null)
-    {
-        if (text.Length == 0)
-            return;
-        box.SelectionStart = box.TextLength;
-        box.SelectionLength = 0;
-        box.SelectionFont = Font(family, size, style);
-        box.SelectionBackColor = back ?? box.BackColor;
-        box.AppendText(text);
+        FontStyle style = FontStyle.Regular;
+        if (emphasis.HasFlag(SummaryEmphasis.Bold))
+            style |= FontStyle.Bold;
+        if (emphasis.HasFlag(SummaryEmphasis.Italic))
+            style |= FontStyle.Italic;
+        return style;
     }
 
     private static Font Font(string family, float size, FontStyle style)
@@ -118,6 +72,7 @@ internal static class SummaryRichText
             font = new Font(family, size, style);
             FontCache[key] = font;
         }
+
         return font;
     }
 }
