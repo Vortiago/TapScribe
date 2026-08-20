@@ -45,60 +45,40 @@ public class MeterProbeTests
         Assert.True(enumerator.Disposed, "the enumerator opened for a pick that missed was left open");
     }
 
-    [Fact]
-    public void Start_WhenTheDeviceRefusesToOpen_SurfacesTheMessageAndStaysStopped()
+    [Theory]
+    [MemberData(nameof(DeclaredOpenFailures))]
+    public void Start_WhenOpenFails_ReportsItRatherThanThrowing(Exception refusal, string expected)
     {
-        // The capture seam's declared failure, which on a Mac is most often a denied
-        // microphone grant. Reported beside the bar rather than thrown: this runs from a
-        // checkbox in a dialog whose other fields must stay editable.
-        var enumerator = new Enumerator([Mic]) { OpenError = new ExternalException("opening mic-1", -66748) };
+        // One test for the seam's whole declared set, because the probe treats them as one path
+        // and separate copies differing only in a type would say otherwise. The set is the
+        // point: the filter listed two of these four, and the rest escaped an NSButton handler,
+        // which on AppKit ends the tray rather than merely leaving a bar dead.
+        var enumerator = new Enumerator([Mic]) { OpenError = refusal };
         using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
 
         probe.Start();
 
         Assert.False(probe.Running);
-        Assert.Contains("opening mic-1", probe.Error);
-        Assert.True(enumerator.Disposed);
+        Assert.Contains(expected, probe.Error);
+        Assert.True(enumerator.Disposed, "a refused open left its enumerator open");
     }
 
-    [Fact]
-    public void Start_WhenTheEndpointVanishedBetweenTheListAndTheOpen_ReportsItRatherThanThrowing()
-    {
-        // The enumerator seam's declared clause for "the id names no active endpoint of the
-        // requested flow" is ArgumentException, and the window between this probe's List and
-        // its Open is two separate HAL walks wide. It runs from an NSButton handler, so an
-        // escape here reaches AppKit and takes the tray with it.
-        var enumerator = new Enumerator([Mic])
+    // One row per <exception> tag on IAudioDeviceEnumerator.Open, so a tag added there without a
+    // row here is a gap this file can be asked about.
+    public static TheoryData<Exception, string> DeclaredOpenFailures() =>
+        new()
         {
-            OpenError = new ArgumentException("no active capture endpoint with UID 'mic-1'", "device"),
+            // The platform refused the endpoint: on a Mac most often a denied microphone grant.
+            { new ExternalException("opening mic-1", -66748), "opening mic-1" },
+            // The id names no active endpoint of the requested flow. The window between this
+            // probe's List and its Open is two separate HAL walks wide.
+            { new ArgumentException("no active capture endpoint with UID 'mic-1'", "device"), "mic-1" },
+            // No format the pipeline can take, raised from the capture's own constructor: a
+            // property of the operator's hardware rather than a race, so it is deterministic.
+            { new NotSupportedException("unsupported stream layout: 24-bit packed"), "24-bit packed" },
+            // The endpoint cannot be opened in its current state.
+            { new InvalidOperationException("device is not running"), "not running" },
         };
-        using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
-
-        probe.Start();
-
-        Assert.False(probe.Running);
-        Assert.Contains("mic-1", probe.Error);
-        Assert.True(enumerator.Disposed);
-    }
-
-    [Fact]
-    public void Start_WhenTheDeviceLayoutIsUnreadable_ReportsItRatherThanThrowing()
-    {
-        // CoreAudioFormat.Classify's declared refusal, raised from the capture's own
-        // constructor: a property of the operator's hardware rather than a race, so ticking
-        // the box on such a Mac is deterministic. Same escape route as above.
-        var enumerator = new Enumerator([Mic])
-        {
-            OpenError = new NotSupportedException("unsupported stream layout: 24-bit packed"),
-        };
-        using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
-
-        probe.Start();
-
-        Assert.False(probe.Running);
-        Assert.Contains("24-bit packed", probe.Error);
-        Assert.True(enumerator.Disposed);
-    }
 
     [Fact]
     public void Stop_DisposesTheCaptureBeforeItsEnumerator()

@@ -58,24 +58,16 @@ internal sealed class MeterProbe(
             meter.Start();
             _meter = meter;
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
+        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
         {
-            // As wide as SettingsWindow's connection test, and for a sharper version of the
-            // same reason: this runs from an NSButton handler, where an escape reaches AppKit
-            // and takes the tray with it rather than merely leaving a button dead.
+            // The seam's whole declared set, named once in Core rather than listed here. Listing
+            // it here is what shipped and it listed two of the four: the other two, an endpoint
+            // gone between the List and the Open and a layout the pipeline cannot read, escaped
+            // into an NSButton handler, which on AppKit ends the tray.
             //
-            // Naming the seam's types instead is what shipped, and it named two of four. The
-            // enumerator answers "the id names no active endpoint of the requested flow" with
-            // ArgumentException - the endpoint-went-away-between-the-list-and-the-open case
-            // this comment already claimed - and CoreAudioFormat.Classify refuses an unreadable
-            // layout with NotSupportedException, which is a property of the operator's hardware
-            // rather than a race. Both escaped. A filter that has to stay in step with two
-            // seams' declared sets is the wrong shape for the one place where being wrong ends
-            // the process.
-            //
-            // Stop() covers what the throw left behind wherever it came from: the enumerator is
-            // released, and with it the HAL that owns any tap, aggregate or IOProc the failed
-            // open had got as far as creating.
+            // Not a catch-all, though an escape here is that costly. A catch-all also swallows
+            // what no device can produce, and reports a null dereference to the operator as a
+            // level bar that does not move.
             Error = ex.Message;
             Stop();
         }
