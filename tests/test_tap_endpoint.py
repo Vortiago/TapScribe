@@ -1273,6 +1273,26 @@ def test_the_tap_mode_route_requires_an_identity(client, recorder_with_fake_wlk)
     assert client.put("/api/tap-mode", json={"mode": "multi"}).status_code == 400
 
 
+def test_api_state_reports_the_bridge_declaration_with_no_override(client, recorder_with_fake_wlk):
+    """The declaration path, unmasked. The sibling below sets an override, which
+    is exactly what hid `ActiveStream.mode` never being passed at all."""
+    with client.websocket_connect("/tap?identity=sysaudio&name=System+audio&tap_mode=multi") as ws:
+        ws.send_bytes(_FRAME)
+        rows = client.get("/api/state").json()["active"]
+        assert [r["mode"] for r in rows if r["identity"] == "sysaudio"] == ["multi"]
+
+
+def test_api_state_falls_back_to_the_declaration_when_an_override_is_cleared(client, recorder_with_fake_wlk):
+    """Storing the RESOLVED value instead of the declaration would pin the row
+    to the overridden mode forever."""
+    tap_mode.set_override("sysaudio", "single")
+    with client.websocket_connect("/tap?identity=sysaudio&name=System+audio&tap_mode=multi") as ws:
+        ws.send_bytes(_FRAME)
+        client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": None})
+        rows = client.get("/api/state").json()["active"]
+        assert [r["mode"] for r in rows if r["identity"] == "sysaudio"] == ["multi"]
+
+
 def test_the_effective_mode_shows_on_api_state(client, recorder_with_fake_wlk) -> None:
     """The overlay reports what is effective NOW, so flipping a tap is visible
     even though it only binds on the next WS."""
