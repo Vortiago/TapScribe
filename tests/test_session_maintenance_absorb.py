@@ -30,7 +30,7 @@ from wav_builders import seed_session  # type: ignore[import-not-found]
 from tapscribe import session_maintenance, voices
 from tapscribe.roster import read_roster, record_occurrence
 from tapscribe.session_paths import FILENAME_TRANSCRIPT_JSON, FILENAME_TRANSCRIPT_TXT
-from tapscribe.sessions import known_names_for_session
+from tapscribe.sessions import known_names_for_session, read_session_meta, write_session_meta
 
 # Recorder-format filenames: <ISO stamp>_<speaker slug>_<ident[:10]>_<uuid8>.wav
 ALICE_WAV = "2026-01-01T00-00-00Z_Alice_Andersen_sc-alice-_aaaaaaaa.wav"
@@ -187,3 +187,36 @@ def test_absorb_drops_a_colliding_identitys_voices_from_both_sides(rec_root: Pat
 
     assert voices.read_voices(target) == {}, "a collided identity must survive on neither side"
     assert result["voices_collided"] == [ALICE_IDENTITY]
+
+
+def test_absorb_carries_the_operators_voice_to_person_map(rec_root: Path):
+    """The spans are half the Voice state; the `person_id` pointers on
+    session-meta are the operator's own half, and the rmtree kills those too."""
+    seed_session(rec_root, "tgt", [ALICE_WAV])
+    source = seed_session(rec_root, "src", [BOB_WAV])
+    voices.record_voices(source, identity=BOB_IDENTITY, run_id="run-s", spans={"A": [(_T0, _T1)]})
+    write_session_meta("src", {"voices": {f"{BOB_IDENTITY}#A": {"person_id": "p_bob", "run_id": "run-s"}}})
+    write_session_meta("tgt", {"voices": {f"{ALICE_IDENTITY}#A": {"person_id": "p_ali", "run_id": "run-t"}}})
+
+    session_maintenance.absorb_session("tgt", "src")
+
+    assert read_session_meta("tgt")["voices"] == {
+        f"{ALICE_IDENTITY}#A": {"person_id": "p_ali", "run_id": "run-t"},
+        f"{BOB_IDENTITY}#A": {"person_id": "p_bob", "run_id": "run-s"},
+    }
+    assert not (rec_root / "src").exists()
+
+
+def test_absorb_drops_a_collided_identitys_mappings_from_the_map_too(rec_root: Path):
+    """`fold_voices` dropped its spans from both sides, so the pointers name
+    nothing — leaving them would re-apply on the next diarize."""
+    target = seed_session(rec_root, "tgt", [ALICE_WAV])
+    source = seed_session(rec_root, "src", [BOB_WAV])
+    voices.record_voices(target, identity=ALICE_IDENTITY, run_id="run-t", spans={"A": [(_T0, _T1)]})
+    voices.record_voices(source, identity=ALICE_IDENTITY, run_id="run-s", spans={"A": [(_T0, _T1)]})
+    write_session_meta("tgt", {"voices": {f"{ALICE_IDENTITY}#A": {"person_id": "p_ali", "run_id": "run-t"}}})
+    write_session_meta("src", {"voices": {f"{ALICE_IDENTITY}#A": {"person_id": "p_x", "run_id": "run-s"}}})
+
+    session_maintenance.absorb_session("tgt", "src")
+
+    assert read_session_meta("tgt").get("voices", {}) == {}

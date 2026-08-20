@@ -90,6 +90,10 @@ def overrides() -> dict[str, str]:
     try:
         parsed = _parse_overrides(path.read_text(encoding="utf-8"))
     except OSError:
+        # Raised by a delete or a permission change between the stat above and
+        # this read. Degrade to the bridges' own declarations rather than fail a
+        # tap open or the /api/state tick; what is lost is the operator's
+        # overrides until the next call, which re-reads.
         return {}
     _OVERRIDES_CACHE["_slot"] = (sig, parsed)
     return dict(parsed)

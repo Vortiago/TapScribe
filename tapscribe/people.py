@@ -91,8 +91,12 @@ def _coerce_people(data: Any) -> list[dict[str, Any]]:
         # An identity-less Person is legitimate when it carries a NAME: a Voice
         # mapped by typing one creates exactly that, and a session's `voices`
         # map reaches it by `person_id` (ADR-0021). Unnamed AND unreachable is
-        # still junk.
-        if not clean_idents and not (isinstance(name, str) and name.strip()):
+        # still junk — and so is a row the dedup above just EMPTIED, which is a
+        # duplicate-identity repair, not a Voice-mapped Person. Without that
+        # second half, a torn people.json's duplicate row survives forever as a
+        # named ghost owning nothing.
+        emptied_by_dedup = any(isinstance(i, str) and i for i in idents)
+        if not clean_idents and (emptied_by_dedup or not (isinstance(name, str) and name.strip())):
             continue
         seen_ids.add(pid)
         seen_idents.update(clean_idents)

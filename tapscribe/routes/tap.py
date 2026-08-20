@@ -294,11 +294,18 @@ async def api_tap_mode_put(req: Request):
     predating the feature sends nothing, but an operator typing a bad value
     deserves a 400 rather than a silent fall-through to `single`. Durable and
     per identity, so it outlives a restart; takes effect on the NEXT /tap WS.
+
+    `mode` is REQUIRED, and an explicit `null` is the only way to clear: unlike
+    the sibling `/api/tap-settings`, an omitted field here cannot mean "leave
+    unchanged" — `None` is already spoken for — so accepting the omission would
+    let a body that simply lost a field destroy a durable operator setting.
     """
     body = await json_body(req)
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
+    if "mode" not in body:
+        raise HTTPException(400, "mode required (null clears the override)")
     mode = body.get("mode")
     try:
         tap_mode.set_override(identity, mode)
@@ -409,7 +416,12 @@ async def tap(ws: WebSocket):
     # default single (ADR-0021). Lenient like every other param here: absent or
     # unrecognised means single, because junk meaning multi would manufacture
     # Voices out of one human.
-    declared_mode = ws.query_params.get(tap_mode.TAP_MODE_PARAM) or ""
+    #
+    # Narrowed to the two reserved spellings HERE, not just where it is read:
+    # `declared_mode` rides the ActiveStream into every /api/state row, and a raw
+    # query param is unbounded. Same seam `?name=` crosses via `sanitise_name`.
+    declared = ws.query_params.get(tap_mode.TAP_MODE_PARAM) or ""
+    declared_mode = declared if tap_mode.is_mode(declared) else ""
     mode = tap_mode.resolve(declared=declared_mode, override=tap_mode.overrides().get(identity))
 
     async with await TapFanOut.open(

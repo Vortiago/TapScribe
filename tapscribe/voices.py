@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .session_paths import FILENAME_VOICES_JSON
-from .text import atomic_write_text
+from .text import atomic_write_text, parse_iso
 
 #: One `{"start": iso, "end": iso}` pair, as stored.
 Span = dict[str, str]
@@ -39,8 +39,18 @@ def _coerce_spans(value: Any) -> list[Span]:
         if not isinstance(span, dict):
             continue
         start, end = span.get("start"), span.get("end")
-        if isinstance(start, str) and isinstance(end, str) and start and end:
-            out.append({"start": start, "end": end})
+        if not (isinstance(start, str) and isinstance(end, str) and start and end):
+            continue
+        try:
+            # Parse to VALIDATE, not to store. Shape alone is not enough: the
+            # merge-time join parses these instants INSIDE `merge_session`, so an
+            # unparseable one would fail a whole transcribe job instead of
+            # degrading to "no Voices" the way this module promises.
+            parse_iso(start)
+            parse_iso(end)
+        except ValueError:
+            continue
+        out.append({"start": start, "end": end})
     return out
 
 
@@ -60,13 +70,21 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
             voices[label] = {"spans": spans}
     if not voices:
         return None
-    run_id = value.get("run_id")
-    return {"run_id": run_id if isinstance(run_id, str) else "", "voices": voices}
+    return {"run_id": _run_id_of(value), "voices": voices}
+
+
+def _run_id_of(entry: Any) -> str:
+    """ONE spelling of "this entry's run stamp", so the full coercion and the
+    poll's `run_ids` shortcut cannot disagree. A non-string reads as unstamped:
+    name resolution compares it against a mapping's stamp, and a truthy
+    non-string would silently discard a valid Voice→Person mapping."""
+    run_id = entry.get("run_id") if isinstance(entry, dict) else None
+    return run_id if isinstance(run_id, str) else ""
 
 
 def coerce_voices(raw: Any) -> dict[str, dict[str, Any]]:
-    """Raw parsed mapping → `{full identity: entry}`, dropping junk. Shared by
-    `read_voices` and the cached poll path so both produce one shape."""
+    """Raw parsed mapping → `{full identity: entry}`, dropping junk. The full
+    coercion, for `read_voices`; the poll reads `run_ids` instead."""
     if not isinstance(raw, dict):
         return {}
     out: dict[str, dict[str, Any]] = {}
@@ -85,7 +103,7 @@ def run_ids(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     return {
-        identity: entry.get("run_id") or ""
+        identity: _run_id_of(entry)
         for identity, entry in raw.items()
         if isinstance(identity, str) and identity and isinstance(entry, dict)
     }

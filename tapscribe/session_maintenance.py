@@ -59,7 +59,7 @@ from .tap_registry import (
     try_claim_destruct,
     unregister_tap,
 )
-from .text import atomic_write_text, parse_wav_start
+from .text import atomic_write_text, parse_wav_start, split_voice_key
 from .wav_cache import sidecar_paths
 
 # Public surface: this module's own operations plus the tap_registry names it
@@ -355,6 +355,15 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
                 tgt_strip_meta["files"] = {**src_strip_meta["files"], **tgt_strip_meta["files"]}
             strip_meta.write_strip_meta(tgt_stripped_dir, tgt_strip_meta or src_strip_meta)
 
+    # Carry the source's Voices across, or the rmtree below destroys them while
+    # the WAVs they describe live on in the target. An identity on both sides is
+    # dropped from both: each session's Voice `A` is a different human (ADR-0021).
+    src_voices = voices.read_voices(source_dir)
+    tgt_voices = voices.read_voices(target_dir)
+    voices_merged, collided = voices.fold_voices(tgt_voices, src_voices)
+    if src_voices:
+        voices.write_voices(target_dir, voices_merged)
+
     # Merge speaker aliases. Target wins on conflict; source fills in keys
     # the target doesn't already have. Target's label is preserved as-is.
     tgt_meta = read_session_meta(target)
@@ -366,12 +375,26 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         if k not in tgt_aliases:
             tgt_aliases[k] = v
             aliases_added.append(k)
-    if aliases_added or tgt_meta:
+    # The operator's Voice→Person map is the OTHER half of the Voice state, and
+    # it lives here rather than in the sidecar. Same conflict rule as the
+    # aliases — minus every identity `fold_voices` just dropped, on either side,
+    # whose spans no longer exist for a pointer to name.
+    tgt_voice_map = {
+        k: v for k, v in (tgt_meta.get("voices") or {}).items() if split_voice_key(k)[0] not in collided
+    }
+    voice_map_added: list[str] = []
+    for k, v in (src_meta.get("voices") or {}).items():
+        if k in tgt_voice_map or split_voice_key(k)[0] in collided:
+            continue
+        tgt_voice_map[k] = v
+        voice_map_added.append(k)
+    if aliases_added or voice_map_added or tgt_meta:
         write_session_meta(
             target,
             {
                 "label": tgt_meta.get("label", "") or "",
                 "aliases": tgt_aliases,
+                "voices": tgt_voice_map,
             },
         )
 
@@ -405,15 +428,6 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             target_dir / FILENAME_ROSTER_JSON,
             json.dumps(tgt_roster, indent=2, ensure_ascii=False),
         )
-
-    # Carry the source's Voices across, or the rmtree below destroys them while
-    # the WAVs they describe live on in the target. An identity on both sides is
-    # dropped from both: each session's Voice `A` is a different human (ADR-0021).
-    src_voices = voices.read_voices(source_dir)
-    tgt_voices = voices.read_voices(target_dir)
-    voices_merged, collided = voices.fold_voices(tgt_voices, src_voices)
-    if src_voices:
-        voices.write_voices(target_dir, voices_merged)
 
     # The target's merged transcript predates the just-moved WAVs, so it's
     # now stale. Drop it — both the JSON and the plain-text rendering

@@ -222,3 +222,19 @@ def test_rename_and_merge_still_work_on_an_identity_less_person() -> None:
     reg.merge(owner["id"], voice_person["id"])
     assert reg.get(voice_person["id"]) is None
     assert reg.person_for_identity("tray-mic-1")["id"] == owner["id"]
+
+
+def test_a_duplicate_identity_row_is_still_dropped_rather_than_kept_as_a_ghost() -> None:
+    """The widening is for a Person that never owned an Identity. A row the
+    dedup EMPTIED is a torn-file repair — keeping it as a named, identity-less
+    Person makes it indistinguishable from a Voice mapping, and nothing prunes."""
+    people = _coerce_people(
+        {
+            "people": [
+                {"id": "p1", "name": "Alice", "identities": ["tray-mic-1"]},
+                {"id": "p2", "name": "Alicia", "identities": ["tray-mic-1"]},
+            ]
+        }
+    )
+
+    assert [p["id"] for p in people] == ["p1"]

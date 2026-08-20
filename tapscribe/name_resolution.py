@@ -80,7 +80,15 @@ def resolve_session_names(
     (`identity#<voice> → {person_id, run_id}`) and `voice_runs` is each
     identity's CURRENT `run_id` from the sidecar. They must agree, or the
     mapping predates a re-diarization and would put a named human on whatever
-    the new run happens to call `A`.
+    the new run happens to call `A`. A sidecar that names NO run for an identity
+    (deleted, torn, or never diarized) leaves its mappings applied: nothing has
+    superseded them, and the transcript keys they name came from the run they
+    were stamped against.
+
+    Two ways this pass departs from the omit rule above, both deliberate: a
+    voice key ALWAYS resolves — to `Speaker <label>` when nothing maps it, since
+    the operator has to recognise the row to map it — and it is keyed off the
+    transcript's own speaker list rather than the roster.
     """
     slug_to_identity: dict[str, str] = {}
     default_by_slug: dict[str, str] = {}

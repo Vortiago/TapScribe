@@ -713,6 +713,8 @@ speech spans live in `session-voices.json`; the operator maps it to a Person on
 the Transcript stage, and that mapping is a run-stamped `person_id` pointer in
 `session-meta.json`. An unmapped Voice binds to nobody. ADR-0021.
 
+## Person · Identity · Roster · People Registry
+
 The canonical, cross-session naming model (ADR-0009). Distinct concepts that
 are easy to conflate:
 

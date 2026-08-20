@@ -55,13 +55,14 @@ Resolution: `slug#<voice>` → identity (the Roster's slug join) → the meta ma
 
 Mapping a Voice by typing a name creates one. Two consequences in `people.py`:
 
-- `_coerce_people` drops a row with an empty `identities` list
-  (people.py:91-92) — correct while reachability was identity-only, wrong now
-  that a session's `voices` map also reaches a Person. The rule widens.
-- There is no bare **create** verb. The voice-mapping PUT accepts a name and
-  creates the Person as part of the mapping, so a Person never exists
-  unattached. Session maintenance prunes one left with neither an Identity nor
-  a live voice pointer.
+- `_coerce_people` keeps an identity-less row that carries a NAME: a session's
+  `voices` map reaches a Person by `person_id`, so identities are no longer the
+  only reachability. A row the one-Identity-one-Person dedup EMPTIED is still
+  dropped — that is a torn-file repair, not a Voice mapping.
+- There is no bare **create** verb on the route surface. The voice-mapping PUT
+  accepts a name and creates the Person as part of the mapping, so a Person is
+  never left unattached, and session maintenance prunes one left with neither an
+  Identity nor a live voice pointer.
 
 ## Surfaces
 
@@ -132,4 +133,7 @@ segmentation + embedding pair fits; pyannote's torch stack does not.
 ## Left to implementation
 
 The **engine package** (wheel matrix; vendorable models or fetched — wants a
-spike) and the **durable store** for the per-identity single/multi override.
+spike) and the diarize stage that runs it, the **voice-mapping PUT** with its
+Person prune, and the two **surfaces** above — the Transcript stage's mapping
+control and the Taps single/multi control. The durable override store is
+`tapscribe/tap_mode.py` (`tap-modes.json`, `PUT /api/tap-mode`).

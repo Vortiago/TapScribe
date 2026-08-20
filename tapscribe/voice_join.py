@@ -62,16 +62,41 @@ def _overlap(a_start: datetime, a_end: datetime, span: VoiceSpan) -> float:
 
 
 def _dominant(start: datetime, end: datetime, spans: Sequence[VoiceSpan]) -> str | None:
-    """Label overlapping `[start, end)` most, or None. Ties break on label so
-    the same input always attributes the same way."""
-    best: tuple[float, str] | None = None
+    """The label overlapping `[start, end)` most — summed ACROSS that label's
+    spans, not the single longest one. A diarizer emits one turn as many short
+    spans, so a per-span maximum hands a fragmented speaker's words to whoever
+    managed one longer run. Ties break on label so the same input always
+    attributes the same way.
+
+    A zero-width window falls back to containment: `Word` timestamps are rounded
+    to 2 dp, so a short token can collapse to `start == end`, which overlaps
+    nothing by measure and would otherwise break a homogeneous run in three.
+    """
+    totals: dict[str, float] = {}
     for span in spans:
         seconds = _overlap(start, end, span)
-        if seconds <= 0.0:
-            continue
-        if best is None or (seconds, span.label) > (best[0], best[1]):
-            best = (seconds, span.label)
-    return best[1] if best else None
+        if seconds > 0.0:
+            totals[span.label] = totals.get(span.label, 0.0) + seconds
+    if not totals and end <= start:
+        totals = {s.label: 0.0 for s in spans if s.start <= start <= s.end}
+    if not totals:
+        return None
+    return max(totals.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
+#: Below this, the filter pass costs more than the per-word scans it saves.
+_WINDOW_MIN_SPANS = 8
+
+
+def _window(spans: Sequence[VoiceSpan], lo: datetime, hi: datetime) -> Sequence[VoiceSpan]:
+    """The spans that can touch `[lo, hi]` — deliberately inclusive, so it is a
+    superset of what `_dominant` could pick and narrowing can never change an
+    answer. ONE pass per segment ahead of the per-WORD scans below: `spans` is
+    every turn in the SESSION, so without this a merge is O(words x turns) and a
+    long diarized meeting spends tens of seconds in `_overlap`."""
+    if len(spans) <= _WINDOW_MIN_SPANS:
+        return spans
+    return [s for s in spans if s.end >= lo and s.start <= hi]
 
 
 def attribute_segment(
@@ -89,6 +114,14 @@ def attribute_segment(
     """
     abs_start = wav_start + timedelta(seconds=seg.start)
     abs_end = wav_start + timedelta(seconds=seg.end)
+    if spans:
+        # Words are normally inside the segment's own bounds, but nothing in the
+        # Transcriber contract says so — take the union before narrowing.
+        lo, hi = abs_start, abs_end
+        for word in seg.words or ():
+            lo = min(lo, wav_start + timedelta(seconds=word.start))
+            hi = max(hi, wav_start + timedelta(seconds=word.end))
+        spans = _window(spans, lo, hi)
     runs = _word_runs(seg, wav_start, spans) if (spans and seg.words) else []
     if len(runs) > 1:
         return [

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .session_paths import FILENAME_ROSTER_JSON
-from .tap_mode import TAP_MODE_SINGLE, is_mode
+from .tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE, is_mode
 from .text import atomic_write_text, parse_wav_speaker_slug
 
 _VALID_SOURCES = ("recorded", "live")
@@ -96,9 +96,9 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
         "source": source if source in _VALID_SOURCES else "live",
         "slug": value["slug"] if isinstance(value.get("slug"), str) else "",
         "wavs": [w for w in wavs if isinstance(w, str)] if isinstance(wavs, list) else [],
-        # The mode in effect when this tap opened, so diarization is a property
-        # of the recording rather than of whatever the setting says later
-        # (ADR-0021). A pre-feature entry reads as single.
+        # `multi` once any tap for this identity opened multi-person, so
+        # diarization is a property of the recording rather than of whatever the
+        # setting says later (ADR-0021). A pre-feature entry reads as single.
         "mode": mode if is_mode(mode) else TAP_MODE_SINGLE,
     }
 
@@ -162,9 +162,17 @@ def record_occurrence(
     }
     if clean_name := sanitise_name(name):
         entry["name"] = clean_name
-    # Only an explicit value moves it: this runs per utterance, and a later call
-    # that says nothing must not downgrade a multi-person tap.
-    if is_mode(mode):
+    # Upgrade-only, like `source` below. This runs per utterance and the tap
+    # path always passes a RESOLVED mode (never None), so last-write-wins would
+    # let one late tap — a reconnect, a cleared override, a live-only WS —
+    # retroactively mark a session's already-recorded multi-person WAVs single.
+    # Diarization is a property of the recording: if any tap for this identity
+    # carried several humans, this session's audio for it does. That does strand
+    # a mid-session multi->single correction until the next session (the Roster
+    # is per-session), which the asymmetry justifies: diarizing single-person
+    # audio costs one wasted pass and finds one Voice, while skipping
+    # multi-person audio loses the attribution entirely.
+    if mode == TAP_MODE_MULTI:
         entry["mode"] = mode
     if recorded:
         entry["source"] = "recorded"

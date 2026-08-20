@@ -158,3 +158,30 @@ def test_editing_another_meta_field_preserves_the_voices_map(recorder_under_test
     meta = read_session_meta("sv3")
     assert meta["label"] == "Renamed"
     assert meta["voices"] == {"tray-sys#A": {"person_id": "p1", "run_id": "r1"}}
+
+
+# ---------------------------------------------------------------------------
+# Value-level coercion. `merge_session` PARSES these instants inline, so a
+# shape-only check leaves a torn sidecar failing a whole transcribe job.
+# ---------------------------------------------------------------------------
+
+_SPAN = {"start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}
+
+
+def test_a_span_whose_instants_do_not_parse_is_dropped(tmp_path: Path) -> None:
+    bad = {"start": "not-a-time", "end": "nor-this"}
+    voices.write_voices(
+        tmp_path,
+        {"ident": {"run_id": "r1", "voices": {"A": {"spans": [bad, _SPAN]}}}},
+    )
+
+    assert voices.read_voices(tmp_path)["ident"]["voices"]["A"]["spans"] == [_SPAN]
+
+
+def test_a_non_string_run_id_reads_as_unstamped_on_both_paths() -> None:
+    """`run_ids` is the poll's shortcut past `coerce_voices`; a truthy non-string
+    leaking through it would silently discard a valid Voice→Person mapping."""
+    raw = {"ident": {"run_id": 123, "voices": {"A": {"spans": [_SPAN]}}}}
+
+    assert voices.run_ids(raw) == {"ident": ""}
+    assert voices.coerce_voices(raw)["ident"]["run_id"] == ""

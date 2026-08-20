@@ -38,8 +38,11 @@ def _clear_poll_caches():
 
 @pytest.fixture
 def rec_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # `RECORDINGS_DIR` is the whole isolation: `PeopleRegistry` resolves
+    # `people.json` under it, and `attach_people` SAVES (sync auto-binds the
+    # tap identity), so a fixture that missed this would rewrite the developer's
+    # real registry.
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path)
-    monkeypatch.setattr(_config, "PEOPLE_JSON_PATH", tmp_path / "people.json", raising=False)
     return tmp_path
 
 

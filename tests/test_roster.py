@@ -176,6 +176,18 @@ def test_a_later_utterance_does_not_downgrade_a_multi_person_tap(session_dir: Pa
     assert roster.read_roster(session_dir)["tray-sysaudio-1"]["mode"] == "multi"
 
 
+def test_a_later_single_person_tap_does_not_downgrade_the_session(session_dir: Path) -> None:
+    """The tap path always passes a RESOLVED mode, so `mode=None` is a case
+    production never reaches. What it DOES reach: a reconnect, a cleared
+    override, or a live-only WS resolving to `single` while the session already
+    holds multi-person WAVs. Diarization is a property of the recording."""
+    roster.record_occurrence(session_dir, identity="tray-sysaudio-1", recorded=True, mode="multi")
+
+    roster.record_occurrence(session_dir, identity="tray-sysaudio-1", recorded=True, mode="single")
+
+    assert roster.read_roster(session_dir)["tray-sysaudio-1"]["mode"] == "multi"
+
+
 def test_a_pre_feature_roster_entry_reads_as_single(session_dir: Path) -> None:
     (session_dir / "session-roster.json").write_text(
         '{"old": {"name": "X", "source": "recorded", "slug": "X", "wavs": []}}', encoding="utf-8"

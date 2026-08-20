@@ -120,3 +120,35 @@ def test_a_word_run_that_matches_no_voice_keeps_the_plain_slug() -> None:
 
     assert [p.speaker for p in pieces] == [f"{SLUG}#A", SLUG]
     assert [p.text for p in pieces] == ["alpha", "beta"]
+
+
+def test_a_fragmented_voice_wins_on_total_overlap_not_its_longest_span() -> None:
+    """A diarizer emits one turn as many short spans. Picking the single longest
+    span hands a fragmented speaker's words to whoever managed one longer run."""
+    spans = [
+        _span("A", 0.0, 2.0),
+        _span("B", 2.0, 5.0),
+        _span("A", 5.0, 7.0),
+        _span("A", 7.0, 9.0),
+        _span("A", 9.0, 11.0),
+    ]
+
+    pieces = _join(_seg(0.0, 12.0), spans)
+
+    assert [p.speaker for p in pieces] == [f"{SLUG}#A"], "A speaks 8 s to B's 3 s"
+
+
+def test_a_zero_width_word_does_not_break_a_homogeneous_run() -> None:
+    """`Word` timestamps round to 2 dp, so a short token can collapse to
+    `start == end` — which overlaps nothing by measure."""
+    seg = _seg(
+        0.0,
+        3.0,
+        text="one two three",
+        words=_words(("one", 0.0, 1.0), ("two", 1.5, 1.5), ("three", 2.0, 3.0)),
+    )
+
+    pieces = _join(seg, [_span("A", 0.0, 10.0)])
+
+    assert [p.speaker for p in pieces] == [f"{SLUG}#A"]
+    assert pieces[0].text == "one two three"

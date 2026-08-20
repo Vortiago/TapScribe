@@ -327,8 +327,10 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     source_language_label = ""
 
     # Read once per merge, not per WAV. Empty for an undiarized session, which
-    # is the common case and leaves every segment on its plain slug.
-    voice_spans = spans_by_slug(voices.read_voices(selection.session_dir), read_roster(selection.session_dir))
+    # is the common case — and then the Roster is not read at all, since it can
+    # only ever contribute the slug join for a Voice that isn't there.
+    session_voices = voices.read_voices(selection.session_dir)
+    voice_spans = spans_by_slug(session_voices, read_roster(selection.session_dir)) if session_voices else {}
 
     for wav in selection.wavs:
         cached = read_cached(wav)
