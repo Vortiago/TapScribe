@@ -3,8 +3,11 @@
 `reference.npz` (64 KB) is the numeric oracle for `tapscribe/diarizers/`. Per
 audio fixture it holds:
 
-- `fbank__<name>` — the first **100 frames** (1 s at the 10 ms hop) of the
-  80-bin log-mel fbank, float32.
+- `fbank__<name>` / `fbank_tail__<name>` — the first and last **100 frames**
+  of the 80-bin log-mel fbank, float32. Both ends, because `snip_edges=False`
+  mirrors at each and a head-only slice never compares the right edge.
+- `fbank__short` — a 120-sample signal, shorter than its own padding, so the
+  repeated reflection is covered.
 - `emb__<name>` — the L2-normalised 512-d speaker embedding, float32.
 
 ## Why it is committed
@@ -43,11 +46,18 @@ describes rather than just how many there are.
 
 ## Regenerating
 
-Needs `kaldi-native-fbank` + `onnxruntime` and the model on disk. The generator
-is `gen_reference.py` (kept alongside the spike, not shipped) — it reads each
-fixture, computes the fbank, keeps the first 100 frames, embeds the full clip,
-and writes the archive. Re-running it after a model or upstream bump must leave
-`tests/test_diarize_fbank.py` green, or the port needs the matching change.
+```bash
+pip install kaldi-native-fbank onnxruntime
+python3 tools/gen_diarize_reference.py --model /path/to/campplus.onnx
+```
+
+Omit `--model` to refresh the fbank references only. Must leave
+`tests/test_diarize_fbank.py` green afterwards, or the port needs the matching
+change.
+
+**Generate on a runtime that passes the coherence check below** — the
+embeddings were once regenerated on 1.27.0 and silently encoded its bug, which
+made the comparison test pass for the wrong reason.
 
 ## onnxruntime miscomputes this model on long inputs (measured)
 
@@ -74,8 +84,9 @@ Two consequences the engine must respect:
    That is the right shape anyway — speaker embedding is a short-window
    operation — and it keeps every call far below the threshold.
 2. **The failure is silent.** Nothing raises; the vectors stay unit-norm and
-   plausible. So a runtime that fails self-consistency has to fail a test
-   instead, or a bad `onnxruntime` degrades diarization with no signal.
+   plausible. `test_the_runtime_embeds_long_input_coherently` is what turns it
+   into a failure — it embeds 1500 frames and asserts a speaker still resembles
+   herself. On 1.27.0 it fails at 0.549.
 
 `pyproject.toml` pins `onnxruntime>=1.17` unbounded. The VAD is unaffected —
 Silero is fed 512-sample windows, orders of magnitude below where this appears.

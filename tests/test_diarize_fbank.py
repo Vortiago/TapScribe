@@ -33,7 +33,6 @@ def test_fbank_matches_the_kaldi_reference(name: str, reference) -> None:
 
     got = fbank(read_fixture_wav(name))[: len(want)]
 
-    assert got.shape == want.shape
     np.testing.assert_allclose(got, want, rtol=0, atol=2e-3)
 
 

@@ -361,6 +361,20 @@ jobs:
               && pip install --no-cache-dir silero-vad
             probe: silero_vad
             tests: tests/test_vad_silero_port.py
+          # tests/test_diarize_fbank_upstream.py is the only thing pinning the
+          # committed reference.npz that tapscribe/diarizers/fbank.py is checked
+          # against everywhere else — without this lane the oracle could drift
+          # from Kaldi and nothing would notice. kaldi-native-fbank is
+          # deliberately NOT a project dependency (no cp314 Windows wheel, and
+          # the shipped code is a numpy port), so the lane installs it directly.
+          # The embedding half needs the model and stays skipped here; it runs
+          # once the bring-up fetch lands.
+          - lane: diarize-fbank
+            os: ubuntu-latest
+            extras: ""
+            pre_install: pip install --no-cache-dir kaldi-native-fbank
+            probe: kaldi_native_fbank
+            tests: tests/test_diarize_fbank_upstream.py
     steps:
       - uses: actions/checkout@v7
 
