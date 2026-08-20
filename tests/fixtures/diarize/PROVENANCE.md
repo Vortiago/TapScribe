@@ -61,11 +61,12 @@ made the comparison test pass for the wrong reason.
 
 ## onnxruntime miscomputes this model on long inputs (measured)
 
-**`onnxruntime` 1.27.0 returns incoherent embeddings for inputs longer than
-~1000 frames (10 s).** Measured on `marlene-nb`, cosine of the clip against its
-own first 600 frames:
+**`onnxruntime` 1.27.0 and 1.28.0 return incoherent embeddings for inputs
+longer than ~1000 frames (10 s); 1.29.0 is the fix.** Measured on `marlene-nb`,
+cosine of the clip against its own first 600 frames (1.27 and 1.28 agree to
+every digit shown):
 
-| frames | 1.27.0 | 1.29.0 |
+| frames | 1.27.0 / 1.28.0 | 1.29.0 |
 |---|---|---|
 | 1000 | 0.943 | 0.943 |
 | 1100 | **0.451** | 0.934 |
@@ -88,5 +89,8 @@ Two consequences the engine must respect:
    into a failure — it embeds 1500 frames and asserts a speaker still resembles
    herself. On 1.27.0 it fails at 0.549.
 
-`pyproject.toml` pins `onnxruntime>=1.17` unbounded. The VAD is unaffected —
-Silero is fed 512-sample windows, orders of magnitude below where this appears.
+`pyproject.toml` keeps `onnxruntime>=1.17`: the VAD shares that dependency,
+is fed 512-sample windows, and is unaffected, so forcing every install onto a
+current runtime for one consumer's bug would be the wrong trade. The floor lives
+in `tapscribe/diarizers/MIN_ONNXRUNTIME` instead, where only diarization pays
+it.
