@@ -31,9 +31,12 @@ class _OneSegment:
     device = "test-device"
     model_name = "fake-model"
 
-    def __init__(self, text: str, words: tuple[Word, ...] | None = None) -> None:
+    def __init__(
+        self, text: str, words: tuple[Word, ...] | None = None, avg_logprob: float | None = None
+    ) -> None:
         self.text = text
         self.words = words
+        self.avg_logprob = avg_logprob
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
         return TranscriptionResult(
@@ -45,7 +48,11 @@ class _OneSegment:
             language_probability=1.0,
             duration=6.0,
             text=self.text,
-            segments=(TranscriptionSegment(start=0.0, end=6.0, text=self.text, words=self.words),),
+            segments=(
+                TranscriptionSegment(
+                    start=0.0, end=6.0, text=self.text, words=self.words, avg_logprob=self.avg_logprob
+                ),
+            ),
             initial_prompt_used="",
             hotwords_used="",
             quality_settings={},
@@ -133,3 +140,75 @@ def test_voices_for_another_identity_do_not_touch_this_tap(session_dir: Path) ->
     transcript = merge_session(select_session_wavs(session_dir))
 
     assert [s.speaker for s in transcript.segments] == [SLUG]
+
+
+def test_two_taps_sharing_a_display_name_stay_undiarized(session_dir: Path) -> None:
+    """Both identities' Voices are refused rather than unioned, so segments keep
+    the plain slug — wrong attribution is worse than none (#440)."""
+    other = "tray-second-machine-99"
+    _seed_one(session_dir, _OneSegment("hello"))
+    stamp = BASE.strftime("%Y-%m-%dT%H-%M-%SZ")
+    # A second identity recording under the SAME display name, hence same slug.
+    seed_wav(session_dir / f"{stamp}_{SLUG}_id02_u00000001.wav")
+    record_occurrence(
+        session_dir,
+        identity=other,
+        name="System audio",
+        recorded=True,
+        wav=f"{stamp}_{SLUG}_id02_u00000001.wav",
+    )
+    _record(session_dir, {"A": [(0.0, 10.0)]})
+    voices.record_voices(
+        session_dir,
+        identity=other,
+        run_id="run-1",
+        spans={"A": [(BASE, BASE + timedelta(seconds=10))]},
+    )
+
+    transcript = merge_session(select_session_wavs(session_dir))
+
+    assert {s.speaker for s in transcript.segments} == {SLUG}, (
+        "an ambiguous slug must attribute to nobody, not to whichever identity sorted first"
+    )
+
+
+# ---- aggregates must not count pieces (#441) -------------------------------
+
+_UNCERTAIN = -1.0  # below _LOW_CONFIDENCE_LOGPROB_THRESHOLD
+
+
+def _uncertain_words() -> tuple[Word, ...]:
+    return (
+        Word(start=0.0, end=1.0, word="alpha", prob=0.9),
+        Word(start=1.0, end=2.0, word="beta", prob=0.9),
+        Word(start=4.0, end=5.0, word="gamma", prob=0.9),
+        Word(start=5.0, end=6.0, word="delta", prob=0.9),
+    )
+
+
+def test_one_uncertain_segment_crossing_two_voices_counts_once(session_dir: Path) -> None:
+    """Counting pieces made the quality badge grow with how WELL diarization
+    worked, and move on a re-diarize that changed no audio."""
+    _seed_one(
+        session_dir,
+        _OneSegment("alpha beta gamma delta", _uncertain_words(), avg_logprob=_UNCERTAIN),
+    )
+    _record(session_dir, {"A": [(0.0, 3.0)], "B": [(3.0, 10.0)]})
+
+    transcript = merge_session(select_session_wavs(session_dir))
+
+    assert len(transcript.segments) == 2, "the segment did split"
+    assert transcript.low_confidence_count == 1, "but it is ONE uncertain decode"
+
+
+def test_a_split_segment_contributes_its_whole_duration_to_speaking_seconds(session_dir: Path) -> None:
+    """Word-run bounds exclude the pause where the speaker changed, so a split
+    segment used to contribute less than its own duration — understating
+    diarized speakers against undiarized ones in the same session."""
+    _seed_one(session_dir, _OneSegment("alpha beta gamma delta", _uncertain_words()))
+    _record(session_dir, {"A": [(0.0, 3.0)], "B": [(3.0, 10.0)]})
+
+    transcript = merge_session(select_session_wavs(session_dir))
+
+    assert sum(transcript.speaking_seconds.values()) == 6.0, "the full 0-6 s segment"
+    assert transcript.speaking_seconds == {f"{SLUG}#A": 3.0, f"{SLUG}#B": 3.0}

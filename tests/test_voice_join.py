@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from tapscribe.transcribers.base import TranscriptionSegment, Word
-from tapscribe.voice_join import VoiceSpan, attribute_segment
+from tapscribe.voice_join import VoiceSpan, attribute_segment, spans_by_slug
 
 WAV_START = datetime(2026, 8, 19, 10, 0, 0, tzinfo=UTC)
 SLUG = "System_audio"
@@ -82,9 +82,12 @@ def test_segment_crossing_a_voice_change_splits_on_word_timestamps() -> None:
 
     assert [p.speaker for p in pieces] == [f"{SLUG}#A", f"{SLUG}#B"]
     assert [p.text for p in pieces] == ["alpha beta", "gamma delta"]
+    # The pieces TILE the segment: outer edges are the segment's own bounds, and
+    # the boundary is the midpoint of the 2 s–4 s pause where the speaker
+    # changed — see `_tile` and the tiling tests below.
     assert pieces[0].abs_start == WAV_START
-    assert pieces[0].abs_end == WAV_START + timedelta(seconds=2.0)
-    assert pieces[1].abs_start == WAV_START + timedelta(seconds=4.0)
+    assert pieces[0].abs_end == WAV_START + timedelta(seconds=3.0)
+    assert pieces[1].abs_start == WAV_START + timedelta(seconds=3.0)
     assert pieces[1].abs_end == WAV_START + timedelta(seconds=6.0)
 
 
@@ -152,3 +155,88 @@ def test_a_zero_width_word_does_not_break_a_homogeneous_run() -> None:
 
     assert [p.speaker for p in pieces] == [f"{SLUG}#A"]
     assert pieces[0].text == "one two three"
+
+
+# ---- a slug is not identity-unique (#440) ----------------------------------
+
+
+def _roster(*pairs: tuple[str, str]) -> dict:
+    return {identity: {"slug": slug} for identity, slug in pairs}
+
+
+def _voices(*identities: str) -> dict:
+    return {
+        i: {
+            "run_id": "r1",
+            "voices": {"A": {"spans": [{"start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:00:05Z"}]}},
+        }
+        for i in identities
+    }
+
+
+def test_two_identities_sharing_a_slug_are_refused_rather_than_unioned() -> None:
+    """`slug` is `safe_name(<display name>)` — two tray machines both streaming
+    "System audio" collapse into one bucket, and being concurrent their spans
+    overlap, so one identity's spans would split the other's segments and be
+    stamped with the first identity's mapping. Same "refuse to guess" rule
+    `fold_voices` applies to the cross-session case."""
+    roster = _roster(("tray-a-111", "System_audio"), ("tray-b-222", "System_audio"))
+
+    by_slug, ambiguous = spans_by_slug(_voices("tray-a-111", "tray-b-222"), roster)
+
+    assert by_slug == {}, "an ambiguous slug must contribute no spans at all"
+    assert ambiguous == {"System_audio"}
+
+
+def test_a_shared_slug_does_not_suppress_an_unrelated_tap() -> None:
+    roster = _roster(("tray-a-111", "System_audio"), ("tray-b-222", "System_audio"), ("mic-c", "Alice"))
+
+    by_slug, ambiguous = spans_by_slug(_voices("tray-a-111", "tray-b-222", "mic-c"), roster)
+
+    assert set(by_slug) == {"Alice"}
+    assert ambiguous == {"System_audio"}
+
+
+def test_one_identity_per_slug_is_unaffected() -> None:
+    by_slug, ambiguous = spans_by_slug(_voices("mic-c"), _roster(("mic-c", "Alice")))
+
+    assert set(by_slug) == {"Alice"}
+    assert ambiguous == set()
+
+
+# ---- split pieces must tile the segment (#441) -----------------------------
+
+
+def test_split_pieces_tile_the_segment_with_no_lost_time() -> None:
+    """`speaking_seconds` sums piece windows. Word-run bounds exclude the gap
+    where the speaker changed, so a split segment used to contribute less than
+    its own duration — systematically understating diarized speakers against
+    undiarized ones in the same session."""
+    seg = _seg(
+        0.0,
+        6.0,
+        text="alpha beta gamma delta",
+        words=_words(("alpha", 0.0, 1.0), ("beta", 1.0, 2.0), ("gamma", 4.0, 5.0), ("delta", 5.0, 6.0)),
+    )
+
+    pieces = _join(seg, [_span("A", 0.0, 3.0), _span("B", 3.0, 10.0)])
+
+    assert pieces[0].abs_start == WAV_START, "the first piece starts where the segment does"
+    assert pieces[-1].abs_end == WAV_START + timedelta(seconds=6.0), "the last piece ends with it"
+    assert pieces[0].abs_end == pieces[1].abs_start, "no gap between adjacent pieces"
+    total = sum((p.abs_end - p.abs_start).total_seconds() for p in pieces)
+    assert total == 6.0, "the pieces account for the whole segment"
+
+
+def test_the_boundary_between_pieces_is_the_midpoint_of_the_speaker_change() -> None:
+    """Neither speaker owns the silence between them, so split it."""
+    seg = _seg(
+        0.0,
+        6.0,
+        text="alpha gamma",
+        words=_words(("alpha", 0.0, 2.0), ("gamma", 4.0, 6.0)),
+    )
+
+    pieces = _join(seg, [_span("A", 0.0, 3.0), _span("B", 3.0, 10.0)])
+
+    assert pieces[0].abs_end == WAV_START + timedelta(seconds=3.0)

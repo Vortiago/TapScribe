@@ -312,6 +312,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     segments: list[SessionSegment] = []
     suppressed: list[SuppressedSessionSegment] = []
     skipped_no_cache: list[str] = []
+    low_confidence_count = 0
 
     # Track which Transcriber + model produced each WAV's result. They
     # *should* be uniform across a session; we surface the first non-empty
@@ -330,7 +331,19 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     # is the common case — and then the Roster is not read at all, since it can
     # only ever contribute the slug join for a Voice that isn't there.
     session_voices = voices.read_voices(selection.session_dir)
-    voice_spans = spans_by_slug(session_voices, read_roster(selection.session_dir)) if session_voices else {}
+    voice_spans: dict[str, list] = {}
+    if session_voices:
+        voice_spans, ambiguous_slugs = spans_by_slug(session_voices, read_roster(selection.session_dir))
+        if ambiguous_slugs:
+            # Loud, because the operator sees an undiarized tap and has no other
+            # way to learn why: two identities are streaming under one display
+            # name, so no Voice can be attributed to either (#440).
+            print(
+                f"[tapscribe] merge {selection.session_dir.name}: "
+                f"{len(ambiguous_slugs)} speaker name(s) shared by two taps, left undiarized: "
+                + ", ".join(sorted(ambiguous_slugs)),
+                flush=True,
+            )
 
     for wav in selection.wavs:
         cached = read_cached(wav)
@@ -351,6 +364,11 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
 
         for seg in cached.result.segments:
             low_conf = seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONFIDENCE_LOGPROB_THRESHOLD
+            # Counted per DECODED segment, not per piece: one uncertain segment
+            # crossing three Voices is one uncertain decode, and counting pieces
+            # made the dashboard's quality badge grow with how well diarization
+            # worked, and move on a re-diarize that changed no audio (#441).
+            low_confidence_count += 1 if low_conf else 0
             for piece in attribute_segment(seg, wav_start=wav_start, slug=speaker, spans=spans):
                 segments.append(
                     SessionSegment(
@@ -394,7 +412,6 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             line += " [uncertain]"
         plain_lines.append(line)
     plain_text = "\n".join(plain_lines)
-    low_confidence_count = sum(1 for s in segments if s.low_confidence)
 
     finished = datetime.now(UTC)
     return SessionTranscript(

@@ -209,7 +209,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     )
 
 
-def known_names_for_session(session: str) -> list[str]:
+def known_names_for_session(session: str, *, limit: int | None = None) -> list[str]:
     """The known-people display names to hint a summarize of `session` (the
     `tapscribe.summarizers.build_names_hint` input): this session's participants
     first, then people the People Registry has learned across previous meetings.
@@ -234,10 +234,22 @@ def known_names_for_session(session: str) -> list[str]:
         # transcript read and now. No names to inject; the summarize proceeds
         # unhinted rather than 404-ing on an optional enrichment.
         return []
+    meta = read_session_meta(session)
+    # The voice inputs too, or a Person present ONLY as a mapped Voice never
+    # reaches the participants-first half and can be trimmed off the registry
+    # tail — losing the spelling of someone who spoke half the meeting (#442).
+    transcript = _read_json_or_none(session_dir / FILENAME_TRANSCRIPT_JSON) or {}
+    voice_kwargs: dict[str, Any] = {
+        "voices": meta.get("voices") or {},
+        "voice_runs": voices.run_ids(_read_json_or_none(session_dir / FILENAME_VOICES_JSON)),
+        "speaker_keys": transcript.get("speakers") or [],
+    }
     return known_names(
         roster=read_roster(session_dir),
-        aliases=read_session_meta(session).get("aliases") or {},
+        aliases=meta.get("aliases") or {},
         registry=PeopleRegistry.load(),
+        **({"limit": limit} if limit is not None else {}),
+        **voice_kwargs,
     )
 
 

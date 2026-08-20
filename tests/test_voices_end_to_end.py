@@ -123,3 +123,27 @@ def test_voice_keys_never_mint_a_person_across_a_poll(rec_root: Path) -> None:
     people = attach_people(listing, live_identities=set())
 
     assert not [p for p in people if "#" in "".join(p.get("identities") or [])]
+
+
+def test_a_voice_mapped_person_survives_the_known_names_cap(rec_root: Path) -> None:
+    """`known_names` puts THIS session's participants first and always keeps
+    them; only the registry tail is trimmed. A Person present solely as a mapped
+    Voice was absent from that participant set, so the summarizer could lose the
+    spelling of someone who spoke half the meeting — the exact case the hint
+    exists for (#442)."""
+    _seed(rec_root, run_id="r1", mapped_run="r1")
+    (rec_root / "people.json").write_text(
+        json.dumps(
+            {
+                "people": [
+                    {"id": PERSON, "name": "Alice Andersen", "identities": []},
+                    {"id": "p_tail", "name": "Zoe Tail", "identities": ["someone-else"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = sessions.known_names_for_session(SESSION, limit=1)
+
+    assert "Alice Andersen" in names, "a voice-mapped participant is not registry tail"

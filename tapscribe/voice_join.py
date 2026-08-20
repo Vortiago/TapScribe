@@ -34,17 +34,38 @@ class Piece:
     text: str
 
 
-def spans_by_slug(voices: Mapping[str, Any], roster: Mapping[str, Any]) -> dict[str, list[VoiceSpan]]:
-    """`{speaker slug: spans}` for the merge, which only knows a WAV's slug.
+def spans_by_slug(
+    voices: Mapping[str, Any], roster: Mapping[str, Any]
+) -> tuple[dict[str, list[VoiceSpan]], set[str]]:
+    """`({speaker slug: spans}, ambiguous slugs)` for the merge, which only
+    knows a WAV's slug.
 
     The Roster owns the slug↔identity join, so a slug with no Roster entry —
     or an identity with no Voices — simply contributes nothing and that tap
     keeps its plain key.
+
+    A slug is `safe_name(<bridge display name>)` and is NOT identity-unique: two
+    tray machines both streaming "System audio", or two participants both named
+    "Alex", share one. Their taps are concurrent, so their spans overlap by
+    construction — unioning them would let one identity's Voices split the
+    other's segments, and `resolve_session_names` resolves a slug through only
+    the first identity, so the wrong person's name lands on them. Such a slug
+    contributes NOTHING and is reported: the tap stays undiarized (`Speaker A`
+    never appears, the plain slug does), which is the same "refuse to guess"
+    rule `fold_voices` applies to the cross-session case. Fixing it properly
+    needs an identity-discriminating transcript key — #440.
     """
+    owners: dict[str, set[str]] = {}
+    for identity in voices:
+        slug = (roster.get(identity) or {}).get("slug")
+        if slug:
+            owners.setdefault(slug, set()).add(identity)
+    ambiguous = {slug for slug, ids in owners.items() if len(ids) > 1}
+
     out: dict[str, list[VoiceSpan]] = {}
     for identity, entry in voices.items():
         slug = (roster.get(identity) or {}).get("slug")
-        if not slug:
+        if not slug or slug in ambiguous:
             continue
         spans: list[VoiceSpan] = []
         for label, body in (entry.get("voices") or {}).items():
@@ -54,7 +75,7 @@ def spans_by_slug(voices: Mapping[str, Any], roster: Mapping[str, Any]) -> dict[
                     spans.append(VoiceSpan(label=label, start=start, end=end))
         if spans:
             out.setdefault(slug, []).extend(spans)
-    return out
+    return out, ambiguous
 
 
 def _overlap(a_start: datetime, a_end: datetime, span: VoiceSpan) -> float:
@@ -124,15 +145,7 @@ def attribute_segment(
         spans = _window(spans, lo, hi)
     runs = _word_runs(seg, wav_start, spans) if (spans and seg.words) else []
     if len(runs) > 1:
-        return [
-            Piece(
-                abs_start=wav_start + timedelta(seconds=words[0].start),
-                abs_end=wav_start + timedelta(seconds=words[-1].end),
-                speaker=_key(slug, label),
-                text=" ".join(w.word.strip() for w in words if w.word.strip()),
-            )
-            for label, words in runs
-        ]
+        return _tile(runs, wav_start=wav_start, slug=slug, start=abs_start, end=abs_end)
 
     # One run, no words, or nothing overlapping: attribute whole, on the
     # segment's own bounds and text rather than a rejoin of the words. Without
@@ -140,6 +153,33 @@ def attribute_segment(
     # goes to the dominant Voice rather than losing its text.
     label = runs[0][0] if runs else _dominant(abs_start, abs_end, spans)
     return [Piece(abs_start=abs_start, abs_end=abs_end, speaker=_key(slug, label), text=seg.text)]
+
+
+def _tile(runs, *, wav_start: datetime, slug: str, start: datetime, end: datetime) -> list[Piece]:
+    """One Piece per run, together tiling `[start, end]` with no gaps.
+
+    Word-run bounds alone would leave the pause where the speaker changed
+    unowned, so a split segment contributed LESS than its own duration to
+    `speaking_seconds` — systematically understating diarized speakers against
+    undiarized ones in the same session (#441). Neither speaker owns that pause,
+    so the boundary is its midpoint; the outer edges take the segment's own
+    bounds so the whole segment is accounted for exactly once.
+    """
+    edges = [start]
+    for (_, words), (_, nxt) in zip(runs, runs[1:], strict=False):
+        gap_open = wav_start + timedelta(seconds=words[-1].end)
+        gap_close = wav_start + timedelta(seconds=nxt[0].start)
+        edges.append(gap_open + (gap_close - gap_open) / 2)
+    edges.append(end)
+    return [
+        Piece(
+            abs_start=edges[i],
+            abs_end=edges[i + 1],
+            speaker=_key(slug, label),
+            text=" ".join(w.word.strip() for w in words if w.word.strip()),
+        )
+        for i, (label, words) in enumerate(runs)
+    ]
 
 
 def _key(slug: str, label: str | None) -> str:

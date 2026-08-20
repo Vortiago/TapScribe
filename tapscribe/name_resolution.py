@@ -138,6 +138,9 @@ def known_names(
     aliases: dict[str, str],
     registry: PeopleRegistry,
     limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
+    voices: Mapping[str, Any] | None = None,
+    voice_runs: Mapping[str, str] | None = None,
+    speaker_keys: Iterable[str] = (),
 ) -> list[str]:
     """The ordered, deduped display names to hint a summarizer against
     mis-transcribed names (the `tapscribe.summarizers.build_names_hint` input).
@@ -166,7 +169,15 @@ def known_names(
             out.append(name)
 
     # Participants first, always included, deterministically ordered.
-    for name in sorted(resolve_session_names(roster=roster, aliases=aliases, registry=registry).values()):
+    resolved = resolve_session_names(
+        roster=roster,
+        aliases=aliases,
+        registry=registry,
+        voices=voices,
+        voice_runs=voice_runs,
+        speaker_keys=speaker_keys,
+    )
+    for name in sorted(resolved.values()):
         _add(name)
     # Fill the remaining budget with the registry tail; the cap trims only here.
     for person in registry.as_list():
