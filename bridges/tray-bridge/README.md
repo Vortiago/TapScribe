@@ -191,9 +191,7 @@ installer, code signing, or auto-update — it's a copy-and-run exe. Ships as
 # from this directory (bridges/tray-bridge/)
 dotnet publish src/TapScribe.TrayBridge.MacOS -c Release -p:CreatePackage=false
 APP=src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
-pkgbuild --component "$APP" --install-location /Applications \
-  --identifier net.havso.tapscribe.traybridge --version 0.0.0 \
-  TapScribe.TrayBridge-osx-arm64.pkg
+tools/build-macos-pkg.sh "$APP" 0.0.0 TapScribe.TrayBridge-osx-arm64.pkg
 ditto -c -k --keepParent "$APP" TapScribe.TrayBridge-osx-arm64.zip
 ```
 
@@ -214,12 +212,16 @@ if it is wrong:
   `CFBundleShortVersionString` against the tag. The `Info.plist` declares no
   version of its own and the csproj derives both version keys from `$(Version)`,
   so a publish missing the flag stamps the SDK's own default without failing.
-- **`pkgbuild --component`, not the SDK's `CreatePackage`.** CI's *Prove
-  installer-written payload is not quarantined* step asserts against this exact
-  invocation, so building the shipped package a different way would leave that
-  gate testing something nobody downloads. `--version` carries the tag for
-  `pkgutil --pkg-info`; the filename stays unversioned because a permanent
-  `releases/latest/download/` URL cannot carry one (ADR-0012).
+- **`tools/build-macos-pkg.sh` owns the packaging, and both workflows call it.**
+  The release job builds the shipped package with it and CI's *Prove
+  installer-written payload is not quarantined* step asserts against it, so the
+  gate cannot drift into testing a package nobody downloads. Its header explains
+  the one non-obvious flag: `BundleIsRelocatable` defaults to true, which makes
+  `installer` write payload over any existing copy of the bundle id it finds and
+  ignore `--install-location`. The script refuses its own output if that leaks
+  back in. `--version` carries the tag for `pkgutil --pkg-info`; the filename
+  stays unversioned because a permanent `releases/latest/download/` URL cannot
+  carry one (ADR-0012).
 
 ### Installing the Mac build
 

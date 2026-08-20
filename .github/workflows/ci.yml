@@ -557,8 +557,9 @@ jobs:
           test -d "$app"
           codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
 
-          pkgbuild --component "$app" --install-location /Applications \
-            --identifier com.tapscribe.traybridge.citest --version 0.0.0 probe.pkg
+          # The SAME script release.yml ships with, so this gate cannot drift
+          # into testing a package nobody downloads.
+          bridges/tray-bridge/tools/build-macos-pkg.sh "$app" 0.0.0 probe.pkg
           # What a browser stamps on a download. Asserted present before the
           # install, so a silently unstamped pkg cannot make the check vacuous.
           xattr -w com.apple.quarantine '0083;00000000;Safari;ci-probe' probe.pkg
@@ -566,8 +567,20 @@ jobs:
 
           sudo installer -pkg probe.pkg -target /
           installed=/Applications/TapScribe.TrayBridge.MacOS.app
-          test -d "$installed"
-          test -x "$installed/Contents/MacOS/TapScribe.TrayBridge.MacOS"
+          # Named failures, not bare `test`: a silent one-line exit says only
+          # that the step failed, and this pair caught a real relocation bug
+          # whose diagnosis took a local repro it should not have needed.
+          if [ ! -d "$installed" ]; then
+            echo "FAIL: nothing at $installed after a successful install."
+            echo "The package's install-location was ignored, which is what a"
+            echo "<relocate> entry in its PackageInfo does. Check that"
+            echo "build-macos-pkg.sh still clears BundleIsRelocatable."
+            exit 1
+          fi
+          if [ ! -x "$installed/Contents/MacOS/TapScribe.TrayBridge.MacOS" ]; then
+            echo "FAIL: the installed bundle has no executable at Contents/MacOS/."
+            exit 1
+          fi
 
           # The claim, spelled as an explicit failure branch rather than as a
           # command whose non-zero exit happens to mean "clean": a grep that finds

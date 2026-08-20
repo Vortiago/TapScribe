@@ -199,21 +199,17 @@ jobs:
       # payload outside the path that stamps quarantine, so the app a .pkg drops
       # in /Applications launches with no second obstacle.
       #
-      # `pkgbuild --component` rather than the SDK's own CreatePackage, so this is
-      # the SAME invocation ci.yml's "Prove installer-written payload is not
-      # quarantined" step asserts against. A different mechanism here would leave
-      # that gate testing something we do not ship.
-      #
-      # The identifier is the app's own bundle id, so an install upgrades in place
-      # rather than accumulating receipts. --version carries the tag for
-      # `pkgutil --pkg-info`; the FILENAME stays unversioned, which is what the
-      # permanent-URL contract requires (ADR-0012).
+      # The script, not inline pkgbuild flags: ci.yml's "Prove installer-written
+      # payload is not quarantined" step runs the same file, so that gate cannot
+      # drift into testing a package nobody downloads. It owns the identifier and
+      # the one non-obvious flag (see its header); --version carries the tag for
+      # `pkgutil --pkg-info`, while the FILENAME stays unversioned, which is what
+      # the permanent-URL contract requires (ADR-0012).
       - name: Build the installer package
         run: >
-          pkgbuild --component "$APP"
-          --install-location /Applications
-          --identifier net.havso.tapscribe.traybridge
-          --version ${{ env.VER }}
+          bridges/tray-bridge/tools/build-macos-pkg.sh
+          "$APP"
+          ${{ env.VER }}
           TapScribe.TrayBridge-osx-arm64.pkg
 
       # ditto, never `zip -r`: a .app is symlinks and executable bits, and a
