@@ -26,12 +26,13 @@ internal sealed class SettingsWindow : IDisposable
 {
     private const int Width = 480;
 
-    // The row budget, not a taste: the layout below is a top-down cursor, so this has to cover
-    // every row it places (23 of them, plus each heading's extra air and the two-line notes) or
-    // the last control is framed below the window and simply is not drawn. Nothing catches
-    // that but opening the window, so a row added here comes with a bump to this number and a
-    // look at the Save button.
-    private const int Height = 900;
+    // How tall the window OPENS, which is a taste rather than a budget: the rows live in a
+    // flipped document view inside a scroll view, so the content is as tall as it needs to be
+    // and anything past the viewport scrolls. It used to be a budget, and the comment here used
+    // to say that a new row came with a bump to this number or the last control was framed
+    // below the window and silently not drawn. The pin grid is what made that untenable, since
+    // its row count is a property of the operator's Mac and not of this file.
+    private const int Height = 700;
     private const int Padding = 16;
     private const int LabelWidth = 120;
     private const int RowHeight = 22;
@@ -67,10 +68,25 @@ internal sealed class SettingsWindow : IDisposable
     private readonly NSTextField _hangover;
     private readonly NSTextField _preRoll;
     private readonly NSButton _processOnEnd;
+
+    // One entry per row the draft offered, paired with the row it edits. The draft's rows are
+    // the model; these are only the controls over them.
+    private readonly List<(PinnedDeviceRow Row, NSButton Pin, NSTextField Name)> _pinRows = [];
+
+    private readonly MeterProbe _micProbe;
+    private readonly MeterProbe _systemProbe;
+    private readonly NSButton _micMeterOn;
+    private readonly NSButton _systemMeterOn;
+    private readonly LevelMeterView _micMeter;
+    private readonly LevelMeterView _systemMeter;
+    private readonly NSTextField _micMeterNote;
+    private readonly NSTextField _systemMeterNote;
+    private NSTimer? _meterTimer;
     private readonly NSButton _save;
     private readonly NSButton _cancel;
 
-    private nfloat _y = Height - Padding;
+    // Grows downward: the document view is flipped, so y is a distance from the TOP.
+    private nfloat _y = Padding;
     private bool _disposed;
 
     /// <summary>Build the window over the settings in force.</summary>
@@ -86,16 +102,27 @@ internal sealed class SettingsWindow : IDisposable
     internal SettingsWindow(
         BridgeSettings current,
         Func<IReadOnlyList<CaptureDevice>> listDevices,
+        Func<IAudioDeviceEnumerator> openEnumerator,
         Action<BridgeSettings> apply,
         IDispatcher dispatcher)
     {
         ArgumentNullException.ThrowIfNull(current);
         ArgumentNullException.ThrowIfNull(listDevices);
+        ArgumentNullException.ThrowIfNull(openEnumerator);
         ArgumentNullException.ThrowIfNull(apply);
         ArgumentNullException.ThrowIfNull(dispatcher);
         _apply = apply;
         _dispatcher = dispatcher;
         _draft = SettingsSeed.From(current, listDevices);
+        _micProbe = new MeterProbe(
+            openEnumerator,
+            devices => devices.FirstOrDefault(d => d.Flow == DeviceFlow.Capture && d.IsDefault)
+                ?? devices.FirstOrDefault(d => d.Flow == DeviceFlow.Capture));
+        // Picked by FLOW rather than by id: the Mac enumerator offers exactly one Render row,
+        // the synthetic "System audio" one, precisely so there is no choice to get wrong here.
+        _systemProbe = new MeterProbe(
+            openEnumerator,
+            devices => devices.FirstOrDefault(d => d.Flow == DeviceFlow.Render));
 
         _window = new NSWindow(
             new CGRect(0, 0, Width, Height),
@@ -109,7 +136,23 @@ internal sealed class SettingsWindow : IDisposable
         // IsOpen afterwards to decide whether to raise it or build a new one.
         _window.ReleaseWhenClosed(false);
         _window.Center();
-        NSView content = _window.ContentView!;
+
+        // Every row goes into a flipped document view inside a scroll view. Flipped so the
+        // top-down cursor below can place a row without knowing the total height, which is what
+        // lets the pin grid be as long as the operator's Mac requires. The document is given its
+        // real height once the layout is done, at the end of this constructor.
+        var content = new FlippedView { Frame = new CGRect(0, 0, Width, Height) };
+        var scroll = new NSScrollView(new CGRect(0, 0, Width, Height))
+        {
+            HasVerticalScroller = true,
+            // Never horizontal: the rows are laid out to a fixed Width, so a horizontal
+            // scroller would only ever appear to say the arithmetic was wrong.
+            HasHorizontalScroller = false,
+            AutohidesScrollers = true,
+            DrawsBackground = false,
+            DocumentView = content,
+        };
+        _window.ContentView = scroll;
 
         Section(content, "Recorder");
         _host = Field(content, "Host", _draft.Host, ControlWidth);
@@ -128,6 +171,8 @@ internal sealed class SettingsWindow : IDisposable
         _micSensitivity = Slider(content, "Sensitivity", _draft.MicSensitivity);
         _micSensitivityReadout = Note(content, SettingsDraft.SensitivityLabel(_draft.MicSensitivity), lines: 1);
         _micSensitivity.Activated += OnMicSensitivity;
+        (_micMeterOn, _micMeter, _micMeterNote) = MeterRow(content, "Show input level");
+        _micMeterOn.Activated += OnMicMeterToggled;
 
         Section(content, "System audio");
         _systemEnabled = Check(content, "Record what this Mac plays", _draft.SystemEnabled);
@@ -136,6 +181,8 @@ internal sealed class SettingsWindow : IDisposable
         _systemSensitivityReadout =
             Note(content, SettingsDraft.SensitivityLabel(_draft.SystemSensitivity), lines: 1);
         _systemSensitivity.Activated += OnSystemSensitivity;
+        (_systemMeterOn, _systemMeter, _systemMeterNote) = MeterRow(content, "Show output level");
+        _systemMeterOn.Activated += OnSystemMeterToggled;
         // The one thing about this row an operator cannot discover by looking at it: the grant
         // is asked for at the first Start rather than here, so a meeting that records only one
         // speaker is usually a prompt that was dismissed. Said in the window because the
@@ -146,6 +193,18 @@ internal sealed class SettingsWindow : IDisposable
             + "your own voice is recorded, allow TapScribe under System Settings \u203a Privacy "
             + "& Security \u203a Screen & System Audio Recording.",
             lines: 3);
+
+        Section(content, "Devices");
+        // Follow-default is the norm and needs no row: the two sections above already say
+        // "record my microphone" and "record what this Mac plays", and each binds late, at
+        // Start. This grid is for the operator who wants a SPECIFIC endpoint every time, which
+        // matters on a Mac that sees a different default depending on what is plugged in.
+        Note(
+            content,
+            "The sections above follow whatever this Mac is using when a meeting starts. Pin a "
+            + "device here to always record that one instead.",
+            lines: 2);
+        BuildPinGrid(content);
 
         Section(content, "Speech gate");
         _hangover = Field(content, "Hangover (ms)", _draft.HangoverMs.ToString(CultureInfo.InvariantCulture), 90);
@@ -163,6 +222,25 @@ internal sealed class SettingsWindow : IDisposable
         // plain NSWindow has no Escape handling of its own. Escaped rather than written as the
         // raw control byte, which an editor or an encoding pass can silently eat.
         _cancel.KeyEquivalent = "\u001b";
+
+        // Closing the window must stop the meters, and the red button is a close this class
+        // would otherwise never hear about: Dispose only runs when the shell next opens
+        // Settings, so without this a window closed and left alone keeps a microphone capture
+        // (or a process tap) running for as long as the tray does.
+        _window.WillClose += OnWillClose;
+
+        // The cursor now knows what the layout came to, so the document takes that height and
+        // the scroll view has something to scroll. At least the viewport, so a short layout
+        // does not leave the rows floating in a taller document than there is content for.
+        content.Frame = new CGRect(0, 0, Width, Math.Max(_y + Padding, Height));
+    }
+
+    // AppKit's default origin is bottom-left, which puts a top-down cursor in the position of
+    // having to know the total height before it places the first row. Flipping the document
+    // means y is a distance from the top and the layout can simply run.
+    private sealed class FlippedView : NSView
+    {
+        public override bool IsFlipped => true;
     }
 
     // Named rather than lambdas so Dispose can unhook them: a handler that captures this
@@ -195,8 +273,14 @@ internal sealed class SettingsWindow : IDisposable
         _test.Activated -= OnTest;
         _micSensitivity.Activated -= OnMicSensitivity;
         _systemSensitivity.Activated -= OnSystemSensitivity;
+        _micMeterOn.Activated -= OnMicMeterToggled;
+        _systemMeterOn.Activated -= OnSystemMeterToggled;
         _save.Activated -= OnSave;
         _cancel.Activated -= OnCancel;
+        _window.WillClose -= OnWillClose;
+        StopMeters();
+        _micProbe.Dispose();
+        _systemProbe.Dispose();
         _window.Dispose();
     }
 
@@ -249,6 +333,7 @@ internal sealed class SettingsWindow : IDisposable
         _draft.HangoverMs = SettingsFields.Int(_hangover.StringValue, _draft.HangoverMs, min: 0, max: 5000);
         _draft.PreRollMs = SettingsFields.Int(_preRoll.StringValue, _draft.PreRollMs, min: 0, max: 2000);
         _draft.ProcessOnEnd = IsOn(_processOnEnd);
+        CollectPinGrid();
         return _draft.ToSettings();
     }
 
@@ -304,17 +389,164 @@ internal sealed class SettingsWindow : IDisposable
 
     private static bool IsOn(NSButton check) => check.State == NSCellStateValue.On;
 
+    // A toggle, a bar and a note on two rows. The bar sits under the sensitivity slider it
+    // belongs to, so the marker and the slider read as one control.
+    private (NSButton Toggle, LevelMeterView Bar, NSTextField Note) MeterRow(NSView content, string title)
+    {
+        nfloat y = NextRow(RowHeight);
+        var toggle = new NSButton
+        {
+            Frame = new CGRect(ControlLeft, y, ControlWidth, RowHeight),
+            Title = title,
+        };
+        toggle.SetButtonType(NSButtonType.Switch);
+        content.AddSubview(toggle);
+
+        nfloat barY = NextRow(14);
+        var bar = new LevelMeterView(new CGRect(ControlLeft, barY, 240, 14));
+        content.AddSubview(bar);
+
+        return (toggle, bar, Note(content, "", lines: 1));
+    }
+
+    private void OnWillClose(object? sender, EventArgs e) => StopMeters();
+
+    // Untick as well as stop, so reopening the window does not show two toggles claiming to be
+    // on over two dead bars.
+    private void StopMeters()
+    {
+        _micProbe.Stop();
+        _systemProbe.Stop();
+        _micMeterOn.State = NSCellStateValue.Off;
+        _systemMeterOn.State = NSCellStateValue.Off;
+        _micMeter.Level = 0;
+        _systemMeter.Level = 0;
+        StartOrStopMeterTimer();
+    }
+
+    private void OnMicMeterToggled(object? sender, EventArgs e) =>
+        Toggle(_micProbe, _micMeterOn, _micMeter, _micMeterNote);
+
+    private void OnSystemMeterToggled(object? sender, EventArgs e) =>
+        Toggle(_systemProbe, _systemMeterOn, _systemMeter, _systemMeterNote);
+
+    private void Toggle(MeterProbe probe, NSButton toggle, LevelMeterView bar, NSTextField note)
+    {
+        if (IsOn(toggle))
+        {
+            probe.Start();
+            // Untick on a failure rather than leaving a toggle that claims to be on with a dead
+            // bar under it. The note says why; the toggle says whether.
+            if (!probe.Running)
+                toggle.State = NSCellStateValue.Off;
+        }
+        else
+        {
+            probe.Stop();
+            bar.Level = 0;
+        }
+
+        note.StringValue = probe.Error is { } why ? $"No level: {why}" : "";
+        StartOrStopMeterTimer();
+    }
+
+    // One timer for both bars, running only while at least one is: an NSTimer on a settings
+    // window that nobody is metering is a wakeup several times a second for nothing.
+    private void StartOrStopMeterTimer()
+    {
+        bool wanted = _micProbe.Running || _systemProbe.Running;
+        if (wanted == (_meterTimer is not null))
+            return;
+
+        if (!wanted)
+        {
+            _meterTimer!.Invalidate();
+            _meterTimer = null;
+            return;
+        }
+
+        // 15 Hz: the meter's own release smooths the bar, so a faster tick buys nothing an eye
+        // can use and a slower one makes speech look like it arrives in steps.
+        _meterTimer = NSTimer.CreateRepeatingScheduledTimer(1.0 / 15, _ => Tick());
+    }
+
+    private void Tick()
+    {
+        // Thresholds come from the sliders' LIVE values, not from the draft: the whole point of
+        // the marker is watching it move as the slider does, before any Save.
+        _micMeter.Threshold = GateTuning.SliderToThreshold(_micSensitivity.IntValue);
+        _systemMeter.Threshold = GateTuning.SliderToThreshold(_systemSensitivity.IntValue);
+        _micMeter.Level = _micProbe.Level;
+        _systemMeter.Level = _systemProbe.Level;
+    }
+
+    private void BuildPinGrid(NSView content)
+    {
+        if (_draft.DeviceRows.Count == 0)
+        {
+            // The empty case is a REPORT, not a blank space. SettingsSeed swallows a CoreAudio
+            // enumeration failure so a wrong host or a rejected token stays fixable, and this
+            // is the only place the operator learns that is why the grid is empty. A saved pin
+            // is still carried forward untouched by a Save made from this state.
+            Note(
+                content,
+                "No audio devices could be listed, so there is nothing to pin. Any device you "
+                + "pinned before is kept.",
+                lines: 2);
+            return;
+        }
+
+        foreach (PinnedDeviceRow row in _draft.DeviceRows)
+        {
+            nfloat y = NextRow(RowHeight);
+
+            var pin = new NSButton
+            {
+                Frame = new CGRect(Padding, y, LabelWidth + Gap, RowHeight),
+                Title = "Pin",
+            };
+            pin.SetButtonType(NSButtonType.Switch);
+            pin.State = row.Pinned ? NSCellStateValue.On : NSCellStateValue.Off;
+            content.AddSubview(pin);
+
+            var name = new NSTextField
+            {
+                Frame = new CGRect(ControlLeft, y, ControlWidth, RowHeight),
+                StringValue = row.Name,
+                PlaceholderString = row.DisplayLabel,
+            };
+            content.AddSubview(name);
+
+            // The device's own label under the editable name, because the name is the SPEAKER
+            // identity and the label is which endpoint it is: an operator who renames a row
+            // "Alice" still needs to see it is the USB interface and not the built-in mic.
+            Note(content, row.DisplayLabel, lines: 1);
+
+            _pinRows.Add((row, pin, name));
+        }
+    }
+
+    // Written back before ToSettings reads them, because DeviceRows IS what it collects: an
+    // edit left in a control is an edit the Save silently drops.
+    private void CollectPinGrid()
+    {
+        foreach ((PinnedDeviceRow row, NSButton pin, NSTextField name) in _pinRows)
+        {
+            row.Pinned = IsOn(pin);
+            row.Name = name.StringValue;
+        }
+    }
+
     private nfloat NextRow(nfloat height)
     {
-        _y -= height;
         nfloat top = _y;
-        _y -= Gap;
+        _y += height + Gap;
         return top;
     }
 
     private void Section(NSView content, string title)
     {
-        _y -= Gap; // a little air above each heading
+        _y += Gap; // a little air above each heading
         nfloat y = NextRow(RowHeight);
         content.AddSubview(new NSTextField
         {
@@ -421,7 +653,7 @@ internal sealed class SettingsWindow : IDisposable
     {
         // sameRow puts a second button beside the one just placed, which is what a
         // Cancel/Save pair is: one row, two frames.
-        nfloat y = sameRow ? _y + Gap : NextRow(RowHeight + 6);
+        nfloat y = sameRow ? _y - (RowHeight + 6) - Gap : NextRow(RowHeight + 6);
         var button = new NSButton
         {
             Frame = new CGRect(x, y, width, RowHeight + 6),

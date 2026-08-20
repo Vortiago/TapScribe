@@ -1,0 +1,87 @@
+using AppKit;
+using CoreGraphics;
+using TapScribe.Bridge.Core;
+
+namespace TapScribe.TrayBridge.MacOS;
+
+/// <summary>
+/// A display-only input level bar with a marker at the gate's open threshold: the Mac sibling
+/// of WinForms' <c>LevelMeterBar</c> (#421).
+///
+/// Both numbers are RMS in [0,1] and both go through Core's <see cref="LevelMeterScale"/>, so
+/// the bar and the gate agree about what "half way" means. That is the whole point of the
+/// marker: the operator drags Sensitivity until the marker sits just under where their speech
+/// peaks, and a bar on its own scale would make that judgement a lie.
+///
+/// Display-only, and deliberately not on the tap path. It is fed by an
+/// <see cref="InputLevelMeter"/> over a throwaway capture, so a meter that fails or is denied
+/// costs a still bar and nothing else.
+/// </summary>
+internal sealed class LevelMeterView : NSView
+{
+    private double _level;
+    private double _threshold;
+
+    internal LevelMeterView(CGRect frame)
+        : base(frame)
+    {
+    }
+
+    /// <summary>Current RMS, [0,1]. Set from the poll tick.</summary>
+    internal double Level
+    {
+        get => _level;
+        set
+        {
+            // Repaint only on a visible change: this is set several times a second for as long
+            // as the window is open, and NSView has no dirty-region cleverness to save us from
+            // asking for a redraw that would paint the same pixels.
+            if (Math.Abs(value - _level) < 0.001)
+                return;
+            _level = value;
+            NeedsDisplay = true;
+        }
+    }
+
+    /// <summary>The gate's open threshold as RMS, [0,1]. Set from the sensitivity slider.
+    /// </summary>
+    internal double Threshold
+    {
+        get => _threshold;
+        set
+        {
+            if (Math.Abs(value - _threshold) < 0.001)
+                return;
+            _threshold = value;
+            NeedsDisplay = true;
+        }
+    }
+
+    public override void DrawRect(CGRect dirtyRect)
+    {
+        CGRect bounds = Bounds;
+
+        // A control-coloured track rather than a literal, so the bar reads as part of the
+        // window in either appearance.
+        NSColor.ControlBackground.Set();
+        NSBezierPath.FromRect(bounds).Fill();
+        NSColor.Separator.Set();
+        NSBezierPath.FromRect(bounds).Stroke();
+
+        nfloat inner = bounds.Width - 2;
+        nfloat fill = (nfloat)(LevelMeterScale.Fraction(_level) * inner);
+        nfloat marker = (nfloat)(LevelMeterScale.Fraction(_threshold) * inner);
+
+        // Two greens rather than one: below the threshold the gate is shut, so the fill says
+        // "heard, not recorded" and above it says "recording". One colour would leave the
+        // marker as the only cue, and the marker is a hairline.
+        if (fill > 0)
+        {
+            (fill <= marker ? NSColor.SystemGreen.ColorWithAlphaComponent(0.35f) : NSColor.SystemGreen).Set();
+            NSBezierPath.FromRect(new CGRect(1, 1, fill, bounds.Height - 2)).Fill();
+        }
+
+        NSColor.SystemYellow.Set();
+        NSBezierPath.FromRect(new CGRect(1 + marker, 1, 2, bounds.Height - 2)).Fill();
+    }
+}

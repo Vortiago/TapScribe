@@ -263,7 +263,7 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _settingsWindow?.Dispose();
 
         var window = new SettingsWindow(
-            runtime.Settings, ListDevices, runtime.ApplySettings, _dispatcher);
+            runtime.Settings, ListDevices, _deps.OpenEnumerator, runtime.ApplySettings, _dispatcher);
         _settingsWindow = window;
         window.Show();
     }
