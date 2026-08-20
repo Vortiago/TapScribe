@@ -18,6 +18,7 @@ through a Transcriber.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,8 +30,15 @@ import tapscribe.voices as voices
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
 from .roster import read_roster
-from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, SessionPathError, _safe_part
-from .text import parse_iso, parse_wav_start
+from .session_paths import (
+    DIRNAME_STRIPPED,
+    FILENAME_STRIP_META_JSON,
+    FILENAME_TRANSCRIPT_JSON,
+    FILENAME_TRANSCRIPT_TXT,
+    SessionPathError,
+    _safe_part,
+)
+from .text import atomic_write_text, parse_iso, parse_wav_start
 from .voice_join import VoiceSpan, attribute_segment, spans_by_slug
 from .wav_cache import read_cached
 
@@ -461,3 +469,22 @@ def _suppressed_to_dict(sup: SuppressedSessionSegment) -> dict[str, Any]:
         "matched_rule": sup.matched_rule,
         "source_wav": sup.source_wav,
     }
+
+
+def write_merged_transcript(
+    session_dir: Path, transcript: SessionTranscript, *, model: str = ""
+) -> dict[str, Any]:
+    """Write both merged artifacts and return the JSON one.
+
+    `model` fills the field in when no per-WAV sidecar names one. Shared by the
+    transcribe stage and by a standalone re-diarize, which re-merges to pick up
+    the new speaker keys without re-transcribing anything.
+    """
+    merged = transcript.to_dict()
+    if not merged.get("model"):
+        merged["model"] = model
+    atomic_write_text(
+        session_dir / FILENAME_TRANSCRIPT_JSON, json.dumps(merged, indent=2, ensure_ascii=False)
+    )
+    atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
+    return merged

@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 
 from tapscribe.diarizers.base import AudioClip
-from tapscribe.text import parse_iso
 from tapscribe.diarizers.standalone import FRAME_SHIFT_S, StandaloneDiarizer
+from tapscribe.text import parse_iso
 
 RATE = 16000
 T0 = datetime(2026, 8, 20, 9, 0, 0, tzinfo=UTC)

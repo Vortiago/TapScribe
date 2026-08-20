@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from .batch_diarize import DiarizeSessionRequest, diarize_session_locked
 from .batch_strip import StripSessionRequest, strip_session_locked
 from .batch_summarize import (
     NoMergedTranscript,
@@ -96,7 +97,7 @@ async def start_pipeline(recorder: Recorder, req: PipelineRequest) -> asyncio.Ta
 
 
 async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, backend: str) -> None:
-    """Drive the three stages under the already-claimed slot, record the
+    """Drive the four stages under the already-claimed slot, record the
     outcome, release. A stage failure (any `Exception`) aborts the chain and
     lands in `recorder.pipelines` as failed-at-stage — the poll endpoint's
     contract — plus a log line for the operator; only cancellation propagates.
@@ -112,6 +113,10 @@ async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, 
     try:
         await job.update(stage="strip", status="stripping", current=0, current_file=None)
         await run_strip_stage(req, job=job)
+
+        stage = "diarize"
+        await job.update(stage="diarize", status="diarizing", current=0, current_file=None)
+        await run_diarize_stage(req, job=job)
 
         stage = "transcribe"
         await job.update(stage="transcribe", status="transcribing", current=0, current_file=None)
@@ -131,7 +136,10 @@ async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, 
         print(f"[tapscribe] pipeline {req.session}: FAILED at {stage}: {e}", flush=True)
     else:
         recorder.pipelines.finish_done(req.session)
-        print(f"[tapscribe] pipeline {req.session}: done (strip → transcribe → summarize)", flush=True)
+        print(
+            f"[tapscribe] pipeline {req.session}: done (strip → diarize → transcribe → summarize)",
+            flush=True,
+        )
     finally:
         await recorder.jobs.release(req.session)
 
@@ -153,6 +161,25 @@ async def run_strip_stage(req: PipelineRequest, *, job) -> dict[str, Any]:
         raise NoUsableWavs("no WAVs in this session to strip")
     await job.update(total=len(originals))
     return await strip_session_locked(StripSessionRequest(session=req.session), originals=originals)
+
+
+async def run_diarize_stage(req: PipelineRequest, *, job) -> dict[str, Any]:
+    """`diarize_session` minus the claim, over the stripped output of the stage
+    before, and minus the re-merge — transcribe merges next.
+
+    Absorbs every failure instead of raising. `_run_claimed` aborts the chain on
+    any exception, and diarization is the one stage whose absence still leaves a
+    usable meeting: an unfetched model or one unreadable WAV must not cost the
+    operator their transcript and summary. What is lost is attribution on this
+    session, recoverable by re-diarizing; the failure is logged, never silent.
+    """
+    try:
+        return await diarize_session_locked(
+            DiarizeSessionRequest(session=req.session, source="stripped"), job=job
+        )
+    except Exception as e:
+        print(f"[tapscribe] pipeline {req.session}: diarize failed, continuing: {e}", flush=True)
+        return {"ok": False, "session": req.session, "error": str(e), "error_kind": type(e).__name__}
 
 
 async def run_transcribe_stage(req: PipelineRequest, *, job, model: str, backend: str) -> dict[str, Any]:
