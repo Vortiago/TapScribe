@@ -62,24 +62,38 @@ made the comparison test pass for the wrong reason.
 
 ## The engine's operating point (measured)
 
-`marlene-nb` and `solen-da` cut into 3 s turns, concatenated A-B-A-B-A, against
-the same shape built from ONE speaker. Both have to hold at one threshold: the
-two-speaker clip must split, and the one-speaker clip must not.
+Three scenarios through the SHIPPED engine — `marlene-nb` and `solen-da` in 3 s
+turns alternating with a 0.5 s pause, the same alternating with no pause, and
+one speaker in that shape. Both directions have to hold at one threshold: the
+two-speaker clips must split and the one-speaker clip must not.
 
-Thresholds that recover exactly 2 Voices, at the shipped VAD threshold:
+Thresholds that recover the right number of Voices:
 
 | window / hop | turns with a pause | turns with none | one speaker |
 |---|---|---|---|
-| 1.0 / 0.5 s | ≥0.6 | ≥0.7 | splits below 0.6 |
-| **1.5 / 0.75 s** | **≥0.5** | **≥0.6** | **never splits** |
-| 2.0 / 1.0 s | ≥0.5 | ≥0.5 | never splits |
-| 3.0 / 1.5 s | — | collapses to 1 above 0.5 | never splits |
+| 1.0 / 0.50 s | 0.6-0.9 | 0.65-0.9 | 0.6-0.9 |
+| **1.5 / 0.75 s** | **0.5-0.9** | **0.65-0.9** | **0.5-0.9** |
+| 2.0 / 1.00 s | 0.5-0.9 | 0.55-0.9 | 0.5-0.9 |
+| 3.0 / 1.50 s | 0.5-0.9 | 0.5-0.75 | 0.5-0.9 |
 
-**1.5 s windows at a 0.75 s hop, threshold 0.7.** Both directions hold across
-0.6–0.85 at that window, so 0.7 is the middle of a plateau rather than a derived
-optimum; the WINDOW is what narrows the plateau. Below it, the pairwise cosine
-between one speaker's own windows falls to 0.04 and only average linkage still
-holds her together; above ~2.5 s a turn change hides inside one window.
+The plateau does not pick the window — 2 s has a wider one. Short turns do.
+Share of audio on the right Voice, no pause, threshold 0.7:
+
+| turn | 1.0 s | 1.5 s | 2.0 s | 3.0 s |
+|---|---|---|---|---|
+| 2.2 s | 0.90 | **0.91** | 0.67 (1 Voice) | 0.58 (1 Voice) |
+| 3.0 s | 0.94 | **0.92** | 0.89 | 0.83 |
+| 4.0 s | 0.96 | **0.98** | 0.92 | 0.67 (1 Voice) |
+
+A window longer than a turn hides the change inside it and the tap comes back as
+one Voice. 1 s matches 1.5 s on accuracy but halves the one-speaker margin (it
+starts splitting her below 0.6, against 0.5) and doubles the window count.
+
+**1.5 s windows at a 0.75 s hop, threshold 0.7** — inside every row's
+intersection above. The HOP is a resolution/cost trade rather than a pinned
+number: with no overlap the 2.2 s-turn clip reads 0.79 against 0.75 s's 0.91,
+but on turns that happen to be a whole number of windows it reads 0.99, so no
+fixture here pins it and no test asserts it.
 
 Recovered turn boundaries land within 50 ms of the truth when the turns are
 separated by a pause, which is the ordinary case: the tap's level gate and the

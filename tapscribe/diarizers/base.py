@@ -40,8 +40,13 @@ class DiarizerFailed(DiarizerError):
 class AudioClip:
     """One recorder WAV's samples, with the absolute instant sample 0 starts at.
 
-    Spans come back in that same absolute time, which is what makes the
-    merge-time join an interval comparison over `abs_start`/`abs_end`.
+    `start` is tz-aware UTC, as `text.parse_wav_start` returns and as
+    `merge_session` computes `abs_start`/`abs_end` — spans come back in that same
+    time base, which is what makes the merge-time join an interval comparison.
+    A naive `start` would NOT raise: `text.parse_iso` reads the stored span back
+    as UTC, so a local-time clip lands hours off and attributes nothing.
+
+    Clips arrive in chronological order, so Voice A is whoever spoke first.
     """
 
     samples: np.ndarray

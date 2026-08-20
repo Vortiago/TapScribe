@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from tapscribe.diarizers.base import AudioClip
+from tapscribe.text import parse_iso
 from tapscribe.diarizers.standalone import FRAME_SHIFT_S, StandaloneDiarizer
 
 RATE = 16000
@@ -159,6 +160,18 @@ def test_spans_tile_a_region_without_overlapping(engine: StandaloneDiarizer) -> 
     for (_, end), (start, _) in zip(spans, spans[1:], strict=False):
         assert start >= end, "two Voices claim the same instant"
         assert (start - end).total_seconds() <= FRAME_SHIFT_S, "a gap opened inside one speech region"
+
+
+def test_a_span_round_trips_through_the_sidecar_format(engine: StandaloneDiarizer) -> None:
+    """Spans are stored as ISO strings and read back by `text.parse_iso`, which
+    stamps a naive one as UTC. So a clip started in local time comes back hours
+    off with nothing raising — the round trip is what makes that visible."""
+    result = engine.diarize([AudioClip(_tone(300, 4.0), T0)])
+
+    start, end = result.voices["A"][0]
+
+    assert parse_iso(start.isoformat()) == start
+    assert parse_iso(end.isoformat()) == end
 
 
 def test_the_engine_is_named_on_the_result(engine: StandaloneDiarizer) -> None:

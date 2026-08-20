@@ -4,11 +4,10 @@ The default `Diarizer` (ADR-0021). Clustering spans every clip of the identity
 at once: a level-gated tap emits one WAV per utterance, and per-WAV runs label
 the same human differently in each.
 
-Windows are 1.5 s at a 0.75 s hop, measured on the fixtures rather than assumed:
-below 1.5 s a speaker stops resembling herself (window-to-window cosine drops to
-0.04), above ~2.5 s a turn change hides inside one window. Every threshold in
-0.6–0.85 splits the two-speaker fixtures and holds the one-speaker ones
-together; 0.7 is the middle of that plateau, not a derived optimum.
+Windows are 1.5 s at a 0.75 s hop and the clustering cut is 0.7, measured on the
+fixtures rather than assumed (`tests/fixtures/diarize/PROVENANCE.md`): a window
+longer than a turn hides the change inside it, so 2 s windows return a 2.2 s-turn
+conversation as ONE Voice, and 0.7 is inside every passing threshold range.
 """
 
 from __future__ import annotations
@@ -69,30 +68,31 @@ def resolve_max_speakers() -> int:
 
 def speech_windows(
     samples: np.ndarray, *, vad, vad_threshold: float = VAD_THRESHOLD
-) -> list[tuple[int, int]]:
-    """`[(first_frame, last_frame)]` covering the clip's speech, in fbank frames.
+) -> list[list[tuple[int, int]]]:
+    """One `[(first_frame, last_frame)]` list per speech region, in fbank frames.
 
-    Windows overlap by a hop, and the last one of a region is anchored to its
-    end rather than overhanging it.
+    Grouped by region rather than flat because a span may not cross a silence —
+    the pause belongs to neither speaker (#441). Windows overlap by a hop, and a
+    region's last window is anchored to its end rather than overhanging it.
     """
-    windows: list[tuple[int, int]] = []
+    regions: list[list[tuple[int, int]]] = []
     for region in speech_timestamps(samples, vad, threshold=vad_threshold):
         lo = -(-region["start"] // FRAME_SHIFT)  # ceil: never claim a frame before speech
         hi = region["end"] // FRAME_SHIFT
         if hi - lo < MIN_WINDOW_FRAMES:
             continue
         if hi - lo <= WINDOW_FRAMES:
-            windows.append((lo, hi))
+            regions.append([(lo, hi)])
             continue
-        starts = list(range(lo, hi - WINDOW_FRAMES + 1, HOP_FRAMES))
-        windows.extend((s, s + WINDOW_FRAMES) for s in starts)
-        if starts[-1] + WINDOW_FRAMES < hi - HOP_FRAMES // 2:
+        windows = [(s, s + WINDOW_FRAMES) for s in range(lo, hi - WINDOW_FRAMES + 1, HOP_FRAMES)]
+        if windows[-1][1] < hi - HOP_FRAMES // 2:
             windows.append((hi - WINDOW_FRAMES, hi))
-    return windows
+        regions.append(windows)
+    return regions
 
 
 def _spans_for_region(region: Sequence[tuple[int, int]], labels: Sequence[int]) -> list[tuple[int, int, int]]:
-    """`[(label, first_frame, last_frame)]` tiling one region's frames.
+    """`[(label, first_frame, last_frame)]` tiling one speech region's frames.
 
     Each frame goes to the window whose centre is nearest, so a turn change
     lands midway between the two windows that disagree and the spans neither
@@ -134,19 +134,21 @@ class StandaloneDiarizer:
     def diarize(self, clips: Iterable[AudioClip]) -> DiarizationResult:
         started = time.perf_counter()
         vectors: list[np.ndarray] = []
-        regions: list[tuple[AudioClip, list[tuple[int, int]], int]] = []
+        placed: list[tuple[AudioClip, list[tuple[int, int]], int]] = []
         at = 0
 
         # Embed clip by clip: the fbank of an hour of audio is 230 MB, the
         # vectors it reduces to are 10 MB.
         for clip in clips:
-            windows = speech_windows(clip.samples, vad=self._vad, vad_threshold=VAD_THRESHOLD)
-            if not windows:
+            regions = speech_windows(clip.samples, vad=self._vad, vad_threshold=VAD_THRESHOLD)
+            if not regions:
                 continue
             feats = fbank(clip.samples)
+            windows = [w for region in regions for w in region]
             vectors.append(self._embedder.embed([feats[lo:hi] for lo, hi in windows]))
-            regions.extend(_group_regions(clip, windows, offset=at))
-            at += len(windows)
+            for region in regions:
+                placed.append((clip, region, at))
+                at += len(region)
 
         if not vectors:
             return DiarizationResult(engine=self.engine, took_ms=_ms_since(started))
@@ -155,8 +157,8 @@ class StandaloneDiarizer:
             np.concatenate(vectors), threshold=self._threshold, max_speakers=self._max_speakers
         )
         voices: dict[str, list] = {}
-        for clip, windows, offset in regions:
-            for label, lo, hi in _spans_for_region(windows, labels[offset : offset + len(windows)]):
+        for clip, region, offset in placed:
+            for label, lo, hi in _spans_for_region(region, labels[offset : offset + len(region)]):
                 voices.setdefault(voice_label(label), []).append(
                     (
                         clip.start + timedelta(seconds=lo * FRAME_SHIFT_S),
@@ -168,26 +170,6 @@ class StandaloneDiarizer:
             engine=self.engine,
             took_ms=_ms_since(started),
         )
-
-
-def _group_regions(
-    clip: AudioClip, windows: list[tuple[int, int]], *, offset: int
-) -> list[tuple[AudioClip, list[tuple[int, int]], int]]:
-    """Split a clip's windows back into the speech regions they came from, with
-    each group's offset into the run's vector list. A span may not cross a
-    silence: the pause belongs to neither speaker (#441)."""
-    groups: list[tuple[AudioClip, list[tuple[int, int]], int]] = []
-    current: list[tuple[int, int]] = []
-    at = offset
-    for window in windows:
-        if current and window[0] > current[-1][1]:
-            groups.append((clip, current, at))
-            at += len(current)
-            current = []
-        current.append(window)
-    if current:
-        groups.append((clip, current, at))
-    return groups
 
 
 def _ms_since(started: float) -> int:

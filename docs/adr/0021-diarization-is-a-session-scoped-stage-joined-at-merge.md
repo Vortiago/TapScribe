@@ -110,9 +110,13 @@ standalone path, which is why the seam sits at the session.
 
 The default binds to this repo's existing constraints: **no torch** in core
 (#374), cross-platform (the Windows tray bridge's system-audio capture is the
-main producer of multi-person taps), and onnxruntime already core, running a
-vendored ONNX model with a `PROVENANCE.md` (`tapscribe/vad/`). An ONNX
+main producer of multi-person taps), and onnxruntime already core. An ONNX
 segmentation + embedding pair fits; pyannote's torch stack does not.
+Segmentation is the vendored Silero (`tapscribe/vad/`); the embedding model is
+**fetched at bring-up** as a `preflight` step, with its sha256 verified — 30 MB
+of weights whose digest is checked beats a committed blob that is only trusted,
+and no model means diarization degrades rather than the recorder failing to
+boot. Provenance and the measurements that picked it: `tests/fixtures/diarize/`.
 
 ## Consequences
 

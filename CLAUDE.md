@@ -244,8 +244,8 @@
 ## Runtime deps the install picker does NOT cover
 
 `tapscribe/install_picker.py` resolves *model* extras (`whisper-cpu`,
-`parakeet-mlx`, …). One recurring runtime dependency falls outside
-that matrix and is wired into `tapscribe/preflight.py` instead, which
+`parakeet-mlx`, …). Two runtime dependencies fall outside that matrix
+and are wired into `tapscribe/preflight.py` instead, which
 `start.sh` / `start.ps1` and the Bundle's Launcher all run after the
 picker:
 
@@ -269,6 +269,20 @@ picker:
   pins that. The differential test that keeps the port honest,
   `tests/test_vad_silero_port.py`, needs the real upstream package and
   therefore has its own `upstream-contract` CI lane.
+
+- **The speaker-embedding model** — diarization's CAM++ export
+  (`tapscribe/diarizers/model.py`, ADR-0021) is **fetched**, not
+  vendored: 30 MB whose sha256 the fetcher VERIFIES, where a committed
+  blob is only trusted. The probe is "file present AND digest matches",
+  so a truncated download reads as absent and is repaired rather than
+  loading as a broken graph later. The repair runs the module
+  (`python -m tapscribe.diarizers.model`), not pip, and is non-fatal:
+  no model means a multi-person tap stays one speaker. Retrying every
+  launch is deliberate here — an offline box fails in milliseconds and
+  gets the model the first time it has connectivity. Lands under
+  `BASE_DIR/models/` (gitignored), never in site-packages. The module is
+  stdlib-only because preflight imports it, pinned by
+  `test_the_diarize_model_probe_imports_no_third_party`.
 
 **`ffmpeg` is NOT required, period.** Every array-accepting backend
 (`mlx_whisper`, `mlx_parakeet`, and the `transformers` Parakeet path in

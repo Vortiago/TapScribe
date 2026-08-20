@@ -183,6 +183,10 @@ def plan_steps(
                     "the speaker-embedding model isn't on disk, so diarization would "
                     "leave every multi-person tap as one speaker in the transcript."
                 ),
+                # Unlike the llama_cpp step, retrying every launch is CORRECT
+                # here: an offline box fails in milliseconds, and the operator
+                # gets the model the first time it launches with connectivity.
+                # There is nothing to build and nothing to stamp.
                 argv=[python, "-m", "tapscribe.diarizers.model"],
             )
         )
