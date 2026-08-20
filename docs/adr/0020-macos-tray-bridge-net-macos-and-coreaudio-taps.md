@@ -33,7 +33,11 @@ on the first-party `net10.0-macos` AppKit workload, one process
   writes payload without the download quarantine that makes an ad-hoc
   bundle read as DAMAGED (ADR-0012 has the mechanism, and `ci.yml`
   asserts it). Ad-hoc signatures change per build, so every update
-  re-prompts TCC, also documented on the card. Tap token in the Keychain;
+  re-prompts TCC, also documented on the card, AND makes the Keychain treat each
+  build as a different app: its item ACLs trust a code identity, so an update
+  asks the operator for their login password before it can read the tap token.
+  Both go away with a Developer ID and neither is fixable below it. Tap token in
+  the Keychain;
   other state as JSON under `~/Library/Application Support/TapScribe/`.
   Scope: full functional parity with the Windows shell.
 

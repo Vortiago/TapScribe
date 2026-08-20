@@ -292,11 +292,21 @@ knowing before you reach for one:
   (`TAPSCRIBE_HOST=… TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
   does seed it, and so does typing the values into Settings once, which is the
   supported route.
-- **The Settings window is the smaller half of the Windows dialog for now**:
-  connection, the microphone row, the system-audio row, the shared gate timings
-  and the end-of-meeting behaviour. The Advanced pin grid and the live level
-  meters are device parity (#421). A saved pin still survives a Save even though
-  there is no grid showing it.
+- **An update asks for your login password to reach the token.** A Keychain
+  item's ACL trusts the app that created it, identified by its code signature,
+  and an ad-hoc signature is a fresh identity on every build (ADR-0020). So the
+  Keychain treats each new version as a different app and asks you to authorise
+  it, once per item per build. Choosing **Always Allow** settles it for that
+  build, not for the next one. Nothing in the code can fix this: a stable
+  Developer ID signature is what makes the ACL keep trusting the app, which is
+  the same thing that would stop macOS re-prompting for the microphone and
+  system-audio grants.
+- **The meters are on-demand toggles, unlike the Windows dialog's always-on
+  bars.** A system-audio meter is a second process tap, and reading audio
+  through one needs the Screen and System Audio Recording grant, so an eager
+  meter would fire that prompt at someone who opened Settings to correct a
+  hostname. Hangover and pre-roll are shared across devices on both platforms,
+  which is parity rather than a gap.
 - **System audio needs a permission the Mac asks for at the first Start**, not
   at install and not when Settings is opened: macOS prompts for **System Audio
   Recording** the first time a meeting's process tap actually runs. Dismiss it
