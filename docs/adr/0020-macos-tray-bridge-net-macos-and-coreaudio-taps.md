@@ -21,12 +21,16 @@ on the first-party `net10.0-macos` AppKit workload, one process
   Level gate stays the only Mute source.
 - **Layout**: `bridges/tray-bridge/` houses Core + all platform layers +
   all shells in one solution (`TapScribe.TrayBridge.slnx`).
-- **Packaging**: zipped `.app`, `osx-arm64`, unsigned in v1 (Developer
-  ID + notarization once the Apple membership exists). Ad-hoc signatures
-  change per build, so every update re-prompts TCC — documented on the
-  Get-a-bridge card. Tap token in the Keychain; other state as JSON
-  under `~/Library/Application Support/TapScribe/`. Scope: full
-  functional parity with the Windows shell.
+- **Packaging**: an unsigned `.pkg` built with `pkgbuild --component`,
+  `osx-arm64`, un-notarised in v1 (Developer ID + notarization once the
+  Apple membership exists), with the zipped `.app` published beside it.
+  The package is what the Get-a-bridge card offers, because `installer`
+  writes payload without the download quarantine that makes an ad-hoc
+  bundle read as DAMAGED (ADR-0012 has the mechanism, and `ci.yml`
+  asserts it). Ad-hoc signatures change per build, so every update
+  re-prompts TCC, also documented on the card. Tap token in the Keychain;
+  other state as JSON under `~/Library/Application Support/TapScribe/`.
+  Scope: full functional parity with the Windows shell.
 
 Rejected: **Avalonia** (a large external UI dependency against the
 repo's minimal-dependency ethos), **Swift shell + C# daemon** (two

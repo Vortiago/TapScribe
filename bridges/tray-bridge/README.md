@@ -185,18 +185,24 @@ and runs on a clean Windows 10/11 box (use `-r win-arm64` for ARM). No
 installer, code signing, or auto-update — it's a copy-and-run exe. Ships as
 `TapScribe.TrayBridge-win-x64.zip`.
 
-### macOS: a zipped app bundle
+### macOS: an installer package, and a zip beside it
 
 ```bash
 # from this directory (bridges/tray-bridge/)
 dotnet publish src/TapScribe.TrayBridge.MacOS -c Release -p:CreatePackage=false
-ditto -c -k --keepParent \
-  src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app \
-  TapScribe.TrayBridge-osx-arm64.zip
+APP=src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
+pkgbuild --component "$APP" --install-location /Applications \
+  --identifier net.havso.tapscribe.traybridge --version 0.0.0 \
+  TapScribe.TrayBridge-osx-arm64.pkg
+ditto -c -k --keepParent "$APP" TapScribe.TrayBridge-osx-arm64.zip
 ```
 
-Three things about those two lines, each of which silently ships a broken
-artifact if it is wrong:
+The **`.pkg` is the artifact the dashboard offers**, and the reason is
+Gatekeeper rather than taste: see *Installing the Mac build* below. The zip
+stays published for anyone who wants the bundle without running an installer.
+
+Four things about those lines, each of which silently ships a broken artifact
+if it is wrong:
 
 - The bundle lands in the RID output directory, **not** `publish/`. That one
   receives only the installer package, which `CreatePackage=false` suppresses
@@ -208,29 +214,48 @@ artifact if it is wrong:
   `CFBundleShortVersionString` against the tag. The `Info.plist` declares no
   version of its own and the csproj derives both version keys from `$(Version)`,
   so a publish missing the flag stamps the SDK's own default without failing.
+- **`pkgbuild --component`, not the SDK's `CreatePackage`.** CI's *Prove
+  installer-written payload is not quarantined* step asserts against this exact
+  invocation, so building the shipped package a different way would leave that
+  gate testing something nobody downloads. `--version` carries the tag for
+  `pkgutil --pkg-info`; the filename stays unversioned because a permanent
+  `releases/latest/download/` URL cannot carry one (ADR-0012).
 
 ### Installing the Mac build
 
-1. Download `TapScribe.TrayBridge-osx-arm64.zip` from Settings → **Get a
-   bridge** (or the Releases page), unzip it, and move
-   `TapScribe.TrayBridge.MacOS.app` into `/Applications`.
-2. Clear the download quarantine, once per copy:
+1. Download `TapScribe.TrayBridge-osx-arm64.pkg` from Settings → **Get a
+   bridge** (or the Releases page) and open it.
+2. macOS blocks it once, because v1 is un-notarised (ADR-0020). Go to **System
+   Settings → Privacy & Security**, find the blocked item in the **Security**
+   section, and click **Open Anyway**. The button disappears about an hour after
+   the blocked attempt, so if it is not there, try opening the package again
+   first. On macOS 26 this step also asks for an admin password.
+3. Let the installer put `TapScribe.TrayBridge.MacOS.app` in `/Applications`,
+   then open it. The icon appears in the **menu bar**, with no Dock icon and no
+   window, which is what `LSUIElement` buys. **No Terminal step, and no second
+   Gatekeeper prompt.**
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app
-   ```
+**Why a package and not the zip.** The bundle carries an ad-hoc signature (the
+macOS SDK applies one, and arm64 will not execute a bundle with none at all),
+and Gatekeeper reads a signature it cannot validate as tampering. So a
+*quarantined* ad-hoc bundle is reported as **damaged**, offering only Move to
+Trash: there is no in-UI way forward at all, and right-click → **Open** does
+not rescue it, that being the bypass for the milder "unidentified developer"
+dialog a signed-but-not-notarised app gets. An unsigned *package* gets that
+milder treatment instead, and `installer` writes its payload outside the path
+that applies quarantine, so the installed app is not quarantined and launches
+straight away. CI asserts that last part on a real runner rather than trusting
+it, since Apple documents none of it.
 
-3. Open it. The icon appears in the **menu bar**, with no Dock icon and no
-   window, which is what `LSUIElement` buys.
+If you took the zip instead, the `xattr` step is still the only escape:
 
-**Step 2 is not optional.** v1 is unsigned and un-notarised (ADR-0020), so the
-bundle carries an ad-hoc signature that Gatekeeper rejects outright: opening a
-quarantined copy reports the app as damaged and offers Move to Trash, which
-reads like a broken download rather than the policy decision it is.
-Right-click → **Open** is the bypass for the milder "unidentified developer"
-dialog, which is what a signed-but-not-notarised app gets; it does not rescue
-an ad-hoc one. The attribute arrives with the download, so a later version
-needs the step again.
+```bash
+xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app
+```
+
+Notarisation is what removes the block in step 2, and it needs a paid Apple
+Developer account. Until then the block is the policy working as designed, not
+a broken download.
 
 Apple silicon only, and macOS 14.4 or newer: Launch Services refuses the bundle
 on an older Mac from its `LSMinimumSystemVersion`, and the shell's own floor

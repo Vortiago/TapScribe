@@ -5678,7 +5678,7 @@ async def test_settings_get_a_bridge_card_links_to_release_assets(running_record
             mac_href = await mac.get_attribute("href")
             assert "releases/latest/download/tapscribe-spacialchat-bridge.zip" in (spatial_href or "")
             assert "releases/latest/download/TapScribe.TrayBridge-win-x64.zip" in (tray_href or "")
-            assert "releases/latest/download/TapScribe.TrayBridge-osx-arm64.zip" in (mac_href or "")
+            assert "releases/latest/download/TapScribe.TrayBridge-osx-arm64.pkg" in (mac_href or "")
 
             # Static card: exactly one /api/bridges fetch on render.
             assert len(bridges_requests) == 1, (

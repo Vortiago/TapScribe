@@ -190,17 +190,49 @@ jobs:
             exit 1
           fi
 
+      # The asset the dashboard offers, and the reason it is a .pkg rather than
+      # the zip. Our bundle is ad-hoc signed (the SDK signs it; arm64 refuses a
+      # wholly unsigned one), and Gatekeeper reads a signature it cannot validate
+      # as tampering: a QUARANTINED ad-hoc bundle is reported as "damaged" with
+      # only Move to Trash, so the zip leaves the operator no in-UI way forward
+      # and a documented `xattr` command as the only escape. `installer` writes
+      # payload outside the path that stamps quarantine, so the app a .pkg drops
+      # in /Applications launches with no second obstacle.
+      #
+      # `pkgbuild --component` rather than the SDK's own CreatePackage, so this is
+      # the SAME invocation ci.yml's "Prove installer-written payload is not
+      # quarantined" step asserts against. A different mechanism here would leave
+      # that gate testing something we do not ship.
+      #
+      # The identifier is the app's own bundle id, so an install upgrades in place
+      # rather than accumulating receipts. --version carries the tag for
+      # `pkgutil --pkg-info`; the FILENAME stays unversioned, which is what the
+      # permanent-URL contract requires (ADR-0012).
+      - name: Build the installer package
+        run: >
+          pkgbuild --component "$APP"
+          --install-location /Applications
+          --identifier net.havso.tapscribe.traybridge
+          --version ${{ env.VER }}
+          TapScribe.TrayBridge-osx-arm64.pkg
+
       # ditto, never `zip -r`: a .app is symlinks and executable bits, and a
       # naive zip drops both, producing an archive that unpacks into something
       # macOS refuses to launch.
+      #
+      # Kept alongside the .pkg: it is the artifact for anyone who wants the
+      # bundle without running an installer, and dropping a published asset name
+      # breaks every link that already points at it.
       - name: Zip the app bundle
         run: ditto -c -k --keepParent "$APP" TapScribe.TrayBridge-osx-arm64.zip
 
-      - name: Upload macos tray artifact
+      - name: Upload macos tray artifacts
         uses: actions/upload-artifact@v7
         with:
           name: bridge-tray-macos
-          path: TapScribe.TrayBridge-osx-arm64.zip
+          path: |
+            TapScribe.TrayBridge-osx-arm64.pkg
+            TapScribe.TrayBridge-osx-arm64.zip
           if-no-files-found: error
 
   # Docker→GHCR is deliberately NOT a `needs` of `github-release`: a GHCR
@@ -396,6 +428,7 @@ jobs:
             dist/*
             bridge-artifacts/tapscribe-spacialchat-bridge.zip
             bridge-artifacts/TapScribe.TrayBridge-win-x64.zip
+            bridge-artifacts/TapScribe.TrayBridge-osx-arm64.pkg
             bridge-artifacts/TapScribe.TrayBridge-osx-arm64.zip
             bundle-artifacts/TapScribe-Setup-win-x64.exe
           fail_on_unmatched_files: true

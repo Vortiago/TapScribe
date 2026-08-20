@@ -34,5 +34,5 @@ class BridgeArtifact(NamedTuple):
 BRIDGE_ARTIFACTS: tuple[BridgeArtifact, ...] = (
     BridgeArtifact(id="spacialchat", filename="tapscribe-spacialchat-bridge.zip"),
     BridgeArtifact(id="windows-tray", filename="TapScribe.TrayBridge-win-x64.zip"),
-    BridgeArtifact(id="macos-tray", filename="TapScribe.TrayBridge-osx-arm64.zip"),
+    BridgeArtifact(id="macos-tray", filename="TapScribe.TrayBridge-osx-arm64.pkg"),
 )

@@ -73,10 +73,10 @@ def test_api_bridges_download_urls_point_at_latest_release_assets(client):
         == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-win-x64.zip"
     )
 
-    assert by_id["macos-tray"]["filename"] == "TapScribe.TrayBridge-osx-arm64.zip"
+    assert by_id["macos-tray"]["filename"] == "TapScribe.TrayBridge-osx-arm64.pkg"
     assert (
         by_id["macos-tray"]["download_url"]
-        == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-osx-arm64.zip"
+        == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-osx-arm64.pkg"
     )
 
 

@@ -337,8 +337,8 @@
         </div>
         <div class="field">
           <label>macOS tray bridge <span class="dim">(menu bar, Apple silicon, macOS 14.4+)</span></label>
-          <div class="dim" style="margin-bottom:6px">Unzip into /Applications, then clear the download quarantine once, because the app is unsigned and macOS otherwise refuses it as damaged: <span class="mono">xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app</span></div>
-          <a class="act act--sm act--primary" data-slot="bridgeDlMac">Download menu-bar app (.zip)</a>
+          <div class="dim" style="margin-bottom:6px">Open the package and install it. macOS blocks it once because the app is un-notarised: allow it under System Settings &rarr; Privacy &amp; Security &rarr; Open Anyway. No Terminal step.</div>
+          <a class="act act--sm act--primary" data-slot="bridgeDlMac">Download installer (.pkg)</a>
         </div>
         <div class="dim mono" data-slot="bridgeDlHint" style="margin-top:9px"></div>
       </div>

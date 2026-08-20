@@ -6,12 +6,13 @@ date: 2026-07-15
 # Bridge artifacts are built by CI and attached to tag-driven GitHub Releases
 
 Pushing a `vX.Y.Z` tag fires `.github/workflows/release.yml`, which builds the
-wheel + sdist, the SpatialChat extension zip, both tray-Bridge zips, and a
-GHCR image, then attaches the release assets under **stable, unversioned
-filenames**:
+wheel + sdist, the SpatialChat extension zip, the Windows tray zip, the macOS
+tray package and bundle, and a GHCR image, then attaches the release assets
+under **stable, unversioned filenames**:
 
 - `tapscribe-spacialchat-bridge.zip`
 - `TapScribe.TrayBridge-win-x64.zip`
+- `TapScribe.TrayBridge-osx-arm64.pkg`
 - `TapScribe.TrayBridge-osx-arm64.zip`
 
 The dashboard's Settings "Get a bridge" card links to
@@ -60,11 +61,17 @@ download the browser can fetch directly.
   automatic.
 - Neither tray build is signed, and each OS objects in its own way, so the card
   documents both. Windows shows SmartScreen, which is a click-through. macOS is
-  harder: the bundle carries only an ad-hoc signature, so a quarantined copy is
-  reported as DAMAGED with Move to Trash as the only offer, and right-click ->
-  Open does not bypass that (it bypasses the milder unidentified-developer
-  prompt, which needs a real signature). Clearing the quarantine attribute is
-  the only route, so the card gives the command rather than a gesture.
-  Notarisation is what would remove the step, and it needs a paid Apple
-  Developer account; that, code signing, installers and auto-update all stay
-  out of scope for v1.
+  harder, and it is why the Mac artifact the card offers is a `.pkg` while
+  Windows ships a zip. The bundle carries only an ad-hoc signature, and
+  Gatekeeper reads a signature it cannot validate as tampering, so a quarantined
+  copy is reported as DAMAGED with Move to Trash as the only offer. Right-click
+  -> Open does not bypass that (it bypasses the milder unidentified-developer
+  prompt, which needs a real signature), leaving `xattr` as the only route out
+  of a zip. An unsigned PACKAGE gets the milder treatment instead, and
+  `installer` writes payload outside the path that applies quarantine, so the
+  installed app is not quarantined and opens straight away. Apple documents none
+  of that, so `ci.yml` asserts it on a real runner rather than the card trusting
+  it. The zip stays published for anyone who wants the bundle without an
+  installer, and it still needs the command. Notarisation is what would remove
+  the one remaining block, and it needs a paid Apple Developer account; that,
+  code signing and auto-update all stay out of scope for v1.
