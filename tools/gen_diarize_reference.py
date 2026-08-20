@@ -9,8 +9,9 @@ cannot rot unnoticed.
 Needs the two upstream packages the shipped code deliberately does NOT depend
 on, plus the embedding model (fetched at bring-up, not vendored):
 
-    pip install kaldi-native-fbank onnxruntime
-    python3 tools/gen_diarize_reference.py --model /path/to/campplus.onnx
+    pip install kaldi-native-fbank
+    python3 -m tapscribe.diarizers.model      # if it isn't fetched yet
+    python3 tools/gen_diarize_reference.py
 
 Re-running after a model or upstream bump must leave `test_diarize_fbank.py`
 green, or the port needs the matching change.
@@ -62,7 +63,6 @@ def short_signal() -> np.ndarray:
 
 
 def build(model: Path | None) -> dict[str, np.ndarray]:
-    sys.path.insert(0, str(REPO_ROOT))
     from tapscribe.wav_predecode import load_recorder_wav_as_pcm
 
     payload: dict[str, np.ndarray] = {"fbank__short": fbank_reference(short_signal())}
@@ -89,16 +89,26 @@ def main() -> int:
     ap.add_argument(
         "--model",
         type=Path,
-        help="the speaker-embedding ONNX. Omit to regenerate fbank references only.",
+        default=None,
+        help="override the fetched speaker-embedding ONNX.",
+    )
+    ap.add_argument(
+        "--fbank-only",
+        action="store_true",
+        help="skip the embeddings, so no model is needed.",
     )
     args = ap.parse_args()
 
-    payload = build(args.model)
+    sys.path.insert(0, str(REPO_ROOT))
+    from tapscribe.diarizers import model as diarize_model
+
+    model = None if args.fbank_only else (args.model or diarize_model.model_path())
+    payload = build(model)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(OUT, **payload)
     print(f"\nwrote {OUT.relative_to(REPO_ROOT)} ({OUT.stat().st_size / 1024:.1f} KB)")
-    if args.model:
-        print("model sha256:", hashlib.sha256(args.model.read_bytes()).hexdigest())
+    if model is not None:
+        print("model sha256:", hashlib.sha256(model.read_bytes()).hexdigest())
     return 0
 
 

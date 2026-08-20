@@ -25,6 +25,7 @@ import graph rather than the app's.
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +39,15 @@ _BOOTSTRAP = {"install_picker", "cuda_torch", "preflight", "install_target"}
 #: What a bootstrap module may import beyond the standard library. Nothing
 #: third-party — `install_target` is the one intra-package exception, and it is
 #: itself stdlib-only (its own import list is checked by this same test).
-_ALLOWED_NON_STDLIB = {"tapscribe", "tapscribe.install_target", "tapscribe.cuda_torch"}
+# Each of these is itself importable from a pip-only venv.
+# `tapscribe.diarizers` earns its place through the runtime check below, not by
+# assertion: the AST scan cannot see numpy behind its relative imports.
+_ALLOWED_NON_STDLIB = {
+    "tapscribe",
+    "tapscribe.install_target",
+    "tapscribe.cuda_torch",
+    "tapscribe.diarizers",
+}
 
 
 def _module_files() -> list[Path]:
@@ -78,6 +87,17 @@ def _imported_roots(path: Path, *, skip_probes: bool = False) -> set[str]:
             if node.module:
                 roots.add(node.module)
     return roots
+
+
+def test_the_diarize_model_probe_imports_no_third_party():
+    """preflight probes `diarizers.model` for the fetched embedding model, and a
+    numpy import behind that would crash the bring-up repair on exactly the
+    incomplete venv it exists to fix. A subprocess, because this one has numpy
+    loaded ten times over."""
+    probe = "import sys, tapscribe.diarizers.model; print(sorted(m for m in ('numpy', 'onnxruntime') if m in sys.modules))"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert out.stdout.strip() == "[]", f"importing the probe pulled {out.stdout.strip()}"
 
 
 def test_no_app_module_imports_the_bootstrap_scripts():

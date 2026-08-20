@@ -204,6 +204,15 @@ _check_summarize_timeout = _bounded_check(
     "summarize timeout",
     "a finite number",
 )
+_check_diarize_threshold = _bounded_check(
+    config._parse_diarize_threshold, config._DIARIZE_THRESHOLD_BOUNDS, "diarize threshold", "a finite number"
+)
+_check_diarize_max_speakers = _bounded_check(
+    config._parse_diarize_max_speakers,
+    config._DIARIZE_MAX_SPEAKERS_BOUNDS,
+    "diarize max speakers",
+    "an integer",
+)
 _check_summarize_gguf_ctx = _bounded_check(
     config._parse_summarize_gguf_ctx, config._SUMMARIZE_GGUF_CTX_BOUNDS, "summarize gguf ctx", "an integer"
 )
@@ -252,6 +261,12 @@ CONFIG_KEYS: dict[str, _ConfigSpec] = {
     ),
     # Summarize GGUF context window (summarize-gguf-ctx.txt): integer n_ctx.
     "summarize-gguf-ctx": _ConfigSpec("SUMMARIZE_GGUF_CTX_FILE", strip=True, check=_check_summarize_gguf_ctx),
+    # Voice-clustering cut (diarize-threshold.txt): cosine distance.
+    "diarize-threshold": _ConfigSpec("DIARIZE_THRESHOLD_FILE", strip=True, check=_check_diarize_threshold),
+    # Voices per tap (diarize-max-speakers.txt): hard cap on the clustering.
+    "diarize-max-speakers": _ConfigSpec(
+        "DIARIZE_MAX_SPEAKERS_FILE", strip=True, check=_check_diarize_max_speakers
+    ),
 }
 
 # A candidate-language set is a small comma/space-separated bag of ISO codes.

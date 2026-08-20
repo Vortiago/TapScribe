@@ -7,24 +7,28 @@ checks the archive itself, and runs only where `kaldi-native-fbank` is installed
 `silero-port` lane exists for exactly this reason.
 
 The embedding half additionally needs the model, which is fetched rather than
-vendored; point `TAPSCRIBE_DIARIZE_MODEL` at it or those tests skip.
+vendored — `python -m tapscribe.diarizers.model`, which the lane runs.
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import numpy as np
 import pytest
 
+from tapscribe.diarizers import model as diarize_model
 from tapscribe.diarizers.fbank import fbank
 from tests.fixtures.diarize import load_reference, read_fixture_wav
 
 knf = pytest.importorskip("kaldi_native_fbank", reason="upstream kaldi-native-fbank not installed")
 
 FIXTURES = ["armstrong-en", "marlene-nb", "solen-da"]
-_MODEL = os.environ.get("TAPSCRIBE_DIARIZE_MODEL", "")
+
+#: ONE owner for "is the model there" — a second answer here would let a failed
+#: fetch skip these green, which is the silent skip the lane exists to close.
+needs_model = pytest.mark.skipif(
+    not diarize_model.model_present(),
+    reason="run `python -m tapscribe.diarizers.model` to fetch the embedding model",
+)
 
 
 def _upstream_fbank(samples: np.ndarray) -> np.ndarray:
@@ -74,13 +78,13 @@ def test_the_port_matches_upstream_on_short_inputs(n: int) -> None:
         np.testing.assert_allclose(got, want, rtol=0, atol=2e-3)
 
 
-@pytest.mark.skipif(not _MODEL, reason="set TAPSCRIBE_DIARIZE_MODEL to the embedding model")
+@needs_model
 def test_the_runtime_embeds_long_input_coherently() -> None:
     """onnxruntime 1.27.0 miscomputes this model above ~1000 frames, silently:
     the vectors stay unit-norm while a speaker stops resembling herself. Nothing
     else turns that into a failure (PROVENANCE.md has the measurements)."""
     ort = pytest.importorskip("onnxruntime")
-    session = ort.InferenceSession(_MODEL, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(str(diarize_model.model_path()), providers=["CPUExecutionProvider"])
 
     def embed(feats: np.ndarray) -> np.ndarray:
         centred = feats - feats.mean(axis=0, keepdims=True)
@@ -95,11 +99,11 @@ def test_the_runtime_embeds_long_input_coherently() -> None:
     assert float(np.dot(long, embed(other[:1500]))) < 0.30, "speakers stopped separating"
 
 
-@pytest.mark.skipif(not Path(_MODEL or "/nonexistent").exists(), reason="model not present")
+@needs_model
 @pytest.mark.parametrize("name", FIXTURES)
 def test_the_committed_embedding_still_matches(name: str) -> None:
     ort = pytest.importorskip("onnxruntime")
-    session = ort.InferenceSession(_MODEL, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(str(diarize_model.model_path()), providers=["CPUExecutionProvider"])
     feats = fbank(read_fixture_wav(name))
     centred = feats - feats.mean(axis=0, keepdims=True)
     vec = session.run(["embedding"], {"x": centred[None, :, :]})[0][0].astype(np.float64)

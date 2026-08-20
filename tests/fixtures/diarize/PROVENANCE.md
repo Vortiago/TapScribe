@@ -1,6 +1,6 @@
 # Diarizer reference vectors
 
-`reference.npz` (64 KB) is the numeric oracle for `tapscribe/diarizers/`. Per
+`reference.npz` (147 KB) is the numeric oracle for `tapscribe/diarizers/`. Per
 audio fixture it holds:
 
 - `fbank__<name>` / `fbank_tail__<name>` — the first and last **100 frames**
@@ -47,17 +47,44 @@ describes rather than just how many there are.
 ## Regenerating
 
 ```bash
-pip install kaldi-native-fbank onnxruntime
-python3 tools/gen_diarize_reference.py --model /path/to/campplus.onnx
+pip install kaldi-native-fbank
+python3 -m tapscribe.diarizers.model      # fetches + verifies the model
+python3 tools/gen_diarize_reference.py
 ```
 
-Omit `--model` to refresh the fbank references only. Must leave
+`--fbank-only` skips the embeddings, so no model is needed. Must leave
 `tests/test_diarize_fbank.py` green afterwards, or the port needs the matching
 change.
 
 **Generate on a runtime that passes the coherence check below** — the
 embeddings were once regenerated on 1.27.0 and silently encoded its bug, which
 made the comparison test pass for the wrong reason.
+
+## The engine's operating point (measured)
+
+`marlene-nb` and `solen-da` cut into 3 s turns, concatenated A-B-A-B-A, against
+the same shape built from ONE speaker. Both have to hold at one threshold: the
+two-speaker clip must split, and the one-speaker clip must not.
+
+Thresholds that recover exactly 2 Voices, at the shipped VAD threshold:
+
+| window / hop | turns with a pause | turns with none | one speaker |
+|---|---|---|---|
+| 1.0 / 0.5 s | ≥0.6 | ≥0.7 | splits below 0.6 |
+| **1.5 / 0.75 s** | **≥0.5** | **≥0.6** | **never splits** |
+| 2.0 / 1.0 s | ≥0.5 | ≥0.5 | never splits |
+| 3.0 / 1.5 s | — | collapses to 1 above 0.5 | never splits |
+
+**1.5 s windows at a 0.75 s hop, threshold 0.7.** Both directions hold across
+0.6–0.85 at that window, so 0.7 is the middle of a plateau rather than a derived
+optimum; the WINDOW is what narrows the plateau. Below it, the pairwise cosine
+between one speaker's own windows falls to 0.04 and only average linkage still
+holds her together; above ~2.5 s a turn change hides inside one window.
+
+Recovered turn boundaries land within 50 ms of the truth when the turns are
+separated by a pause, which is the ordinary case: the tap's level gate and the
+VAD both cut there. `tests/test_diarize_engine.py` asserts the spans, not just
+the Voice count — a wrong fbank still yields "2 Voices" on channel-matched audio.
 
 ## onnxruntime miscomputes this model on long inputs (measured)
 
@@ -81,9 +108,9 @@ stranger more than herself, which is clustering noise, not a threshold to tune.
 
 Two consequences the engine must respect:
 
-1. **Embed in bounded windows and average**, never one pass over a whole tap.
-   That is the right shape anyway — speaker embedding is a short-window
-   operation — and it keeps every call far below the threshold.
+1. **Embed in bounded windows**, never one pass over a whole tap. That is the
+   right shape anyway — speaker embedding is a short-window operation — and at
+   the shipped 1.5 s window every call is 150 frames, far below the threshold.
 2. **The failure is silent.** Nothing raises; the vectors stay unit-norm and
    plausible. `test_the_runtime_embeds_long_input_coherently` is what turns it
    into a failure — it embeds 1500 frames and asserts a speaker still resembles

@@ -361,20 +361,24 @@ jobs:
               && pip install --no-cache-dir silero-vad
             probe: silero_vad
             tests: tests/test_vad_silero_port.py
-          # tests/test_diarize_fbank_upstream.py is the only thing pinning the
-          # committed reference.npz that tapscribe/diarizers/fbank.py is checked
-          # against everywhere else — without this lane the oracle could drift
-          # from Kaldi and nothing would notice. kaldi-native-fbank is
-          # deliberately NOT a project dependency (no cp314 Windows wheel, and
-          # the shipped code is a numpy port), so the lane installs it directly.
-          # The embedding half needs the model and stays skipped here; it runs
-          # once the bring-up fetch lands.
-          - lane: diarize-fbank
+          # The only lane where diarization runs for real. Two things are
+          # otherwise unpinned: the committed reference.npz that
+          # tapscribe/diarizers/fbank.py is checked against everywhere else
+          # (kaldi-native-fbank is deliberately NOT a project dependency — no
+          # cp314 Windows wheel, and the shipped code is a numpy port), and every
+          # test that needs the embedding MODEL, which is fetched rather than
+          # vendored. The fetch below is the shipped one, so this lane exercises
+          # the bring-up path too; the assert is what stops a failed fetch from
+          # leaving the model-gated tests silently skipped and the lane green.
+          - lane: diarize
             os: ubuntu-latest
             extras: ""
-            pre_install: pip install --no-cache-dir kaldi-native-fbank
+            pre_install: >-
+              pip install --no-cache-dir kaldi-native-fbank
+              && python -m tapscribe.diarizers.model
+              && python -c "from tapscribe.diarizers import model; assert model.model_present()"
             probe: kaldi_native_fbank
-            tests: tests/test_diarize_fbank_upstream.py
+            tests: tests/test_diarize_fbank_upstream.py tests/test_diarize_engine.py
     steps:
       - uses: actions/checkout@v7
 
