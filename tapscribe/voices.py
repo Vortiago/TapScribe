@@ -109,6 +109,17 @@ def run_ids(raw: Any) -> dict[str, str]:
     }
 
 
+def voices_sig(runs: Mapping[str, str]) -> str:
+    """One string that changes whenever any identity's diarization run does.
+
+    The Transcript stage keys its lazy Voices body on this: the runs themselves
+    are a join input `attach_people` consumes and drops, so without a projection
+    the dashboard has no way to learn a diarize finished. Sorted, so a dict
+    reordering is not a change. Empty for an undiarized session.
+    """
+    return ";".join(f"{identity}:{run}" for identity, run in sorted(runs.items()))
+
+
 def read_voices(session_dir: Path) -> dict[str, dict[str, Any]]:
     """`{full identity: entry}`. Missing, torn, or non-dict → `{}`: an
     undiarized session is the normal case, and the poll must not crash on a bad

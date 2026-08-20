@@ -4,6 +4,7 @@
   PUT   /api/people/{person_id}        rename
   POST  /api/people/merge              fold one Person into another
   POST  /api/people/{person_id}/detach split an identity back out
+  PUT   /api/sessions/{session}/voices map one Voice to a Person, by id or name
 
 The registry view also rides on `/api/state` (`people`); these routes are the
 explicit fetch plus the mutations. people.json is mutated ONLY here and in the
@@ -11,6 +12,13 @@ explicit fetch plus the mutations. people.json is mutated ONLY here and in the
 identity from the body is validated against the loaded registry (KeyError → 404)
 before anything is written; nothing here builds a filesystem path from request
 input (people.json is a fixed path).
+
+The Voice mapping sits here despite its `/api/sessions/*` prefix because mapping
+by NAME creates a Person — a third people.json writer would break the invariant
+above to satisfy a URL prefix. ADR-0018 groups by concern; `routes/diarize.py`
+owns the rest of the diarization surface. The voice KEY travels in the body, not
+the path: it carries a `#`, and a request-shaped path segment is a class of risk
+this route has no reason to take on.
 """
 
 from __future__ import annotations
@@ -28,7 +36,10 @@ from fastapi import (
 from ..name_resolution import attach_people
 from ..people import PeopleRegistry
 from ..recorder import Recorder
-from ..sessions import gather_sessions
+from ..session_paths import resolve_session_dir
+from ..sessions import gather_sessions, read_session_meta, write_session_meta
+from ..text import split_voice_key
+from ..voices import read_voices
 from .body import json_body, require_json_object_body, require_str
 from .deps import get_recorder
 
@@ -86,3 +97,48 @@ async def api_people_detach(person_id: str, req: Request, recorder: Recorder = D
     new_person = registry.detach(person_id, identity)
     registry.save()
     return {"ok": True, "detached": new_person["id"], "people": await _people_view(recorder)}
+
+
+@router.put("/api/sessions/{session}/voices")
+async def api_session_voice_mapping(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Map one Voice to a Person: `{"key": "identity#A", "person_id": …}`, or
+    `{"key": …, "name": …}` to create the Person as part of the mapping, or the
+    key alone to clear it.
+
+    A `name` always CREATES, even when one Person already has it. Two people
+    share a name more often than one is typed twice, and folding a Voice into a
+    namesake attributes their words to a stranger; picking the existing Person
+    is the dropdown, a different gesture. There is deliberately no bare create
+    on the wire (ADR-0021) — a Person is never left unattached.
+
+    The session's Voice sidecar is the allowlist: the key must be a Voice it
+    carries, and the run stamped on the mapping is the one it names. A mapping
+    whose stamp no longer matches is not applied, so letting the client choose
+    it would let a stale mapping look current.
+    """
+    body = await json_body(req)
+    key = require_str(body.get("key"), "key")
+    identity, label = split_voice_key(key)
+    entry = read_voices(resolve_session_dir(session)).get(identity)
+    if entry is None or not label or label not in entry["voices"]:
+        raise HTTPException(404, f"no Voice {key!r} in this session's diarization")
+
+    person_id = body.get("person_id")
+    name = body.get("name")
+    registry = PeopleRegistry.load()
+    if isinstance(name, str) and name.strip():
+        person_id = registry.create(name.strip())["id"]
+        registry.save()
+    elif isinstance(person_id, str) and person_id:
+        if registry.get(person_id) is None:
+            raise HTTPException(404, f"no Person {person_id!r}")
+    else:
+        person_id = ""
+
+    mapping = dict(read_session_meta(session).get("voices") or {})
+    if person_id:
+        mapping[key] = {"person_id": person_id, "run_id": entry["run_id"]}
+    else:
+        mapping.pop(key, None)
+    write_session_meta(session, {"voices": mapping})
+    return {"ok": True, "voices": mapping, "people": await _people_view(recorder)}

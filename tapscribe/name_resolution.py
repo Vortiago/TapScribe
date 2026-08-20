@@ -27,6 +27,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+import tapscribe.voices as voices
+
 from .people import PeopleRegistry
 from .roster import slug_owners
 from .text import is_voice_key, split_voice_key, voice_key
@@ -292,7 +294,10 @@ def attach_people_view(
     people = build_people_view(sessions=sessions, registry=registry, live_identities=live_identities)
     for s in sessions:
         # Both are join inputs consumed above, not payload: shipping them would
-        # put the whole roster and every run stamp in each poll body.
+        # put the whole roster and every run stamp in each poll body. The runs
+        # leave one projection behind — the stamp the Transcript stage keys its
+        # lazy Voices body on, which is the only way it learns a diarize landed.
+        s["voices_sig"] = voices.voices_sig(s.get("voice_runs") or {})
         s.pop("roster", None)
         s.pop("voice_runs", None)
     return people

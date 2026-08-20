@@ -6,6 +6,7 @@
   state            GET /api/state, the dashboard's poll (over state_view)
   sessions         the listing, the lazy bodies, destructive housekeeping
   strip            strip silence: preview, commit, read back, discard
+  diarize          split a multi-person tap into Voices, and read them back
   wav              one WAV: download, transcript, peaks, delete, primary
   transcribe       the batch transcribe triggers
   summarize        summarize a session, the model list, the saved default
@@ -46,6 +47,7 @@ from .assets import mount_static
 from .assets import router as assets_router
 from .bridges import router as bridges_router
 from .diagnostics import router as diagnostics_router
+from .diarize import router as diarize_router
 from .live import router as live_router
 from .models import router as models_router
 from .operator_config import router as operator_config_router
@@ -65,6 +67,7 @@ ALL_ROUTERS: tuple[APIRouter, ...] = (
     state_router,
     sessions_router,
     strip_router,
+    diarize_router,
     wav_router,
     transcribe_router,
     summarize_router,
