@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import numpy as np
 
-SAMPLE_RATE = 16000
+#: The rate the embedding model was trained at, and what `reference.npz` is
+#: computed from — NOT `audio.RECORDER_SAMPLE_RATE`. Same number, different
+#: fact: a /tap rate change must not silently retune the mel edges below.
+#: Mirrors `vad/silero.py`'s `SUPPORTED_RATE` for the same reason.
+SUPPORTED_RATE = 16000
 NUM_BINS = 80
 FRAME_LENGTH = 400  # 25 ms
 FRAME_SHIFT = 160  # 10 ms
@@ -48,12 +52,12 @@ def _mel_banks() -> np.ndarray:
     def to_mel(f: np.ndarray | float) -> np.ndarray | float:
         return 1127.0 * np.log(1.0 + np.asarray(f) / 700.0)
 
-    nyquist = SAMPLE_RATE / 2.0
+    nyquist = SUPPORTED_RATE / 2.0
     mel_low, mel_high = to_mel(LOW_FREQ), to_mel(nyquist)
     # NUM_BINS + 2 edges: each filter spans one left/centre/right triple.
     edges = np.linspace(mel_low, mel_high, NUM_BINS + 2)
     num_fft_bins = FFT_SIZE // 2 + 1
-    fft_mel = to_mel(np.arange(num_fft_bins) * (SAMPLE_RATE / FFT_SIZE))
+    fft_mel = to_mel(np.arange(num_fft_bins) * (SUPPORTED_RATE / FFT_SIZE))
 
     banks = np.zeros((NUM_BINS, num_fft_bins), dtype=np.float64)
     for i in range(NUM_BINS):

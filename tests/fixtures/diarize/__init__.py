@@ -6,10 +6,11 @@ pins.
 
 from __future__ import annotations
 
-import wave
 from pathlib import Path
 
 import numpy as np
+
+from tapscribe.wav_predecode import load_recorder_wav_as_pcm
 
 _HERE = Path(__file__).resolve().parent
 _AUDIO = _HERE.parent / "audio"
@@ -23,7 +24,9 @@ def load_reference() -> dict[str, np.ndarray]:
 
 def read_fixture_wav(name: str) -> np.ndarray:
     """One audio fixture as float32 in [-1, 1) — the scaling the embedding
-    model's `normalize_samples=1` expects."""
-    with wave.open(str(_AUDIO / f"{name}.wav")) as w:
-        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-    return pcm.astype(np.float32) / 32768.0
+    model's `normalize_samples=1` expects.
+
+    Through the repo's one decode path, so a fixture re-encoded at the wrong
+    rate raises instead of silently producing garbage fbank.
+    """
+    return load_recorder_wav_as_pcm(_AUDIO / f"{name}.wav")
