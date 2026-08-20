@@ -43,6 +43,39 @@ public class MacOSAudioCaptureTests
     }
 
     [Fact]
+    public void Capture_DisposedTwice_ReleasesItsListenersOnce()
+    {
+        // The system-audio sibling guards this and the microphone did not, which is a
+        // difference in the two captures' disposal contracts rather than in their needs: both
+        // hand the same Registration objects back, and a Registration guards its pin with a
+        // plain bool, so a repeat is a race over freeing a GCHandle rather than a no-op.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        var capture = new MacOSAudioCapture(hal, device.ObjectId);
+
+        capture.Dispose();
+        Assert.Null(Record.Exception(capture.Dispose));
+
+        Assert.Equal(0, hal.LiveListeners);
+    }
+
+    [Fact]
+    public void Capture_StartedAfterDispose_IsRefusedRatherThanRegisteringAnIoProc()
+    {
+        // Its two listeners are gone by then, so a capture started here would deliver audio
+        // with nothing left to report a mute change or a vanished endpoint, and its IOProc
+        // would outlive the only Dispose anyone was going to call. The sibling refuses it; this
+        // one registered one.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        capture.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(capture.Start);
+        Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
     public void Capture_OnADeviceWithMuteSupport_RaisesMuteChangedOnEachTransition()
     {
         // Honouring the OS mute turns "muted" into a hard gate-closed, independent of level:

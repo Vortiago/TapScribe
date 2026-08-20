@@ -60,7 +60,7 @@ internal sealed class CaptureHandOff
     private readonly string _threadName;
     private readonly Action<ReadOnlyMemory<byte>> _deliver;
 
-    private long _dropped;              // producer-only, diagnostic; spans generations
+    private long _dropped;              // producer-only, diagnostic; reset per Start
     private long _handlerFaults;        // pump-only, diagnostic; spans generations
 
     // The running generation, or null while stopped. Volatile because the IO thread reads it

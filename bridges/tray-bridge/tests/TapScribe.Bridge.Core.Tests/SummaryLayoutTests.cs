@@ -118,4 +118,26 @@ public class SummaryLayoutTests
         // leading separator would be.
         Assert.Empty(SummaryLayout.Flatten(SummaryMarkdown.Parse("")));
     }
+
+    [Fact]
+    public void Flatten_ABlockThatPaintsNothing_EarnsNoSeparator()
+    {
+        // The same rule as above, for the block that HAS no text rather than the summary that
+        // has no blocks. An empty fence parses to a Code block carrying "", and skipping only
+        // its own run left the separator behind: two blank lines as the summary's first run,
+        // which reads as a card that starts with a gap.
+        Assert.Equal(
+            ["Hello"],
+            SummaryLayout.Flatten(SummaryMarkdown.Parse("```\n```\n\nHello")).Select(r => r.Text));
+    }
+
+    [Fact]
+    public void Flatten_ABlockThatPaintsNothingBetweenTwoThatDo_DoesNotDoubleTheSeparator()
+    {
+        // The other half: an empty block is not what the NEXT one is separated from either, or
+        // the gap between the two blocks that did paint is twice as wide as anywhere else.
+        Assert.Equal(
+            ["T", "\n\n", "Hello"],
+            SummaryLayout.Flatten(SummaryMarkdown.Parse("# T\n\n```\n```\n\nHello")).Select(r => r.Text));
+    }
 }

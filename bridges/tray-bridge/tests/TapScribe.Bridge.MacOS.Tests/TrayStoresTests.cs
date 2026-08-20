@@ -131,7 +131,10 @@ public class TrayStoresTests
         }
         finally
         {
-            Directory.Delete(directory, recursive: true);
+            // Guarded like its siblings above: a Save that failed before creating the directory
+            // would otherwise be reported as a DirectoryNotFoundException from this line.
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
         }
     }
 

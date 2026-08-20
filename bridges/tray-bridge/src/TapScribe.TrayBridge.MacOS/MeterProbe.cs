@@ -58,12 +58,24 @@ internal sealed class MeterProbe(
             meter.Start();
             _meter = meter;
         }
-        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // The capture seam's declared failures: a denied grant, an endpoint that went away
-            // between the list and the open, a driver that refused. Reported beside the bar and
-            // not propagated, because this runs from a checkbox in a dialog whose other fields
-            // must stay editable.
+            // As wide as SettingsWindow's connection test, and for a sharper version of the
+            // same reason: this runs from an NSButton handler, where an escape reaches AppKit
+            // and takes the tray with it rather than merely leaving a button dead.
+            //
+            // Naming the seam's types instead is what shipped, and it named two of four. The
+            // enumerator answers "the id names no active endpoint of the requested flow" with
+            // ArgumentException - the endpoint-went-away-between-the-list-and-the-open case
+            // this comment already claimed - and CoreAudioFormat.Classify refuses an unreadable
+            // layout with NotSupportedException, which is a property of the operator's hardware
+            // rather than a race. Both escaped. A filter that has to stay in step with two
+            // seams' declared sets is the wrong shape for the one place where being wrong ends
+            // the process.
+            //
+            // Stop() covers what the throw left behind wherever it came from: the enumerator is
+            // released, and with it the HAL that owns any tap, aggregate or IOProc the failed
+            // open had got as far as creating.
             Error = ex.Message;
             Stop();
         }

@@ -79,7 +79,16 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
         // callers guard before reaching here, so a non-null return is a bug in this class's
         // owner rather than a state a device can produce.
         if (Interlocked.CompareExchange(ref _ioProc, ioProc, null) is not null)
+        {
+            // Releasing what THIS call made before complaining about it. The registration is
+            // live and started at this point and the field belongs to the winner, so leaving it
+            // would strand exactly what the CompareExchange is here to prevent - the difference
+            // being that the leak would be the loser's rather than the winner's. Swallowed the
+            // way every other release path here is; the caller's bug is what propagates.
+            Swallow(() => hal.StopIo(ioProc));
+            Swallow(() => hal.DestroyIoProc(ioProc));
             throw new InvalidOperationException("an IOProc is already running for this capture");
+        }
     }
 
     /// <summary>Stop and unregister the IOProc, reporting what CoreAudio said about the stop.

@@ -28,6 +28,8 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // and the gate reads it on another.
     private volatile bool _muted;
 
+    private bool _disposed;
+
     // The IOProc and the ordering rules around it, shared with the system-audio capture.
     private readonly IoProcRun _run;
 
@@ -141,6 +143,12 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Start()
     {
+        // Refused after Dispose for the reason the system-audio sibling refuses it: the two
+        // listeners are gone by then, so a capture started here would deliver audio with
+        // nothing left to report a mute change or a vanished endpoint, and its IOProc would
+        // outlive the only Dispose anyone was going to call.
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         // InvalidOperationException, not the native failure type: a double start is a bug in
         // the caller rather than a dead endpoint, so the orchestrator's skip-and-carry-on
         // filter must not swallow it.
@@ -161,6 +169,13 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
     public void Dispose()
     {
+        // Idempotent, like the system-audio sibling: a second call must not reach the two
+        // listeners again. Registration.Dispose guards its own pin with a plain bool, so a
+        // repeat from another thread is a race over freeing a GCHandle rather than a no-op.
+        if (_disposed)
+            return;
+        _disposed = true;
+
         // Abandon rather than Stop: this path has no other owner and Dispose is contract-bound
         // not to throw, so it takes the release that carries on regardless. Bare rather than
         // wrapped, because that guarantee is IoProcRun's to make and it makes it; a catch here

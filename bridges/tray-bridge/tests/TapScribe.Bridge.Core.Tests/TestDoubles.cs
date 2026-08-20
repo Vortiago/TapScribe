@@ -418,7 +418,9 @@ internal sealed class FakeTapTransport
     /// whatever connections it took to get there. The Recorder concatenates a tap's frames
     /// into one WAV, so this is that WAV's samples.</summary>
     /// <param name="identity">The pipeline to read.</param>
-    /// <returns>The wire-format PCM, index headers stripped.</returns>
+    /// <returns>The wire-format PCM, verbatim. Nothing is stripped: the wire carries no frame
+    /// header, which is why a test-built frame hides its index in its first four sample bytes
+    /// instead.</returns>
     public byte[] StreamedAudio(string identity)
     {
         lock (_lock)

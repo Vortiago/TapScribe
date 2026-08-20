@@ -62,6 +62,45 @@ public class MeterProbeTests
     }
 
     [Fact]
+    public void Start_WhenTheEndpointVanishedBetweenTheListAndTheOpen_ReportsItRatherThanThrowing()
+    {
+        // The enumerator seam's declared clause for "the id names no active endpoint of the
+        // requested flow" is ArgumentException, and the window between this probe's List and
+        // its Open is two separate HAL walks wide. It runs from an NSButton handler, so an
+        // escape here reaches AppKit and takes the tray with it.
+        var enumerator = new Enumerator([Mic])
+        {
+            OpenError = new ArgumentException("no active capture endpoint with UID 'mic-1'", "device"),
+        };
+        using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
+
+        probe.Start();
+
+        Assert.False(probe.Running);
+        Assert.Contains("mic-1", probe.Error);
+        Assert.True(enumerator.Disposed);
+    }
+
+    [Fact]
+    public void Start_WhenTheDeviceLayoutIsUnreadable_ReportsItRatherThanThrowing()
+    {
+        // CoreAudioFormat.Classify's declared refusal, raised from the capture's own
+        // constructor: a property of the operator's hardware rather than a race, so ticking
+        // the box on such a Mac is deterministic. Same escape route as above.
+        var enumerator = new Enumerator([Mic])
+        {
+            OpenError = new NotSupportedException("unsupported stream layout: 24-bit packed"),
+        };
+        using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
+
+        probe.Start();
+
+        Assert.False(probe.Running);
+        Assert.Contains("24-bit packed", probe.Error);
+        Assert.True(enumerator.Disposed);
+    }
+
+    [Fact]
     public void Stop_DisposesTheCaptureBeforeItsEnumerator()
     {
         // The ordering the capture seam's disposal contract exists for: the capture came from
@@ -110,7 +149,7 @@ public class MeterProbeTests
 
     private sealed class Enumerator(IReadOnlyList<CaptureDevice> devices) : IAudioDeviceEnumerator
     {
-        internal ExternalException? OpenError { get; init; }
+        internal Exception? OpenError { get; init; }
 
         internal bool Disposed { get; private set; }
 

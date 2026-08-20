@@ -21,7 +21,12 @@ on the first-party `net10.0-macos` AppKit workload, one process
   Level gate stays the only Mute source.
 - **Layout**: `bridges/tray-bridge/` houses Core + all platform layers +
   all shells in one solution (`TapScribe.TrayBridge.slnx`).
-- **Packaging**: an unsigned `.pkg` built with `pkgbuild --component`,
+- **Packaging**: an unsigned `.pkg` built with `pkgbuild --root` over a
+  staging directory plus a `--component-plist` that clears
+  `BundleIsRelocatable` (`--component` cannot, and a relocatable package
+  writes its payload over whatever stray copy of the bundle id the volume
+  happens to hold instead of `/Applications`; the recipe and the check on
+  its output are in `bridges/tray-bridge/tools/build-macos-pkg.sh`),
   `osx-arm64`, un-notarised in v1 (Developer ID + notarization once the
   Apple membership exists), with the zipped `.app` published beside it.
   The package is what the Get-a-bridge card offers, because `installer`

@@ -63,7 +63,7 @@ Session).
   `dotnet run` against the HAL BLOCKS at `AudioDeviceCreateIOProcID`; only the
   built `.app` is a supported way to exercise that path.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
-  menu-bar shell, Core's `ITrayView` over an `NSStatusItem` — the same menu as
+  menu-bar shell, Core's `ITrayView` over an `NSStatusItem`: the same menu as
   the Windows tray, plus the Settings and per-meeting windows. It also holds
   the Mac `IDispatcher` (`DispatchQueue.MainQueue`; .NET installs no
   `SynchronizationContext` here, which is why the seam exists), the bundle and
@@ -76,7 +76,7 @@ Session).
   under the `dotnet test` host throws inside `ObjCRuntime`, because the bridge
   is never initialised. So the AppKit types (`TrayShell`, `MeetingWindow`,
   `SettingsWindow`) are covered by the build and by a manual check on a Mac,
-  and every decision that could live below them does — the glyph per state
+  and every decision that could live below them does: the glyph per state
   (`StatusSymbols`), the notice line (`MenuNotice`), the draft seed
   (`SettingsSeed`), the field parse (`SettingsFields`), the launch decision
   (`Program.Run`, which takes the menu-bar launch as a parameter) and the whole
@@ -182,7 +182,7 @@ dotnet publish src/TapScribe.TrayBridge -c Release -r win-x64 `
 The exe lands at
 `src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`
 and runs on a clean Windows 10/11 box (use `-r win-arm64` for ARM). No
-installer, code signing, or auto-update — it's a copy-and-run exe. Ships as
+installer, code signing, or auto-update: it's a copy-and-run exe. Ships as
 `TapScribe.TrayBridge-win-x64.zip`.
 
 ### macOS: an installer package, and a zip beside it

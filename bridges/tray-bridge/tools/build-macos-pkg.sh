@@ -62,8 +62,13 @@ pkgbuild \
 # The flag is the point of the file, so its absence from the OUTPUT is what gets
 # checked, not its presence in the input we just wrote. An empty <relocate/> is
 # the fixed shape; <relocate><bundle …/></relocate> is the broken one.
-if pkgutil --expand "$out" "$stage/expanded" 2>/dev/null &&
-  grep -q '<relocate>' "$stage/expanded/PackageInfo"; then
+#
+# The expand is its own statement rather than the left half of an `&&`, so an
+# expand that could not RUN fails the build instead of skipping the check: joined,
+# a broken pkgutil and a clean package look identical and the script still says
+# "not relocatable". The same distinction ci.yml's sibling step spells out.
+pkgutil --expand "$out" "$stage/expanded"
+if grep -q '<relocate>' "$stage/expanded/PackageInfo"; then
   echo "$out declares a <relocate> bundle: installer may ignore /Applications" >&2
   exit 1
 fi

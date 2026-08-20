@@ -43,6 +43,15 @@ public static class SummaryLayout
         MarkdownBlockKind? previous = null;
         foreach (MarkdownBlock block in blocks)
         {
+            // A block that paints nothing is not a block, and in particular does not earn the
+            // separator before it or become what the NEXT one is separated from. An empty
+            // fenced code block is the shape that reaches here: skipping only its own run left
+            // a stray "\n\n" as the FIRST run of the summary, and a doubled one when it sat
+            // between two blocks that did paint. Asked before the separator rather than undone
+            // afterwards, because the separator's value depends on this block's kind.
+            if (!Paints(block))
+                continue;
+
             if (previous is not null)
                 runs.Add(new SummaryRun(Separator(previous.Value, block.Kind), SummaryEmphasis.None, false, 0));
             previous = block.Kind;
@@ -54,8 +63,7 @@ public static class SummaryLayout
                     break;
 
                 case MarkdownBlockKind.Code:
-                    if (block.Text.Length > 0)
-                        runs.Add(new SummaryRun(block.Text, SummaryEmphasis.None, true, 0));
+                    runs.Add(new SummaryRun(block.Text, SummaryEmphasis.None, true, 0));
                     break;
 
                 case MarkdownBlockKind.Bullet or MarkdownBlockKind.Numbered:
@@ -72,6 +80,16 @@ public static class SummaryLayout
 
         return runs;
     }
+
+    // Whether this block puts anything on screen. A list item always does - it carries a
+    // marker even with no text - so only the two span-bearing kinds and a code block can come
+    // out empty.
+    private static bool Paints(MarkdownBlock block) => block.Kind switch
+    {
+        MarkdownBlockKind.Code => block.Text.Length > 0,
+        MarkdownBlockKind.Bullet or MarkdownBlockKind.Numbered => true,
+        _ => block.Spans.Any(static s => s.Text.Length > 0),
+    };
 
     // How far a heading sits above body text. A ramp rather than one heading size, because a
     // summary uses two or three levels and they have to be told apart; it flattens past level 4
