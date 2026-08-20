@@ -163,6 +163,13 @@ internal sealed class SettingsWindow : IDisposable
         _token = Secret(content, "Tap token", _draft.Token);
         _tls = Check(content, "Connect over TLS", _draft.Tls);
         _allowSelfSigned = Check(content, "Accept a self-signed certificate", _draft.AllowSelfSignedCert);
+        // The insecure opt-in only means anything under TLS, and SettingsDraft.ToSettings drops
+        // it when TLS is off. Shown rather than applied silently: an operator who ticks this
+        // over an unticked TLS would otherwise find it unticked again next time they opened
+        // Settings, with nothing having said why. The WinForms sibling greys and force-clears it
+        // the same way (BuildConnectionTab); this is that rule surfaced, not a second enforcer.
+        _tls.Activated += OnTlsToggled;
+        ApplyTlsCoupling();
 
         _test = Button(content, "Test connection", ControlLeft, 150);
         _test.Activated += OnTest;
@@ -250,6 +257,18 @@ internal sealed class SettingsWindow : IDisposable
     // through a control AppKit retains is exactly what keeps a closed window alive.
     private void OnTest(object? sender, EventArgs e) => _ = TestConnectionAsync();
 
+    private void OnTlsToggled(object? sender, EventArgs e) => ApplyTlsCoupling();
+
+    // Live only under TLS, and cleared when TLS goes off so what the box says is what a Save
+    // will keep.
+    private void ApplyTlsCoupling()
+    {
+        bool tls = IsOn(_tls);
+        _allowSelfSigned.Enabled = tls;
+        if (!tls)
+            _allowSelfSigned.State = NSCellStateValue.Off;
+    }
+
     private void OnMicSensitivity(object? sender, EventArgs e) =>
         _micSensitivityReadout.StringValue = SettingsDraft.SensitivityLabel(_micSensitivity.IntValue);
 
@@ -274,6 +293,7 @@ internal sealed class SettingsWindow : IDisposable
             return;
         _disposed = true;
         _test.Activated -= OnTest;
+        _tls.Activated -= OnTlsToggled;
         _micSensitivity.Activated -= OnMicSensitivity;
         _systemSensitivity.Activated -= OnSystemSensitivity;
         _micMeterOn.Activated -= OnMicMeterToggled;

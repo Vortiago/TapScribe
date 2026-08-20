@@ -7,8 +7,9 @@ speaker, so both sides of a meeting land as separately-attributed WAVs in one
 **detached session**. Two shells share that job: the Windows tray, which takes
 system audio off a WASAPI loopback, and the macOS menu bar, which uses a Core
 Audio process tap because macOS has no loopback endpoint (ADR-0020). Each ships
-as a zip on the newest release, which the dashboard's Settings → **Get a
-bridge** card links; see Packaging below for what an operator does with one.
+on the newest release under a stable filename the dashboard's Settings → **Get a
+bridge** card links: a copy-and-run zip for Windows, an installer package for
+the Mac (Packaging below says why a `.pkg` and what an operator does with one).
 See `../README.md` for the wire contract every Bridge speaks and
 `../../CONTEXT.md` for the vocabulary (Bridge, Tap, Recorder, Utterance,
 Session).

@@ -21,6 +21,19 @@ public sealed class BridgeSettingsStore(
     /// <summary>The settings file this store reads and writes.</summary>
     public string FilePath { get; } = Path.Join(directory, fileName);
 
+    // Refused rather than trusted, and refused HERE because Load's stamp is the door every
+    // settings object the app runs on comes through - including the one path that never touches
+    // SeedFromEnvironment, which is where the same refusal already lives. A blank slug makes
+    // BridgeSettings.BaseIdentity blank in spite of its "never blank" contract, and every tap
+    // then streams under no identity at all, which the Recorder files as its own speaker.
+    private readonly string _fallbackIdentity = NonBlank(fallbackIdentity);
+
+    private static string NonBlank(string fallbackIdentity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fallbackIdentity);
+        return fallbackIdentity;
+    }
+
     /// <summary>
     /// Load the settings. A missing, corrupt, or unreadable file falls back to
     /// environment-seeded defaults rather than throwing, so the app always launches.
@@ -39,7 +52,7 @@ public sealed class BridgeSettingsStore(
                     // The file has no such key and never will: it is the shell's, not the
                     // operator's. Stamped on the way out so nothing downstream can meet a
                     // settings object carrying another platform's name.
-                    loaded.FallbackIdentity = fallbackIdentity;
+                    loaded.FallbackIdentity = _fallbackIdentity;
                     return loaded;
                 }
             }
@@ -50,7 +63,7 @@ public sealed class BridgeSettingsStore(
             // failing to launch. What's lost is whatever the operator had saved; they
             // re-save from the dialog, which overwrites the bad file.
         }
-        return BridgeSettings.SeedFromEnvironment(fallbackIdentity);
+        return BridgeSettings.SeedFromEnvironment(_fallbackIdentity);
     }
 
     /// <summary>Save the settings, creating the directory if needed. The plaintext token

@@ -260,7 +260,14 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         // The previous window is closed but not freed (ReleaseWhenClosed is off, which is what
         // makes IsOpen answerable above), so dropping the reference alone would leave its whole
         // control graph behind once per Settings…, on a tray that runs for days.
-        _settingsWindow?.Dispose();
+        //
+        // Forgotten BEFORE it is released, never after: the build below can throw (it lists
+        // devices and constructs a window full of AppKit), and a field still naming a disposed
+        // window would have the next Settings… ask a freed NSWindow whether it IsOpen. That
+        // throws out of a menu action, which on AppKit ends the tray.
+        SettingsWindow? stale = _settingsWindow;
+        _settingsWindow = null;
+        stale?.Dispose();
 
         var window = new SettingsWindow(
             runtime.Settings, ListDevices, _deps.OpenEnumerator, runtime.ApplySettings, _dispatcher);

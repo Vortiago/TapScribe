@@ -123,6 +123,25 @@ public class IoProcRunTests
     }
 
     [Fact]
+    public void Start_WhenTheHandOffRefuses_GivesTheClaimBack()
+    {
+        // The claim is taken before the hand-off starts, so every way OUT of Start must give it
+        // back. A claim stranded here answers "already running" about a run that never began,
+        // permanently, which for the system-audio capture kills every later rebind too.
+        var handOff = new CaptureHandOff("test-pump", _ => { });
+        var hal = new OrderingHal(handOff);
+        var run = new IoProcRun(hal, handOff);
+
+        // A null format is the reachable refusal: CaptureHandOff.Start null-checks it.
+        Assert.Throws<ArgumentNullException>(() => run.Start(deviceId: 41, null!));
+
+        // The claim is not observable, so assert what it gates: a real Start still works.
+        run.Start(deviceId: 41, Stereo);
+        Assert.True(run.Running);
+        run.Abandon();
+    }
+
+    [Fact]
     public void Release_LeavesNoRegistrationBehind()
     {
         // Asserted on the registration rather than on the call order, because a leak is what an

@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.MacOS;
@@ -108,7 +107,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             "tapscribe-system-audio", audio => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(audio)));
         _run = new IoProcRun(hal, _handOff);
 
-        Bound bound = Bind();
+        Bound bound = Bind(DefaultOutputUid());
         try
         {
             // Classified from the TAP's own description, not the endpoint's: the tap is a
@@ -205,11 +204,16 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
 
     // ---- binding ---------------------------------------------------------------------------
 
-    // Build the tap and the aggregate device around the endpoint the Mac is playing through
-    // now. Hands back a whole binding or releases what it made: a half-built one has no owner.
-    private Bound Bind()
+    // Build the tap and the aggregate device around one endpoint. Hands back a whole binding or
+    // releases what it made: a half-built one has no owner.
+    //
+    // The endpoint is a PARAMETER rather than resolved here, because both callers have already
+    // resolved it: a rebind compares the moved-to endpoint against the binding it holds before
+    // deciding to rebuild at all, and a second walk would be another four native property reads
+    // per device for an answer it has - and one that can disagree with the first, leaving the
+    // rebind's skip-if-unchanged decision made about a different endpoint than it binds to.
+    private Bound Bind(string outputUid)
     {
-        string outputUid = DefaultOutputUid();
         CoreAudioTapHandle tap = _hal.CreateProcessTap();
         CoreAudioAggregateHandle? aggregate = null;
         try
@@ -335,12 +339,16 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         Bound next;
         try
         {
-            next = Bind();
+            next = Bind(moved);
         }
-        catch (Exception ex) when (ex is ExternalException or NotSupportedException)
+        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
         {
             // The endpoint moved somewhere this Mac will not tap. Bind hands back a whole
             // binding or releases what it made, so there is nothing held here.
+            //
+            // The seam's whole declared set, not a subset of it: this runs from a CoreAudio
+            // notification, whose trampoline swallows anything that escapes, so a failure this
+            // filter misses is one the operator never hears about at all.
             return ex;
         }
 
@@ -372,7 +380,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
                 _run.Start(next.Aggregate.DeviceId, Format);
             }
         }
-        catch (Exception ex) when (ex is ExternalException or NotSupportedException)
+        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
         {
             // The new tap's format could not be read or is unreadable, or the endpoint refused
             // the IOProc on it. There is nothing left to record the far side with, so the
@@ -380,6 +388,11 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // nothing. Unbind covers both halves: a binding already published (the start threw)
             // and one that never was (the format read threw), since it stops whatever is
             // running and then releases the pair either way.
+            //
+            // The seam's whole declared set, because `next` is owned from here on: the HAL
+            // refusing a handle it no longer holds arrives as InvalidOperationException, and a
+            // filter that let that one past would strand a tap and an aggregate device with
+            // nothing able to name them - the exact leak the comment above this try describes.
             Unbind(next);
             return ex;
         }
@@ -408,9 +421,16 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // Only while a stream was actually running. The seam says Failed means capture
             // ended unexpectedly MID-STREAM, and a binding that was never started has ended
             // nothing; the next Start fails on its own, which is where that belongs.
-            if (!_run.Running)
+            if (!_run.Running || _bound is not { } bound)
                 return;
-            _run.Abandon();
+
+            // RELEASED, not merely stopped. Only the aggregate is invalidated: the tap it
+            // listed is a separate system-wide object that outlives it, and so is the listener
+            // watching the dead device. Abandoning the IOProc alone leaves both registered with
+            // the whole Mac for the rest of the meeting, and leaves a Start free to run over an
+            // aggregate id CoreAudio has forgotten. Unbind is what a refused rebind does with
+            // the same binding, for the same reason.
+            Unbind(bound);
         }
 
         // Outside the lock: the pipeline's handler is the one that tears the whole session

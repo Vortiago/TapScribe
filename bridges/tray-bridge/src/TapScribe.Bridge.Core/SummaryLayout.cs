@@ -41,12 +41,8 @@ public static class SummaryLayout
         ArgumentNullException.ThrowIfNull(blocks);
         List<SummaryRun> runs = [];
         MarkdownBlockKind? previous = null;
-        // Filtered rather than skipped inside the loop, matching how the empty spans are
-        // dropped below. A block that paints nothing is not a block, and in particular does not
-        // earn the separator before it or become what the NEXT one is separated from. An empty
-        // fenced code block is the shape that reaches here: dropping only its own run left a
-        // stray "\n\n" as the FIRST run of the summary, and a doubled one when it sat between
-        // two blocks that did paint.
+        // A block that paints nothing earns no separator and is not what the next one is
+        // separated from. An empty fenced code block is the shape that reaches here.
         foreach (MarkdownBlock block in blocks.Where(Paints))
         {
             if (previous is not null)
@@ -78,9 +74,7 @@ public static class SummaryLayout
         return runs;
     }
 
-    // Whether this block puts anything on screen. A list item always does - it carries a
-    // marker even with no text - so only the two span-bearing kinds and a code block can come
-    // out empty.
+    // Whether this block puts anything on screen. A list item always does: it has a marker.
     private static bool Paints(MarkdownBlock block) => block.Kind switch
     {
         MarkdownBlockKind.Code => block.Text.Length > 0,
