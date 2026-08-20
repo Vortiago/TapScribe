@@ -89,8 +89,8 @@ Two consequences the engine must respect:
    into a failure — it embeds 1500 frames and asserts a speaker still resembles
    herself. On 1.27.0 it fails at 0.549.
 
-`pyproject.toml` keeps `onnxruntime>=1.17`: the VAD shares that dependency,
-is fed 512-sample windows, and is unaffected, so forcing every install onto a
-current runtime for one consumer's bug would be the wrong trade. The floor lives
-in `tapscribe/diarizers/MIN_ONNXRUNTIME` instead, where only diarization pays
-it.
+`pyproject.toml` therefore floors `onnxruntime>=1.29`. The VAD does not need
+it, but one dependency gets one stated requirement — a second floor hidden in a
+consumer would be a shadow source of truth. No platform cost: macOS has been
+arm64-only since 1.26, and `>=1.17` was already fictional on py3.13/3.14, which
+have no 1.17 wheels.
