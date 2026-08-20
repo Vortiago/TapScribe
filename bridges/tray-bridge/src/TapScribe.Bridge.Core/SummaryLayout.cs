@@ -50,24 +50,22 @@ public static class SummaryLayout
             switch (block.Kind)
             {
                 case MarkdownBlockKind.Heading:
-                    Add(runs, block.Spans, SummaryEmphasis.Bold, mono: false, HeadingSizePlus(block.Level));
-                    break;
-
-                case MarkdownBlockKind.Code when block.Text.Length > 0:
-                    runs.Add(new SummaryRun(block.Text, SummaryEmphasis.None, true, 0));
+                    Add(runs, block.Spans, SummaryEmphasis.Bold, HeadingSizePlus(block.Level));
                     break;
 
                 case MarkdownBlockKind.Code:
+                    if (block.Text.Length > 0)
+                        runs.Add(new SummaryRun(block.Text, SummaryEmphasis.None, true, 0));
                     break;
 
                 case MarkdownBlockKind.Bullet or MarkdownBlockKind.Numbered:
                     string marker = block.Kind == MarkdownBlockKind.Bullet ? "•  " : $"{block.Level}.  ";
                     runs.Add(new SummaryRun(marker, SummaryEmphasis.None, false, 0));
-                    Add(runs, block.Spans, SummaryEmphasis.None, mono: false, sizePlus: 0);
+                    Add(runs, block.Spans, SummaryEmphasis.None, sizePlus: 0);
                     break;
 
                 default:
-                    Add(runs, block.Spans, SummaryEmphasis.None, mono: false, sizePlus: 0);
+                    Add(runs, block.Spans, SummaryEmphasis.None, sizePlus: 0);
                     break;
             }
         }
@@ -98,7 +96,6 @@ public static class SummaryLayout
         List<SummaryRun> runs,
         IReadOnlyList<MarkdownSpan> spans,
         SummaryEmphasis baseEmphasis,
-        bool mono,
         int sizePlus)
     {
         foreach (MarkdownSpan span in spans)
@@ -109,14 +106,14 @@ public static class SummaryLayout
             // A span's emphasis is ADDED to the block's rather than replacing it, so an italic
             // word in a heading stays bold. Inline code is the exception: it switches face
             // entirely, because a monospace run carrying the heading's weight reads as neither.
-            (SummaryEmphasis emphasis, bool spanMono) = span.Style switch
+            (SummaryEmphasis emphasis, bool mono) = span.Style switch
             {
-                MarkdownInline.Bold => (baseEmphasis | SummaryEmphasis.Bold, mono),
-                MarkdownInline.Italic => (baseEmphasis | SummaryEmphasis.Italic, mono),
+                MarkdownInline.Bold => (baseEmphasis | SummaryEmphasis.Bold, false),
+                MarkdownInline.Italic => (baseEmphasis | SummaryEmphasis.Italic, false),
                 MarkdownInline.Code => (SummaryEmphasis.None, true),
-                _ => (baseEmphasis, mono),
+                _ => (baseEmphasis, false),
             };
-            runs.Add(new SummaryRun(span.Text, emphasis, spanMono, sizePlus));
+            runs.Add(new SummaryRun(span.Text, emphasis, mono, sizePlus));
         }
     }
 }

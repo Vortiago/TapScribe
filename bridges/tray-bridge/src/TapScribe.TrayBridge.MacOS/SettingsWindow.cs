@@ -87,6 +87,11 @@ internal sealed class SettingsWindow : IDisposable
 
     // Grows downward: the document view is flipped, so y is a distance from the TOP.
     private nfloat _y = Padding;
+
+    // Where NextRow last placed a row, so a second control can join it without restating the
+    // height the first one used. Reconstructing that from the cursor would put the same literal
+    // in two places and misalign a Cancel button the day Save's height changed.
+    private nfloat _lastRowTop;
     private bool _disposed;
 
     /// <summary>Build the window over the settings in force.</summary>
@@ -114,15 +119,13 @@ internal sealed class SettingsWindow : IDisposable
         _apply = apply;
         _dispatcher = dispatcher;
         _draft = SettingsSeed.From(current, listDevices);
+        // CaptureDevice.DefaultFor, not a comparison written here: its whole reason to exist is
+        // that the meter samples the endpoint the gate it is tuning will tap, so re-deriving the
+        // rule is how the bar starts describing a different device than the meeting records.
         _micProbe = new MeterProbe(
-            openEnumerator,
-            devices => devices.FirstOrDefault(d => d.Flow == DeviceFlow.Capture && d.IsDefault)
-                ?? devices.FirstOrDefault(d => d.Flow == DeviceFlow.Capture));
-        // Picked by FLOW rather than by id: the Mac enumerator offers exactly one Render row,
-        // the synthetic "System audio" one, precisely so there is no choice to get wrong here.
+            openEnumerator, devices => CaptureDevice.DefaultFor(devices, DeviceFlow.Capture));
         _systemProbe = new MeterProbe(
-            openEnumerator,
-            devices => devices.FirstOrDefault(d => d.Flow == DeviceFlow.Render));
+            openEnumerator, devices => CaptureDevice.DefaultFor(devices, DeviceFlow.Render));
 
         _window = new NSWindow(
             new CGRect(0, 0, Width, Height),
@@ -415,13 +418,16 @@ internal sealed class SettingsWindow : IDisposable
     // on over two dead bars.
     private void StopMeters()
     {
-        _micProbe.Stop();
-        _systemProbe.Stop();
-        _micMeterOn.State = NSCellStateValue.Off;
-        _systemMeterOn.State = NSCellStateValue.Off;
-        _micMeter.Level = 0;
-        _systemMeter.Level = 0;
+        StopChannel(_micProbe, _micMeterOn, _micMeter);
+        StopChannel(_systemProbe, _systemMeterOn, _systemMeter);
         StartOrStopMeterTimer();
+    }
+
+    private static void StopChannel(MeterProbe probe, NSButton toggle, LevelMeterView bar)
+    {
+        probe.Stop();
+        toggle.State = NSCellStateValue.Off;
+        bar.Level = 0;
     }
 
     private void OnMicMeterToggled(object? sender, EventArgs e) =>
@@ -472,12 +478,16 @@ internal sealed class SettingsWindow : IDisposable
 
     private void Tick()
     {
-        // Thresholds come from the sliders' LIVE values, not from the draft: the whole point of
-        // the marker is watching it move as the slider does, before any Save.
-        _micMeter.Threshold = GateTuning.SliderToThreshold(_micSensitivity.IntValue);
-        _systemMeter.Threshold = GateTuning.SliderToThreshold(_systemSensitivity.IntValue);
-        _micMeter.Level = _micProbe.Level;
-        _systemMeter.Level = _systemProbe.Level;
+        UpdateBar(_micMeter, _micProbe, _micSensitivity);
+        UpdateBar(_systemMeter, _systemProbe, _systemSensitivity);
+    }
+
+    // Thresholds come from the slider's LIVE value, not from the draft: the whole point of the
+    // marker is watching it move as the slider does, before any Save.
+    private static void UpdateBar(LevelMeterView bar, MeterProbe probe, NSSlider sensitivity)
+    {
+        bar.Threshold = GateTuning.SliderToThreshold(sensitivity.IntValue);
+        bar.Level = probe.Level;
     }
 
     private void BuildPinGrid(NSView content)
@@ -539,9 +549,9 @@ internal sealed class SettingsWindow : IDisposable
 
     private nfloat NextRow(nfloat height)
     {
-        nfloat top = _y;
+        _lastRowTop = _y;
         _y += height + Gap;
-        return top;
+        return _lastRowTop;
     }
 
     private void Section(NSView content, string title)
@@ -653,7 +663,7 @@ internal sealed class SettingsWindow : IDisposable
     {
         // sameRow puts a second button beside the one just placed, which is what a
         // Cancel/Save pair is: one row, two frames.
-        nfloat y = sameRow ? _y - (RowHeight + 6) - Gap : NextRow(RowHeight + 6);
+        nfloat y = sameRow ? _lastRowTop : NextRow(RowHeight + 6);
         var button = new NSButton
         {
             Frame = new CGRect(x, y, width, RowHeight + 6),

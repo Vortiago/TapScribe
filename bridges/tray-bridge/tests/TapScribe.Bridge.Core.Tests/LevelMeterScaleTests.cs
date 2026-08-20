@@ -53,4 +53,26 @@ public class LevelMeterScaleTests
         double marker = LevelMeterScale.Fraction(GateTuning.SliderToThreshold(sensitivity));
         Assert.Equal((100 - sensitivity) / 100.0, marker, precision: 6);
     }
+
+    [Fact]
+    public void IsOpen_IsTrueExactlyWhenTheLevelReachesTheThreshold()
+    {
+        // The predicate both meters draw their two-tone fill from. Shared because the Mac bar
+        // and the WinForms bar had each decided it for themselves, in different arithmetic: one
+        // compared raw RMS, the other compared bar fractions. Fraction is monotonic so they
+        // agreed, which is exactly the kind of agreement that stops being true quietly.
+        Assert.False(LevelMeterScale.IsOpen(0.004, 0.005));
+        Assert.True(LevelMeterScale.IsOpen(0.005, 0.005));
+        Assert.True(LevelMeterScale.IsOpen(0.006, 0.005));
+    }
+
+    [Fact]
+    public void IsOpen_AgreesWithTheFractionsTheBarsDraw()
+    {
+        // The property that let the two spellings coexist, pinned so a change to Fraction that
+        // broke it would fail here rather than in one shell's painting.
+        Assert.Equal(
+            LevelMeterScale.IsOpen(0.02, 0.01),
+            LevelMeterScale.Fraction(0.02) >= LevelMeterScale.Fraction(0.01));
+    }
 }

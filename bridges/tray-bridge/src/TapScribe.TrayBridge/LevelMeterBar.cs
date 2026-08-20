@@ -72,7 +72,9 @@ internal sealed class LevelMeterBar : Control
         g.FillRectangle(TrackBrush, 0, 0, Width, Height);
 
         int fillW = (int)Math.Round(LevelMeterScale.Fraction(_level) * inner);
-        bool open = _level >= _threshold; // vivid once the level clears the gate's line
+        // Vivid once the level clears the gate's line. Core's call, not this bar's: the
+        // AppKit sibling asks the same question and both must answer it identically.
+        bool open = LevelMeterScale.IsOpen(_level, _threshold);
         g.FillRectangle(open ? AboveBrush : BelowBrush, 1, 1, fillW, Height - 2);
 
         int markerX = 1 + (int)Math.Round(LevelMeterScale.Fraction(_threshold) * inner);

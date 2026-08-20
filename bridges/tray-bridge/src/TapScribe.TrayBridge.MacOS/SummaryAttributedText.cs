@@ -19,6 +19,11 @@ namespace TapScribe.TrayBridge.MacOS;
 /// </summary>
 internal static class SummaryAttributedText
 {
+    // The handful of distinct faces a summary actually uses, resolved once. A body of forty
+    // spans is forty NSFont lookups without this, for the five or six faces it really has, and
+    // the WinForms sibling caches for the same reason (SummaryRichText.FontCache).
+    private static readonly Dictionary<(bool Mono, SummaryEmphasis Emphasis, double Size), NSFont> Faces = [];
+
     internal static NSAttributedString Build(IReadOnlyList<MarkdownBlock> blocks)
     {
         nfloat bodySize = NSFont.SystemFontSize;
@@ -27,12 +32,13 @@ internal static class SummaryAttributedText
         foreach (SummaryRun run in SummaryLayout.Flatten(blocks))
         {
             nfloat size = bodySize + run.SizePlus;
+            NSFont face = CachedFace(run, size);
             var attributes = new NSMutableDictionary
             {
                 // labelColor, never a literal: the window follows the system appearance, and a
                 // hard-coded black body would be invisible in dark mode.
                 [NSStringAttributeKey.ForegroundColor] = NSColor.Label,
-                [NSStringAttributeKey.Font] = Face(run, size),
+                [NSStringAttributeKey.Font] = face,
             };
             if (run.Mono)
                 attributes[NSStringAttributeKey.BackgroundColor] = NSColor.UnderPageBackground;
@@ -43,6 +49,22 @@ internal static class SummaryAttributedText
         return painted;
     }
 
+    // Keyed on the run's face rather than on the run, so two spans differing only in text share
+    // a font. On the RESOLVED size, not on SizePlus: the two are interchangeable only while the
+    // system body size holds, and keying on the step would hand back fonts at the old size after
+    // an operator changed their text size.
+    private static NSFont CachedFace(SummaryRun run, nfloat size)
+    {
+        (bool, SummaryEmphasis, double) key = (run.Mono, run.Emphasis, (double)size);
+        if (!Faces.TryGetValue(key, out NSFont? face))
+        {
+            face = Face(run, size);
+            Faces[key] = face;
+        }
+
+        return face;
+    }
+
     // Bold and italic go on through the font MANAGER's trait conversion rather than by asking
     // for a named face: "Segoe UI Bold" has no macOS equivalent to name, and the system font
     // is not addressable by family name at all on recent versions. Mono asks for the
@@ -51,17 +73,16 @@ internal static class SummaryAttributedText
     {
         // Every one of these is typed as nullable by the bindings and none of them can
         // actually answer null: the system font at a valid size always resolves, and a null
-        // here would mean AppKit had no system font at all. Coalescing to the plain system
-        // font keeps the summary painted rather than throwing inside a window Apply, which
-        // runs from a poll tick and would take the meeting card down with it.
-        NSFont fallback = NSFont.SystemFontOfSize(size) ?? NSFont.UserFontOfSize(size)!;
-
+        // here would mean AppKit had no system font at all. Coalescing keeps the summary
+        // painted rather than throwing inside a window Apply, which runs from a poll tick and
+        // would take the meeting card down with it. Resolved lazily, so a mono or bold run does
+        // not pay for a plain face it discards.
         if (run.Mono)
-            return NSFont.MonospacedSystemFont(size, NSFontWeight.Regular) ?? fallback;
+            return NSFont.MonospacedSystemFont(size, NSFontWeight.Regular) ?? Fallback(size);
 
         NSFont font = run.Emphasis.HasFlag(SummaryEmphasis.Bold)
-            ? NSFont.BoldSystemFontOfSize(size) ?? fallback
-            : fallback;
+            ? NSFont.BoldSystemFontOfSize(size) ?? Fallback(size)
+            : Fallback(size);
 
         if (!run.Emphasis.HasFlag(SummaryEmphasis.Italic))
             return font;
@@ -72,4 +93,6 @@ internal static class SummaryAttributedText
         // the correct degradation: the word keeps the heading's weight instead of vanishing.
         return NSFontManager.SharedFontManager.ConvertFont(font, NSFontTraitMask.Italic) ?? font;
     }
+
+    private static NSFont Fallback(nfloat size) => NSFont.SystemFontOfSize(size) ?? NSFont.UserFontOfSize(size)!;
 }

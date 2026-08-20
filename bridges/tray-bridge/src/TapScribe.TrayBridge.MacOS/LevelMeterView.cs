@@ -19,6 +19,10 @@ namespace TapScribe.TrayBridge.MacOS;
 /// </summary>
 internal sealed class LevelMeterView : NSView
 {
+    // Allocated once: ColorWithAlphaComponent makes a fresh NSColor, and this repaints
+    // several times a second while a meter is live.
+    private static readonly NSColor Shut = NSColor.SystemGreen.ColorWithAlphaComponent(0.35f);
+
     private double _level;
     private double _threshold;
 
@@ -31,16 +35,7 @@ internal sealed class LevelMeterView : NSView
     internal double Level
     {
         get => _level;
-        set
-        {
-            // Repaint only on a visible change: this is set several times a second for as long
-            // as the window is open, and NSView has no dirty-region cleverness to save us from
-            // asking for a redraw that would paint the same pixels.
-            if (Math.Abs(value - _level) < 0.001)
-                return;
-            _level = value;
-            NeedsDisplay = true;
-        }
+        set => Repaint(ref _level, value);
     }
 
     /// <summary>The gate's open threshold as RMS, [0,1]. Set from the sensitivity slider.
@@ -48,13 +43,18 @@ internal sealed class LevelMeterView : NSView
     internal double Threshold
     {
         get => _threshold;
-        set
-        {
-            if (Math.Abs(value - _threshold) < 0.001)
-                return;
-            _threshold = value;
-            NeedsDisplay = true;
-        }
+        set => Repaint(ref _threshold, value);
+    }
+
+    // Repaint only on a visible change: both of these are set several times a second for as
+    // long as the window is open, and NSView has no dirty-region cleverness to spare us a
+    // redraw that would paint the same pixels. One helper rather than the rule written twice.
+    private void Repaint(ref double field, double value)
+    {
+        if (Math.Abs(value - field) < 0.001)
+            return;
+        field = value;
+        NeedsDisplay = true;
     }
 
     public override void DrawRect(CGRect dirtyRect)
@@ -62,11 +62,12 @@ internal sealed class LevelMeterView : NSView
         CGRect bounds = Bounds;
 
         // A control-coloured track rather than a literal, so the bar reads as part of the
-        // window in either appearance.
+        // window in either appearance. One path for both the fill and the stroke.
+        NSBezierPath track = NSBezierPath.FromRect(bounds);
         NSColor.ControlBackground.Set();
-        NSBezierPath.FromRect(bounds).Fill();
+        track.Fill();
         NSColor.Separator.Set();
-        NSBezierPath.FromRect(bounds).Stroke();
+        track.Stroke();
 
         nfloat inner = bounds.Width - 2;
         nfloat fill = (nfloat)(LevelMeterScale.Fraction(_level) * inner);
@@ -74,10 +75,12 @@ internal sealed class LevelMeterView : NSView
 
         // Two greens rather than one: below the threshold the gate is shut, so the fill says
         // "heard, not recorded" and above it says "recording". One colour would leave the
-        // marker as the only cue, and the marker is a hairline.
+        // marker as the only cue, and the marker is a hairline. Open or shut is Core's call
+        // (LevelMeterScale.IsOpen) rather than a comparison of the fractions just computed:
+        // the WinForms bar asks the same question and both must answer it identically.
         if (fill > 0)
         {
-            (fill <= marker ? NSColor.SystemGreen.ColorWithAlphaComponent(0.35f) : NSColor.SystemGreen).Set();
+            (LevelMeterScale.IsOpen(_level, _threshold) ? NSColor.SystemGreen : Shut).Set();
             NSBezierPath.FromRect(new CGRect(1, 1, fill, bounds.Height - 2)).Fill();
         }
 
@@ -85,3 +88,4 @@ internal sealed class LevelMeterView : NSView
         NSBezierPath.FromRect(new CGRect(1 + marker, 1, 2, bounds.Height - 2)).Fill();
     }
 }
+
