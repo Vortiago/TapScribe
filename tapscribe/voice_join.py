@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from .roster import slug_owners
 from .text import parse_iso, voice_key
 from .transcribers.base import TranscriptionSegment
 
@@ -55,12 +56,11 @@ def spans_by_slug(
     rule `fold_voices` applies to the cross-session case. Fixing it properly
     needs an identity-discriminating transcript key — #440.
     """
-    owners: dict[str, set[str]] = {}
-    for identity in voices:
-        slug = (roster.get(identity) or {}).get("slug")
-        if slug:
-            owners.setdefault(slug, set()).add(identity)
-    ambiguous = {slug for slug, ids in owners.items() if len(ids) > 1}
+    # Over the ROSTER, not `voices`: an ambiguous slug is one two taps RECORDED
+    # under, whether or not both were diarized. Deriving it from `voices` missed
+    # the likelier case — one tray box diarized, a second one not — where the
+    # diarized identity's spans then split the other's segments.
+    ambiguous = {slug for slug, ids in slug_owners(roster).items() if len(ids) > 1}
 
     out: dict[str, list[VoiceSpan]] = {}
     for identity, entry in voices.items():
@@ -98,15 +98,11 @@ def _dominant(start: datetime, end: datetime, spans: Sequence[VoiceSpan]) -> str
         seconds = _overlap(start, end, span)
         if seconds > 0.0:
             totals[span.label] = totals.get(span.label, 0.0) + seconds
-    if not totals and end <= start:
-        totals = {s.label: 0.0 for s in spans if s.start <= start <= s.end}
-    if not totals:
-        return None
-    return max(totals.items(), key=lambda kv: (kv[1], kv[0]))[0]
-
-
-#: Below this, the filter pass costs more than the per-word scans it saves.
-_WINDOW_MIN_SPANS = 8
+    if totals:
+        return max(totals, key=lambda label: (totals[label], label))
+    if end <= start:
+        return max((s.label for s in spans if s.start <= start <= s.end), default=None)
+    return None
 
 
 def _window(spans: Sequence[VoiceSpan], lo: datetime, hi: datetime) -> Sequence[VoiceSpan]:
@@ -115,8 +111,6 @@ def _window(spans: Sequence[VoiceSpan], lo: datetime, hi: datetime) -> Sequence[
     answer. ONE pass per segment ahead of the per-WORD scans below: `spans` is
     every turn in the SESSION, so without this a merge is O(words x turns) and a
     long diarized meeting spends tens of seconds in `_overlap`."""
-    if len(spans) <= _WINDOW_MIN_SPANS:
-        return spans
     return [s for s in spans if s.end >= lo and s.start <= hi]
 
 
@@ -138,11 +132,11 @@ def attribute_segment(
     if spans:
         # Words are normally inside the segment's own bounds, but nothing in the
         # Transcriber contract says so — take the union before narrowing.
-        lo, hi = abs_start, abs_end
+        lo_s, hi_s = seg.start, seg.end
         for word in seg.words or ():
-            lo = min(lo, wav_start + timedelta(seconds=word.start))
-            hi = max(hi, wav_start + timedelta(seconds=word.end))
-        spans = _window(spans, lo, hi)
+            lo_s = min(lo_s, word.start)
+            hi_s = max(hi_s, word.end)
+        spans = _window(spans, wav_start + timedelta(seconds=lo_s), wav_start + timedelta(seconds=hi_s))
     runs = _word_runs(seg, wav_start, spans) if (spans and seg.words) else []
     if len(runs) > 1:
         return _tile(runs, wav_start=wav_start, slug=slug, start=abs_start, end=abs_end)
@@ -169,7 +163,11 @@ def _tile(runs, *, wav_start: datetime, slug: str, start: datetime, end: datetim
     for (_, words), (_, nxt) in zip(runs, runs[1:], strict=False):
         gap_open = wav_start + timedelta(seconds=words[-1].end)
         gap_close = wav_start + timedelta(seconds=nxt[0].start)
-        edges.append(gap_open + (gap_close - gap_open) / 2)
+        midpoint = gap_open + (gap_close - gap_open) / 2
+        # Clamped and monotonic: a word may fall outside the segment's own
+        # bounds (the same reason `attribute_segment` widens its window), and an
+        # unclamped edge would mint a negative-duration piece.
+        edges.append(min(max(midpoint, edges[-1]), end))
     edges.append(end)
     return [
         Piece(

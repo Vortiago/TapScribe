@@ -348,3 +348,17 @@ def test_attach_people_view_survives_a_session_with_no_transcript() -> None:
 
     # Resolves normally (the roster default), and no voice keys to resolve.
     assert session["names"] == {"sysaudio": "System audio"}
+
+
+def test_an_ambiguous_slug_is_not_named_through_either_person() -> None:
+    """Two taps under one display name: the roster default still applies, but
+    neither identity's Person may claim the slug (#440)."""
+    roster = {
+        "tray-a": _entry("System audio", slug="sysaudio"),
+        "tray-b": _entry("System audio", slug="sysaudio"),
+    }
+    reg = _reg([{"id": "p1", "name": "Machine A", "identities": ["tray-a"]}])
+
+    names = resolve_session_names(roster=roster, aliases={}, registry=reg)
+
+    assert names["sysaudio"] == "System audio", "the shared roster name, not a Person"

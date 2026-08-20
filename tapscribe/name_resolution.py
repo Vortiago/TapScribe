@@ -28,6 +28,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .people import PeopleRegistry
+from .roster import slug_owners
 from .text import is_voice_key, split_voice_key, voice_key
 
 # Cap on the known-people hint injected into a summarize (see `known_names`). A
@@ -90,17 +91,22 @@ def resolve_session_names(
     the operator has to recognise the row to map it — and it is keyed off the
     transcript's own speaker list rather than the roster.
     """
-    slug_to_identity: dict[str, str] = {}
+    # An ambiguous slug resolves to NO identity, so it can't be named through a
+    # Person: `setdefault` used to hand it silently to whichever identity came
+    # first (#440). Its roster display name still applies — that is what the two
+    # taps share, and it is why the slug collides in the first place.
+    owners = slug_owners(roster)
+    slug_to_identity = {slug: next(iter(ids)) for slug, ids in owners.items() if len(ids) == 1}
     default_by_slug: dict[str, str] = {}
-    for identity, entry in roster.items():
-        slug = entry.get("slug")
-        if slug:
-            slug_to_identity.setdefault(slug, identity)
-            if entry.get("name"):
-                default_by_slug.setdefault(slug, entry["name"])
+    for entry in roster.values():
+        if (slug := entry.get("slug")) and entry.get("name"):
+            default_by_slug.setdefault(slug, entry["name"])
 
     names: dict[str, str] = {}
-    for key in set(aliases) | set(slug_to_identity):
+    # Every slug, not just the unambiguous ones: an ambiguous slug still takes
+    # its roster default below, it just resolves to no identity and so to no
+    # Person.
+    for key in set(aliases) | set(owners):
         override = aliases.get(key)
         if override:
             names[key] = override

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from .recorder import Recorder
@@ -94,6 +95,17 @@ def effective_summarizer_config(session: str) -> dict[str, Any]:
     }
 
 
+def _speaker_keys(merged: dict[str, Any] | None) -> list[str]:
+    """The merged transcript's speaker keys, coerced like the poll path does — a
+    torn `"speakers": "abc"` would otherwise iterate into per-character keys.
+
+    Passed down rather than re-read: this function already holds the parsed
+    transcript, which is hundreds of KB on a long session.
+    """
+    speakers = (merged or {}).get("speakers")
+    return [s for s in speakers if isinstance(s, str)] if isinstance(speakers, list) else []
+
+
 async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) -> dict[str, Any]:
     """Summarize the session's merged transcript with the chosen `Summarizer`.
 
@@ -152,7 +164,9 @@ async def summarize_session_locked(
     # the canonical spellings. Best-effort: a read failure degrades to no hint.
     # Both callers reach the summarizer through here (the /summarize route AND the
     # end-of-meeting pipeline), so wiring it in the locked core covers both.
-    names = await asyncio.to_thread(known_names_for_session, req.session)
+    names = await asyncio.to_thread(
+        partial(known_names_for_session, req.session, speaker_keys=_speaker_keys(merged))
+    )
     result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt, names=names)
     # Persist next to the merged transcript (#83) — only after a successful
     # run, so a failed re-generate can't clobber the stored summary. The

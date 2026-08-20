@@ -24,6 +24,7 @@ from tapscribe.batch_summarize import (
     summarize_session,
     summarize_session_locked,
 )
+from tapscribe.name_resolution import DEFAULT_KNOWN_NAMES_LIMIT
 from tapscribe.recorder import JobState, SessionBusy
 from tapscribe.sessions import read_session_summary, read_session_transcript, write_session_meta
 from tapscribe.summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerFailed, load_summarizer
@@ -371,3 +372,49 @@ def test_effective_summarizer_config_override_is_source_and_prompt_only(recorder
     cfg = effective_summarizer_config("s")
     assert cfg["command"] == ""
     assert cfg["model"] == ""
+
+
+async def test_summarize_injects_a_voice_mapped_person(recorder_under_test):
+    """A Person present ONLY as a mapped Voice is a participant, not registry
+    tail: `known_names` keeps participants over the cap and trims only the tail,
+    so without this the summarizer can lose the spelling of someone who spoke
+    half the meeting (#442). Drives the real path, so it also pins that
+    `batch_summarize` hands the transcript's speaker keys down."""
+    rec = recorder_under_test.recordings_dir
+    sd = seed_merged_transcript(rec, "s", plain_text="[09:00:00] sysaudio#A: we shipped")
+    # A diarized tap: transcript keyed by Voice, sidecar stamping the run, and
+    # the operator's map pointing that Voice at an identity-less Person.
+    transcript = json.loads((sd / "session-transcript.json").read_text(encoding="utf-8"))
+    transcript["speakers"] = ["sysaudio#A"]
+    (sd / "session-transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+    (sd / "session-roster.json").write_text(
+        json.dumps({"tray-sys-1": {"name": "System audio", "source": "recorded", "slug": "sysaudio"}}),
+        encoding="utf-8",
+    )
+    (sd / "session-voices.json").write_text(
+        json.dumps({"tray-sys-1": {"run_id": "r1", "voices": {"A": {"spans": []}}}}), encoding="utf-8"
+    )
+    (sd / "session-meta.json").write_text(
+        json.dumps({"voices": {"tray-sys-1#A": {"person_id": "p1", "run_id": "r1"}}}), encoding="utf-8"
+    )
+    # Enough registry-only people to blow past DEFAULT_KNOWN_NAMES_LIMIT, so the
+    # tail is trimmed and Alice survives ONLY if she resolved as a participant.
+    # Without that the assertion passes on the untrimmed tail and proves nothing.
+    others = [
+        {"id": f"p{i}", "name": f"Tail Person {i:03d}", "identities": [f"other-{i}"]}
+        for i in range(2, DEFAULT_KNOWN_NAMES_LIMIT + 20)
+    ]
+    (rec / "people.json").write_text(
+        # Alice LAST: first in the list, the tail would reach her before the cap
+        # trims, and the assertion would pass without her being a participant.
+        json.dumps({"people": [*others, {"id": "p1", "name": "Alice Andersen", "identities": []}]}),
+        encoding="utf-8",
+    )
+
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_ECHO_PROMPT, prompt="Summarize"),
+    )
+
+    assert "Alice Andersen" in out["summary"]
+    assert "Tail Person 079" not in out["summary"], "the registry tail really was trimmed"

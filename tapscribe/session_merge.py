@@ -31,7 +31,7 @@ from .audio import wav_duration_s, wav_rms_dbfs
 from .roster import read_roster
 from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, SessionPathError, _safe_part
 from .text import parse_iso, parse_wav_start
-from .voice_join import attribute_segment, spans_by_slug
+from .voice_join import VoiceSpan, attribute_segment, spans_by_slug
 from .wav_cache import read_cached
 
 # ---------------------------------------------------------------------------
@@ -331,7 +331,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     # is the common case — and then the Roster is not read at all, since it can
     # only ever contribute the slug join for a Voice that isn't there.
     session_voices = voices.read_voices(selection.session_dir)
-    voice_spans: dict[str, list] = {}
+    voice_spans: dict[str, list[VoiceSpan]] = {}
     if session_voices:
         voice_spans, ambiguous_slugs = spans_by_slug(session_voices, read_roster(selection.session_dir))
         if ambiguous_slugs:
@@ -368,7 +368,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             # crossing three Voices is one uncertain decode, and counting pieces
             # made the dashboard's quality badge grow with how well diarization
             # worked, and move on a re-diarize that changed no audio (#441).
-            low_confidence_count += 1 if low_conf else 0
+            low_confidence_count += low_conf
             for piece in attribute_segment(seg, wav_start=wav_start, slug=speaker, spans=spans):
                 segments.append(
                     SessionSegment(

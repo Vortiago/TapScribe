@@ -197,6 +197,18 @@ def test_a_shared_slug_does_not_suppress_an_unrelated_tap() -> None:
     assert ambiguous == {"System_audio"}
 
 
+def test_an_undiarized_tap_sharing_the_slug_still_makes_it_ambiguous() -> None:
+    """The likelier collision: one tray box diarized, a second one not. Deriving
+    ambiguity from `voices` saw only one owner and let the diarized identity's
+    spans split the OTHER tap's segments."""
+    roster = _roster(("tray-a-111", "System_audio"), ("tray-b-222", "System_audio"))
+
+    by_slug, ambiguous = spans_by_slug(_voices("tray-a-111"), roster)
+
+    assert by_slug == {}
+    assert ambiguous == {"System_audio"}
+
+
 def test_one_identity_per_slug_is_unaffected() -> None:
     by_slug, ambiguous = spans_by_slug(_voices("mic-c"), _roster(("mic-c", "Alice")))
 

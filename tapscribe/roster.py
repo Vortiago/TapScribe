@@ -32,6 +32,7 @@ can't interleave it (cooperative scheduling runs the sync body to completion).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,24 @@ def coerce_roster(raw: Any) -> dict[str, dict[str, Any]]:
         if isinstance(identity, str) and coerced is not None:
             out[identity] = coerced
     return out
+
+
+def slug_owners(roster: Mapping[str, Any]) -> dict[str, set[str]]:
+    """`{speaker slug: identities recording under it}`.
+
+    A slug is `safe_name(<bridge display name>)`, so it is NOT identity-unique:
+    two tray machines both streaming "System audio" share one. Every consumer of
+    the slug↔identity bridge needs the same answer to "is this slug ambiguous?",
+    so it is derived here once rather than per caller (#440).
+
+    `slug` is written only on the recorded path (`record_occurrence`), so a
+    live-only tap contributes nothing and cannot make a slug look shared.
+    """
+    owners: dict[str, set[str]] = {}
+    for identity, entry in roster.items():
+        if slug := (entry or {}).get("slug"):
+            owners.setdefault(slug, set()).add(identity)
+    return owners
 
 
 def read_roster(session_dir: Path) -> dict[str, dict[str, Any]]:

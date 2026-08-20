@@ -375,20 +375,22 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         if k not in tgt_aliases:
             tgt_aliases[k] = v
             aliases_added.append(k)
+
     # The operator's Voice→Person map is the OTHER half of the Voice state, and
     # it lives here rather than in the sidecar. Same conflict rule as the
     # aliases — minus every identity `fold_voices` just dropped, on either side,
     # whose spans no longer exist for a pointer to name.
+    def _lives(key: str) -> bool:
+        return split_voice_key(key)[0] not in collided
+
+    src_voice_map = {k: v for k, v in (src_meta.get("voices") or {}).items() if _lives(k)}
     tgt_voice_map = {
-        k: v for k, v in (tgt_meta.get("voices") or {}).items() if split_voice_key(k)[0] not in collided
+        **src_voice_map,
+        # Target last, so it wins on conflict — the same splat the strip-meta
+        # fold above uses, rather than a third spelling of the rule.
+        **{k: v for k, v in (tgt_meta.get("voices") or {}).items() if _lives(k)},
     }
-    voice_map_added: list[str] = []
-    for k, v in (src_meta.get("voices") or {}).items():
-        if k in tgt_voice_map or split_voice_key(k)[0] in collided:
-            continue
-        tgt_voice_map[k] = v
-        voice_map_added.append(k)
-    if aliases_added or voice_map_added or tgt_meta:
+    if aliases_added or tgt_voice_map or tgt_meta:
         write_session_meta(
             target,
             {

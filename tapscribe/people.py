@@ -95,8 +95,11 @@ def _coerce_people(data: Any) -> list[dict[str, Any]]:
         # duplicate-identity repair, not a Voice-mapped Person. Without that
         # second half, a torn people.json's duplicate row survives forever as a
         # named ghost owning nothing.
-        emptied_by_dedup = any(isinstance(i, str) and i for i in idents)
-        if not clean_idents and (emptied_by_dedup or not (isinstance(name, str) and name.strip())):
+        if not clean_idents and (
+            # Short-circuits: `_coerce_people` runs on every /api/state tick, and
+            # only an identity-less row reaches this generator.
+            any(isinstance(i, str) and i for i in idents) or not (isinstance(name, str) and name.strip())
+        ):
             continue
         seen_ids.add(pid)
         seen_idents.update(clean_idents)
