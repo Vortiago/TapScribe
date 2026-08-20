@@ -38,6 +38,11 @@ def _present(*names: str):
 _ALL = _present("onnxruntime", "llama_cpp", "mlx_lm")
 
 
+def _model_ok() -> bool:
+    """The fetched embedding model is on disk — the other half of a warm venv."""
+    return True
+
+
 def _names(steps: list[Step]) -> list[str]:
     return [s.name for s in steps]
 
@@ -48,7 +53,7 @@ def _names(steps: list[Step]) -> list[str]:
 def test_nothing_to_do_when_every_probe_passes():
     """The common case — a warm venv on a re-launch. Preflight must be silent
     and cheap, not re-run pip on every boot."""
-    assert plan_steps(python="py", system="Linux", module_present=_ALL) == []
+    assert plan_steps(python="py", system="Linux", module_present=_ALL, model_present=_model_ok) == []
 
 
 # --- onnxruntime (the core VAD backend) -------------------------------------
@@ -187,7 +192,7 @@ def test_cuda_swap_is_planned_on_windows():
     """PyPI's default Windows torch wheel is CPU-only; the Linux wheel bundles
     CUDA. This step is the whole reason `start.ps1` had it and `start.sh` did
     not."""
-    steps = plan_steps(python="py", system="Windows", module_present=_ALL)
+    steps = plan_steps(python="py", system="Windows", module_present=_ALL, model_present=_model_ok)
     assert _names(steps) == ["cuda-torch"]
     assert next(s for s in steps if s.name == "cuda-torch").argv == ["py", "-m", "tapscribe.cuda_torch"]
 
@@ -244,3 +249,38 @@ def test_mlx_summarize_install_does_not_restrict_binaries():
     """The restriction is a llama-cpp-python workaround; mlx_lm resolves normally."""
     steps = plan_steps(python="py", system="Darwin", machine="arm64", module_present=_present("onnxruntime"))
     assert "--only-binary" not in next(s for s in steps if s.name == "summarize").argv
+
+
+# --- the speaker-embedding model (fetched, not vendored) --------------------
+
+
+def test_the_embedding_model_is_fetched_when_absent():
+    """Not a pip step: the model is 30 MB of weights behind a published sha256,
+    so the repair runs the fetcher that verifies it."""
+    steps = plan_steps(python="py", system="Linux", module_present=_ALL, model_present=lambda: False)
+
+    step = next(s for s in steps if s.name == "diarize-model")
+    assert step.argv == ["py", "-m", "tapscribe.diarizers.model"]
+
+
+def test_no_fetch_when_the_model_is_already_there():
+    assert "diarize-model" not in _names(
+        plan_steps(python="py", system="Linux", module_present=_ALL, model_present=lambda: True)
+    )
+
+
+def test_the_model_fetch_is_not_fatal():
+    """No model means a multi-person tap stays one speaker — a degraded feature,
+    not a recorder that refuses to boot."""
+    steps = plan_steps(python="py", system="Linux", module_present=_ALL, model_present=lambda: False)
+
+    assert next(s for s in steps if s.name == "diarize-model").fatal is False
+
+
+def test_the_default_model_probe_is_the_diarizer_module_s_own():
+    """One owner for "is the model there": a second answer here would drift from
+    the one the engine loads against."""
+    from tapscribe.diarizers import model as diarize_model
+    from tapscribe.preflight import _diarize_model_present
+
+    assert _diarize_model_present() == diarize_model.model_present()
