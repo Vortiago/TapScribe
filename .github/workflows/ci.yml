@@ -527,6 +527,59 @@ jobs:
       - name: Build the macOS tray shell
         run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
 
+      # The claim the install story rests on, asserted rather than believed.
+      #
+      # Our bundle is ad-hoc signed (the .NET macOS SDK does that, and arm64 will
+      # not execute a wholly unsigned one), and a signature that fails to validate
+      # reads to Gatekeeper as tampering: a QUARANTINED ad-hoc bundle is reported
+      # as "damaged" with only Move to Trash, so the zip download has no in-UI way
+      # forward at all. Quarantine is applied by the downloading browser and
+      # propagated to a zip's contents when it is expanded, but `installer` writes
+      # payload outside that path. If that holds, shipping a .pkg moves the user
+      # from a dead end to the ordinary "unidentified developer" flow, for free.
+      #
+      # Apple documents none of this, so it is exactly the kind of claim that
+      # quietly stops being true. Here rather than in release.yml because a policy
+      # change should fail a PR, not a tag. Needs root, which is why it is a job
+      # step and not a test in TapScribe.TrayBridge.MacOS.Tests: the runners have
+      # passwordless sudo and a developer's Mac should not.
+      - name: Prove installer-written payload is not quarantined
+        run: |
+          set -euo pipefail
+          app=$(find bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release \
+            -maxdepth 3 -type d -name 'TapScribe.TrayBridge.MacOS.app' -not -path '*/publish/*')
+          # Exactly one match, and NO match fails: the build above guarantees the
+          # bundle, so an empty result means the path drifted rather than that
+          # there is nothing to check. `wc -l` alone would not catch it, since
+          # echoing an empty variable still counts as one line.
+          test -n "$app"
+          test "$(printf '%s' "$app" | grep -c '')" = 1
+          test -d "$app"
+          codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
+
+          pkgbuild --component "$app" --install-location /Applications \
+            --identifier com.tapscribe.traybridge.citest --version 0.0.0 probe.pkg
+          # What a browser stamps on a download. Asserted present before the
+          # install, so a silently unstamped pkg cannot make the check vacuous.
+          xattr -w com.apple.quarantine '0083;00000000;Safari;ci-probe' probe.pkg
+          xattr -p com.apple.quarantine probe.pkg
+
+          sudo installer -pkg probe.pkg -target /
+          installed=/Applications/TapScribe.TrayBridge.MacOS.app
+          test -d "$installed"
+          test -x "$installed/Contents/MacOS/TapScribe.TrayBridge.MacOS"
+
+          # The claim, spelled as an explicit failure branch rather than as a
+          # command whose non-zero exit happens to mean "clean": a grep that finds
+          # nothing and a grep that could not run look the same to `set -e`.
+          if xattr -lr "$installed" | grep -q com.apple.quarantine; then
+            echo "FAIL: installer propagated com.apple.quarantine to the payload."
+            echo "The .pkg buys nothing over the zip, and the install docs need the xattr step."
+            xattr -lr "$installed" | grep com.apple.quarantine
+            exit 1
+          fi
+          echo "OK: a quarantined unsigned .pkg installs an unquarantined bundle."
+
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
   # dependency. Building only the test project — which references the core and
