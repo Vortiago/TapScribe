@@ -69,6 +69,10 @@ internal sealed class LevelMeterView : NSView
         NSColor.Separator.Set();
         track.Stroke();
 
+        // Cast because NFloat is its own struct rather than an alias for double: multiplying it
+        // by Fraction's double promotes the expression to double, so coming back needs one.
+        // CodeQL reads these as cs/useless-cast-to-self, which the compiler refuses outright
+        // (CS0266) if they are removed. Dismiss the alert; do not "fix" it.
         nfloat inner = bounds.Width - 2;
         nfloat fill = (nfloat)(LevelMeterScale.Fraction(_level) * inner);
         nfloat marker = (nfloat)(LevelMeterScale.Fraction(_threshold) * inner);

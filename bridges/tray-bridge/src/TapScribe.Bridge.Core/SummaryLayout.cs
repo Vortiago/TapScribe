@@ -90,7 +90,7 @@ public static class SummaryLayout
         return tightList ? "\n" : "\n\n";
     }
 
-    // Empty text is dropped rather than painted: a zero-length run is invisible either way,
+    // Empty spans are filtered rather than painted: a zero-length run is invisible either way,
     // and letting one through would make every caller's "did anything render" check lie.
     private static void Add(
         List<SummaryRun> runs,
@@ -98,11 +98,8 @@ public static class SummaryLayout
         SummaryEmphasis baseEmphasis,
         int sizePlus)
     {
-        foreach (MarkdownSpan span in spans)
+        foreach (MarkdownSpan span in spans.Where(static s => s.Text.Length > 0))
         {
-            if (span.Text.Length == 0)
-                continue;
-
             // A span's emphasis is ADDED to the block's rather than replacing it, so an italic
             // word in a heading stays bold. Inline code is the exception: it switches face
             // entirely, because a monospace run carrying the heading's weight reads as neither.
