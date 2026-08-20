@@ -274,7 +274,10 @@ def attach_people_view(
         )
     people = build_people_view(sessions=sessions, registry=registry, live_identities=live_identities)
     for s in sessions:
+        # Both are join inputs consumed above, not payload: shipping them would
+        # put the whole roster and every run stamp in each poll body.
         s.pop("roster", None)
+        s.pop("voice_runs", None)
     return people
 
 
