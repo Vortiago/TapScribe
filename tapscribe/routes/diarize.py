@@ -20,7 +20,6 @@ from ..batch_diarize import DiarizeSessionRequest, diarize_session
 from ..recorder import Recorder
 from ..roster import read_roster
 from ..session_paths import resolve_session_dir
-from ..sessions import read_session_meta
 from ..text import parse_iso, voice_key
 from ..voices import read_voices, voices_sig
 from .body import json_body
@@ -50,11 +49,17 @@ async def api_session_diarize(
 
 @router.get("/api/sessions/{session}/voices")
 async def api_session_voices(session: str) -> dict[str, Any]:
-    """The session's Voices with each one's current mapping — the lazy body the
-    Transcript stage's voicemap renders, keyed on `voices_sig` from the poll.
+    """The Voices a diarization run found — the lazy body the Transcript stage's
+    voicemap renders, keyed on `voices_sig` from the poll.
 
     Span COUNTS and total seconds, never the spans themselves: a long meeting is
     thousands of them and the panel shows one row per Voice.
+
+    Deliberately NOT the operator's mapping. This body only changes when a
+    diarize runs, which is what makes `voices_sig` a valid key; a mapping changes
+    on a click, so carrying it here would make the body WRONG between the click
+    and the next re-diarize. The mapping rides `/api/state`'s `session_meta`,
+    which is 500 ms fresh — one fact, one owner (CLAUDE.md's signature hygiene).
     """
     return await asyncio.to_thread(_voices_view, session)
 
@@ -63,25 +68,17 @@ def _voices_view(session: str) -> dict[str, Any]:
     session_dir = resolve_session_dir(session)
     sidecar = read_voices(session_dir)
     roster = read_roster(session_dir)
-    mapping = read_session_meta(session).get("voices") or {}
 
     identities = []
     for identity, entry in sorted(sidecar.items()):
         rows = []
         for label, voice in sorted(entry["voices"].items()):
-            key = voice_key(identity, label)
-            mapped = mapping.get(key) or {}
             rows.append(
                 {
-                    "key": key,
+                    "key": voice_key(identity, label),
                     "label": label,
                     "spans": len(voice["spans"]),
                     "seconds": round(_speaking_seconds(voice["spans"]), 2),
-                    # Stale mappings are reported, not hidden: the panel shows
-                    # the operator that this Voice needs re-mapping, which is
-                    # the only way they learn a re-diarize dropped their work.
-                    "person_id": mapped.get("person_id", ""),
-                    "stale": bool(mapped) and mapped.get("run_id") != entry["run_id"],
                 }
             )
         identities.append(

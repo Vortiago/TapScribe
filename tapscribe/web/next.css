@@ -1077,6 +1077,29 @@ button.wavrow {
 .pick__av--unid { background: var(--warn); }
 .pick__chev { color: var(--fg-3); font-size: 9px; }
 
+/* The real (wired) voice row: the last grid cell holds the Person picker, the
+   new-name input it reveals, the stale cue and the save status. Column 1 is
+   `auto` rather than the mock's fixed 70px because the label carries the tap
+   name too once a session has more than one diarized tap. */
+/* Four columns, not the mock's five: the aside is ~300px, and every pixel the
+   decorative arrow took was a truncated Person name. */
+.voicerow { grid-template-columns: auto minmax(36px, 1fr) 34px minmax(0, auto); gap: 6px; }
+.voicerow__pick { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.voicerow__new { width: 11ch; }
+.voicerow__status { font-size: 9px; }
+.voicerow__stale {
+  font-size: 8.5px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .04em;
+  color: var(--warn); border: 1px dashed color-mix(in srgb, var(--warn) 44%, transparent);
+  border-radius: var(--next-r-sm); padding: 1px 4px; flex: none;
+}
+.sel--sm { font-size: 10.5px; padding: 2px 4px; min-width: 0; }
+
+/* One connected tap's single/multi control (Taps · Tap model). */
+.modelist { display: flex; flex-direction: column; gap: 6px; }
+.moderow { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; }
+.moderow__id { font-size: 10px; color: var(--fg-1); overflow: hidden; text-overflow: ellipsis; }
+.moderow__src { font-size: 9px; }
+
 /* ====================================================================== */
 /* PHASE 3 · PEOPLE — the registry of humans. Two REAL panels, both from    */
 /* per-session session_meta.aliases: the per-session alias editor (the      */

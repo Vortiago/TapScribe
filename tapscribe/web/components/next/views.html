@@ -204,6 +204,33 @@
         </div>
       </div>
 
+      <!-- VOICES (ADR-0021). A multi-person tap — the tray bridge's system audio,
+           the whole far end of a meeting — lands as ONE speaker until it is
+           diarized. The operator maps each Voice to a Person HERE, reading
+           `Speaker A:` in the transcript beside it, which is also the enrollment
+           point for later cross-session recognition (#439). Taps holds the
+           single/multi control (a property of a live source); the voice list
+           belongs to a finished recording.
+
+           The row list is a KEYED list (renderList) and its lazy body is keyed
+           on `voices_sig`. The MAPPING is not in that body — it changes on a
+           click where the body changes only on a re-diarize — so it comes off
+           the poll's session_meta and rides the row's itemSig. -->
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">👥</span>Voices</div>
+          <button class="act act--sm" type="button" data-slot="dzBtn" title="split every multi-person tap in this session into Voices">diarize</button>
+          <div class="panel__hint mono" data-slot="dzHint"></div>
+        </div>
+        <div class="panel__body">
+          <!-- Placeholder SIBLING of the rows host, toggled in place, so the
+               host's children belong to renderList alone. -->
+          <div class="empty" data-slot="voiceEmpty" hidden></div>
+          <div class="voicemap" data-slot="voiceList"></div>
+          <div class="dim mono ovr-note" data-slot="dzNote"></div>
+        </div>
+      </div>
+
       <div class="panel panel--fill">
         <div class="panel__head"><div class="panel__title"><span class="ic">🗂️</span>Transcript cache</div><div class="panel__hint mono" data-slot="cacheHint"></div></div>
         <div class="panel__body flush"><div class="cache" data-slot="cacheBody"></div></div>
@@ -225,6 +252,38 @@
       <span class="wavrow__tx" data-slot="txTag"></span>
     </span>
   </button>
+</template>
+
+<!-- one diarized Voice → Person row (Transcript · Voices). The picker is a
+     <select> of existing Persons plus a `__new__` option that reveals the name
+     input beside it: <datalist> appears nowhere in this app and is ambiguous
+     when two Persons share a name, which is exactly the case this row must not
+     collapse. A focused control inside the row holds that row's update for the
+     tick (renderList rule 4), so a half-typed name survives the poll. -->
+<template id="tpl-next-voicerow">
+  <div class="voicerow">
+    <span class="voicerow__v mono" data-slot="vLabel"></span>
+    <span class="voicerow__bar"><span class="voicerow__fill" data-slot="vFill"></span></span>
+    <span class="voicerow__pct mono" data-slot="vPct"></span>
+    <span class="voicerow__pick">
+      <select class="sel sel--sm" data-slot="vPerson" aria-label="map this voice to a person"></select>
+      <input class="inp-txt mono voicerow__new" type="text" data-slot="vName" placeholder="who is this?" aria-label="name a new person for this voice" hidden>
+      <span class="voicerow__stale" data-slot="vStale" title="this mapping was made against an earlier diarization run and is no longer applied" hidden>re-map</span>
+      <span class="dim mono voicerow__status" data-slot="vStatus"></span>
+    </span>
+  </div>
+</template>
+
+<!-- one connected tap's single/multi mode control (Taps · Tap model) -->
+<template id="tpl-next-moderow">
+  <div class="moderow">
+    <span class="moderow__id mono" data-slot="mIdent"></span>
+    <span class="segctl" data-slot="mSeg">
+      <button class="segctl__opt tap-mode" type="button" data-mode="single" aria-pressed="false" title="one human on this tap — never diarized">&#128100; single</button>
+      <button class="segctl__opt segctl__opt--multi tap-mode" type="button" data-mode="multi" aria-pressed="false" title="several humans on this tap — diarized into Voices after the meeting">&#128101; multi</button>
+    </span>
+    <span class="moderow__src dim mono" data-slot="mSrc"></span>
+  </div>
 </template>
 
 <!-- one transcript-cache row (a cached backend·model variant + set-primary) -->

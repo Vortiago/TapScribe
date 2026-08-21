@@ -46,16 +46,20 @@ import json
 import os
 import re
 import shutil
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
 import httpx
 import pytest
 
+from tapscribe import batch_diarize as _batch_diarize
 from tapscribe import transcribers as _transcribers
 from tapscribe.recorder import JobState
 from tapscribe.session_paths import FILENAME_META_JSON
+from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
+from tapscribe.text import parse_wav_speaker_slug
 
 from .conftest import FakeAliveProc, RunningRecorder
 from .fake_transcriber import FakeTranscriber
@@ -7646,5 +7650,218 @@ async def test_next_playhead_still_works_after_a_stage_walk(running_recorder: Ru
                 timeout=8000,
             )
             assert moved, "the playhead never advanced after the stage walk"
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Diarization — Taps declares the mode, Transcript maps the Voices (ADR-0021)
+# ---------------------------------------------------------------------------
+
+DIARIZE_LINES = [
+    "Right, shall we start with the migration status?",
+    "Two of the three services are cut over, the last one lands Thursday.",
+]
+
+
+class _TwoVoiceTranscriber(FakeTranscriber):
+    """One line per WAV in call order, so the far end reads as a conversation
+    rather than the same sentence twice. The real backend varies per utterance;
+    `FakeTranscriber` keys on the speaker SLUG, which is the same for both of a
+    multi-person tap's WAVs by construction."""
+
+    def transcribe(self, path, **kwargs):
+        result = super().transcribe(path, **kwargs)
+        slug = parse_wav_speaker_slug(path.name)
+        if slug != "Them":
+            return result
+        line = DIARIZE_LINES[(len(self.calls) - 1) % len(DIARIZE_LINES)]
+        segment = replace(result.segments[0], text=line)
+        return replace(result, text=line, segments=(segment,))
+
+
+class _HalvingDiarizer:
+    """Stands in for the ONNX engine: every clip is its own Voice, in order.
+
+    The engine itself has its own tests over real audio and the real model
+    (`tests/test_diarize_engine.py`, run in CI's `diarize` lane, which fetches
+    it). What this flow has to prove is everything around it — the trigger, the
+    sidecar, the re-merge, the panel, the mapping, and the transcript picking up
+    a name the operator typed.
+    """
+
+    engine = "stub"
+
+    def diarize(self, clips):
+        from tapscribe.diarizers.base import DiarizationResult, voice_label
+
+        voices = {}
+        for i, clip in enumerate(clips):
+            seconds = len(clip.samples) / 16000
+            voices[voice_label(i)] = [(clip.start, clip.start + timedelta(seconds=seconds))]
+        return DiarizationResult(voices=voices, engine=self.engine)
+
+
+async def test_diarized_voices_map_to_people_and_rename_the_transcript(
+    running_recorder: RunningRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """The whole #78 flow, through real Chromium.
+
+    A meeting with two taps: the operator's mic (one human) and the tray
+    bridge's system audio (the whole far end, several humans). The far end
+    lands as ONE speaker until it is diarized. The operator diarizes it, reads
+    `Speaker A` beside the transcript, types who that is — and the merged
+    transcript re-attributes to the name.
+
+    Also drives the Taps mode override in both directions, because a Bridge
+    declaration is only ever a default (an NDI bridge cannot tell a room mic
+    from a per-participant feed).
+    """
+    fake = _TwoVoiceTranscriber(text_by_speaker={"Alice": ALICE_TEXT, "Them": BOB_TEXT})
+    monkeypatch.setattr(_transcribers, "load_transcriber", lambda model_name, **kw: fake)  # noqa: ARG005
+    _transcribers.clear_cache()
+    monkeypatch.setattr(_batch_diarize, "load_diarizer", _HalvingDiarizer)
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    def tap(identity, name, wav, utt, mode, paced=False):
+        return stream_wav_via_tap(
+            ws_base_url=ws_base,
+            identity=identity,
+            name=name,
+            wav_path=wav,
+            utterance_id=utt,
+            tap_mode=mode,
+            frame_interval_s=0.02 if paced else 0.0,
+        )
+
+    mic = synth_speech_like_wav(tmp_path / "a.wav", seconds=4.0, freq_hz=220.0)
+    far1 = synth_speech_like_wav(tmp_path / "t0.wav", seconds=4.0, freq_hz=330.0)
+    far2 = synth_speech_like_wav(tmp_path / "t1.wav", seconds=1.5, freq_hz=480.0)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1500, "height": 980})
+            page = await context.new_page()
+            await page.goto(base + "/#taps", wait_until="domcontentloaded")
+
+            # ---- Taps: the Bridge's declaration, and the operator's override --
+            # The control is about a LIVE source, so the rows are the connected
+            # taps — both are streamed paced so they are still open here.
+            mic_task = asyncio.create_task(
+                tap("mic-alice", "Alice", mic, "utt-a", TAP_MODE_SINGLE, paced=True)
+            )
+            far_task = asyncio.create_task(
+                tap("sysaudio", "Them", far1, "utt-t0", TAP_MODE_MULTI, paced=True)
+            )
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot [data-slot="modeList"] .moderow').length >= 2""",
+                timeout=15000,
+            )
+            await _shot(page, "voices-01-taps-mode.png")
+
+            mode_of = """(ident) => {
+              const row = [...document.querySelectorAll('#viewRoot .moderow')]
+                .find((r) => r.dataset.identity === ident);
+              return row?.querySelector('.tap-mode.is-on')?.dataset.mode || '';
+            }"""
+            assert await page.evaluate(mode_of, "sysaudio") == "multi", "the wire declaration did not land"
+            assert await page.evaluate(mode_of, "mic-alice") == "single"
+
+            # Override the mic to multi and back — the durable per-identity
+            # setting, which is what an NDI bridge (#54) would need. It does not
+            # retro-fit the OPEN tap: the Roster stamped its mode at open, and
+            # diarization is a property of the recording.
+            await page.click('#viewRoot .moderow[data-identity="mic-alice"] .tap-mode[data-mode="multi"]')
+            await page.wait_for_function(
+                """async () => {
+                  const j = await (await fetch('/api/state')).json();
+                  return (j.active || []).some((a) => a.identity === 'mic-alice' && a.mode === 'multi');
+                }""",
+                timeout=8000,
+            )
+            await page.click('#viewRoot .moderow[data-identity="mic-alice"] .tap-mode[data-mode="single"]')
+            await page.wait_for_function(f"""() => ({mode_of})('mic-alice') === 'single'""", timeout=8000)
+
+            await asyncio.gather(mic_task, far_task)
+            # A second turn from the far end, so it has two to split.
+            await tap("sysaudio", "Them", far2, "utt-t1", TAP_MODE_MULTI)
+            assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
+
+            # ---- Transcript: transcribe, then diarize -------------------------
+            await page.evaluate('() => window.gotoView("transcript")')
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('#viewRoot [data-slot="txRangeBtn"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=15000,
+            )
+            await page.click('#viewRoot [data-slot="txRangeBtn"]')
+            lines = '#viewRoot [data-slot="mergedHost"] [data-slot="lines"]'
+            await page.wait_for_function(
+                f"""() => (document.querySelector({lines!r})?.innerText || '').includes({DIARIZE_LINES[0]!r})""",
+                timeout=30000,
+            )
+            # Undiarized: the whole far end is one speaker.
+            before = await page.inner_text(lines)
+            assert before.count("Them") >= 2, before
+            assert "No voices yet" in (await page.inner_text('#viewRoot [data-slot="voiceEmpty"]'))
+            await _shot(page, "voices-02-before-diarize.png")
+
+            await page.click('#viewRoot [data-slot="dzBtn"]')
+            rows = '#viewRoot [data-slot="voiceList"] .voicerow'
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll({rows!r}).length === 2""",
+                timeout=30000,
+            )
+            assert "2 voices" in (await page.inner_text('#viewRoot [data-slot="dzHint"]'))
+            # The merged transcript re-keyed WITHOUT a re-transcribe: the far end
+            # is now two speakers where it was one.
+            await page.wait_for_function(
+                f"""() => (document.querySelector({lines!r})?.innerText || '').includes('Speaker B')""",
+                timeout=20000,
+            )
+            await _shot(page, "voices-03-unmapped.png")
+
+            # ---- Map Voice A to a Person the operator names -------------------
+            first_row = f'{rows}[data-key="sysaudio#A"]'
+            await page.select_option(f'{first_row} [data-slot="vPerson"]', "__new__")
+            await page.fill(f'{first_row} [data-slot="vName"]', "Dana Holm")
+            await page.press(f'{first_row} [data-slot="vName"]', "Enter")
+
+            # The transcript re-attributes — the point of the whole feature.
+            await page.wait_for_function(
+                f"""() => (document.querySelector({lines!r})?.innerText || '').includes('Dana Holm')""",
+                timeout=20000,
+            )
+            # ...and the picker shows the Person, not the placeholder.
+            await page.wait_for_function(
+                f"""() => {{
+                  const sel = document.querySelector('{first_row} [data-slot="vPerson"]');
+                  return sel && sel.selectedOptions[0]?.textContent === 'Dana Holm';
+                }}""",
+                timeout=15000,
+            )
+            after = await page.inner_text(lines)
+            assert "Dana Holm" in after and "Speaker B" in after, after
+            await _shot(page, "voices-04-mapped.png")
+
+            # The Person is real, and reachable from the People stage — with the
+            # session counted through the voice pointer, not an Identity.
+            people = (await (await page.request.get(base + "/api/people")).json())["people"]
+            dana = next((pp for pp in people if pp["name"] == "Dana Holm"), None)
+            assert dana and dana["session_count"] == 1, people
+            await page.evaluate('() => window.gotoView("people")')
+            await page.wait_for_function(
+                """() => (document.querySelector('#viewRoot')?.innerText || '').includes('Dana Holm')""",
+                timeout=10000,
+            )
+            await _shot(page, "voices-05-people.png")
         finally:
             await browser.close()

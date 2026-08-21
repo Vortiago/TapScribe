@@ -81,7 +81,7 @@ def test_the_voices_body_names_the_tap_and_its_voices(client, diarized) -> None:
     assert tap["run_id"] == "run-1"
     assert [v["key"] for v in tap["voices"]] == ["sysaudio#A", "sysaudio#B"]
     assert tap["voices"][0]["seconds"] == pytest.approx(30.0)
-    assert tap["voices"][0]["person_id"] == ""
+    assert tap["voices"][0]["spans"] == 1
 
 
 def test_an_undiarized_session_has_no_voices(client, recorder_under_test) -> None:
@@ -92,22 +92,16 @@ def test_an_undiarized_session_has_no_voices(client, recorder_under_test) -> Non
     assert body["identities"] == []
 
 
-def test_the_voices_body_reports_the_mapping_and_when_it_went_stale(client, diarized) -> None:
-    """A mapping stamped with a superseded run is NOT applied, so the panel has
-    to say so — otherwise the operator sees `Speaker A` back with no explanation
-    and no reason to re-map."""
+def test_the_voices_body_carries_no_mapping(client, diarized) -> None:
+    """This body only changes when a diarize runs, which is what makes
+    `voices_sig` a valid cache key for it. A mapping changes on a click, so it
+    rides `/api/state` instead — carrying it here would make the cached body
+    wrong from the click until the next re-diarize."""
     client.put("/api/sessions/s/voices", json={"key": "sysaudio#A", "name": "Dana"})
 
     (tap,) = client.get("/api/sessions/s/voices").json()["identities"]
-    voice = next(v for v in tap["voices"] if v["key"] == "sysaudio#A")
-    assert voice["person_id"]
-    assert voice["stale"] is False
 
-    voices.record_voices(diarized, identity="sysaudio", run_id="run-2", spans={"A": [(T0, T0)]})
-
-    (tap,) = client.get("/api/sessions/s/voices").json()["identities"]
-    voice = next(v for v in tap["voices"] if v["key"] == "sysaudio#A")
-    assert voice["stale"] is True, "a mapping from the previous run reads as current"
+    assert all("person_id" not in v and "stale" not in v for v in tap["voices"])
 
 
 def test_mapping_a_voice_to_a_person_stamps_the_current_run(client, diarized) -> None:

@@ -362,3 +362,61 @@ def test_an_ambiguous_slug_is_not_named_through_either_person() -> None:
     names = resolve_session_names(roster=roster, aliases={}, registry=reg)
 
     assert names["sysaudio"] == "System audio", "the shared roster name, not a Person"
+
+
+# ---- build_people_view · Voice-mapped Persons (ADR-0021) -------------------
+
+
+def _mapped_session(sid: str, *, key: str, person_id: str, run_id: str, current: str) -> dict:
+    """A diarized session with one Voice→Person mapping on its meta."""
+    return {
+        "session": sid,
+        "roster": {"sysaudio": _entry("Them", slug="Them")},
+        "session_meta": {"voices": {key: {"person_id": person_id, "run_id": run_id}}},
+        "voice_runs": {"sysaudio": current},
+    }
+
+
+def test_a_person_reached_only_by_a_voice_pointer_counts_its_session() -> None:
+    """Mapping a Voice by typing a name creates a Person with NO Identity, so
+    the identity join finds nothing for it — and the People stage would show the
+    operator's brand-new Person against zero sessions."""
+    reg = _reg([{"id": "p1", "name": "Dana", "identities": []}])
+
+    rows = build_people_view(
+        sessions=[_mapped_session("s1", key="sysaudio#A", person_id="p1", run_id="r1", current="r1")],
+        registry=reg,
+        live_identities=set(),
+    )
+
+    dana = next(r for r in rows if r["id"] == "p1")
+    assert dana["sessions"] == ["s1"]
+    assert dana["recorded"] is True
+
+
+def test_a_mapping_from_a_superseded_run_counts_no_session() -> None:
+    """It is not applied to the transcript either — counting it would tell the
+    operator a Person appears in a meeting where their name shows nowhere."""
+    reg = _reg([{"id": "p1", "name": "Dana", "identities": []}])
+
+    rows = build_people_view(
+        sessions=[_mapped_session("s1", key="sysaudio#A", person_id="p1", run_id="old", current="r2")],
+        registry=reg,
+        live_identities=set(),
+    )
+
+    assert next(r for r in rows if r["id"] == "p1")["sessions"] == []
+
+
+def test_a_voice_session_merges_with_the_identity_join() -> None:
+    """A Person can be reached both ways — an Identity in one meeting, a mapped
+    Voice in another — and the count is the union, not either half."""
+    reg = _reg([{"id": "p1", "name": "Dana", "identities": ["mic-dana"]}])
+    sessions = [
+        {"session": "s1", "roster": {"mic-dana": _entry("Dana", slug="Dana")}},
+        _mapped_session("s2", key="sysaudio#A", person_id="p1", run_id="r1", current="r1"),
+    ]
+
+    rows = build_people_view(sessions=sessions, registry=reg, live_identities=set())
+
+    assert next(r for r in rows if r["id"] == "p1")["sessions"] == ["s1", "s2"]

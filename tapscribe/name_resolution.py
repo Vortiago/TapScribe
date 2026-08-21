@@ -205,6 +205,29 @@ def _default_name(identities: list[str], roster_names: dict[str, str]) -> str:
     return identities[0] if identities else ""
 
 
+def _sessions_by_voice_pointer(sessions: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """`person_id → sessions reached through a Voice mapping`.
+
+    Only mappings the transcript actually applies count: one stamped with a
+    superseded `run_id` names nobody in that meeting, so counting it would tell
+    the operator a Person appears where their name shows nowhere.
+    """
+    out: dict[str, set[str]] = {}
+    for s in sessions:
+        sid = s.get("session", "")
+        runs = s.get("voice_runs") or {}
+        for key, mapped in ((s.get("session_meta") or {}).get("voices") or {}).items():
+            identity, label = split_voice_key(key)
+            person_id = mapped.get("person_id") if isinstance(mapped, dict) else None
+            if not label or not person_id:
+                continue
+            current = runs.get(identity)
+            if current and mapped.get("run_id") != current:
+                continue
+            out.setdefault(person_id, set()).add(sid)
+    return out
+
+
 def build_people_view(
     *,
     sessions: list[dict[str, Any]],
@@ -228,11 +251,16 @@ def build_people_view(
             if entry.get("name") and identity not in roster_names:
                 roster_names[identity] = entry["name"]
 
+    voice_sessions = _sessions_by_voice_pointer(sessions)
+
     rows: list[dict[str, Any]] = []
     for person in registry.as_list():
         idents = person["identities"]
-        sess: set[str] = set()
-        recorded = False
+        # A Person mapped from a Voice may own NO Identity (ADR-0021), so the
+        # identity join alone would show the operator's brand-new Person against
+        # zero sessions. A Voice is recorded audio by construction.
+        sess: set[str] = set(voice_sessions.get(person["id"], ()))
+        recorded = bool(sess)
         for identity in idents:
             sess |= ident_sessions.get(identity, set())
             recorded = recorded or ident_recorded.get(identity, False)
