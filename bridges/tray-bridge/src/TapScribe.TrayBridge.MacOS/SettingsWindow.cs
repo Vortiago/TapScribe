@@ -8,10 +8,10 @@ namespace TapScribe.TrayBridge.MacOS;
 /// <summary>
 /// The Settings window: a two-way binding of AppKit controls onto Core's
 /// <see cref="SettingsDraft"/>, which owns every decision about what the edited state MEANS.
-/// The Mac sibling of WinForms' <c>SettingsForm</c>, and deliberately the smaller half of it:
-/// connection, the two speaker rows (the microphone and the system-audio tap), the shared gate
-/// timings and the end-of-meeting behaviour. The Advanced pin grid and the live level meters
-/// are device parity, which slice 9 owns.
+/// The Mac sibling of WinForms' <c>SettingsForm</c>, at parity with it since #421 and laid out
+/// as one scrolling column rather than four tabs: Recorder, the two speaker rows (the
+/// microphone and the system-audio tap) with a live level meter each, the Devices pin grid, the
+/// speech-gate timings and the end-of-meeting behaviour.
 ///
 /// Not modal. A modal run loop would sit on the main queue that every runtime callback is
 /// posted to, so a meeting running behind the window would stop being able to report anything.
@@ -39,11 +39,6 @@ internal sealed class SettingsWindow : IDisposable
     private const int Gap = 8;
     private const int ControlLeft = Padding + LabelWidth + Gap;
     private const int ControlWidth = Width - ControlLeft - Padding;
-
-    /// <summary>How long a connection probe may take before it is abandoned. The Recorder is
-    /// usually on the same machine or the same LAN, and an operator staring at a spinner
-    /// learns nothing a refusal would not tell them sooner.</summary>
-    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(15);
 
     private readonly NSWindow _window;
     private readonly IDispatcher _dispatcher;
@@ -97,8 +92,8 @@ internal sealed class SettingsWindow : IDisposable
     /// <summary>Build the window over the settings in force.</summary>
     /// <param name="current">What the runtime is running on, which is what the window seeds
     /// itself from: an edit that failed to reach disk still governs the session.</param>
-    /// <param name="listDevices">Lists the endpoints present now, so a saved pin survives a
-    /// Save. See <see cref="SettingsSeed"/> for why that matters with no pin grid on screen.</param>
+    /// <param name="listDevices">Lists the endpoints present now, which fills the pin grid and
+    /// is what makes a saved pin survive a Save. See <see cref="SettingsSeed"/>.</param>
     /// <param name="apply">Hands the edited settings to the runtime, which publishes,
     /// persists and re-tunes any running pipelines.</param>
     /// <param name="dispatcher">Marshals the connection test's answer back to the main thread:
@@ -343,7 +338,8 @@ internal sealed class SettingsWindow : IDisposable
         _window.MakeFirstResponder(null);
 
         _draft.Host = _host.StringValue.Trim();
-        _draft.Port = SettingsFields.Int(_port.StringValue, _draft.Port, min: 1, max: 65535);
+        _draft.Port = SettingsFields.Int(
+            _port.StringValue, _draft.Port, min: SettingsBounds.PortMin, max: SettingsBounds.PortMax);
         _draft.Token = _token.StringValue;
         _draft.Tls = IsOn(_tls);
         _draft.AllowSelfSignedCert = IsOn(_allowSelfSigned);
@@ -353,8 +349,10 @@ internal sealed class SettingsWindow : IDisposable
         _draft.SystemEnabled = IsOn(_systemEnabled);
         _draft.SystemName = _systemName.StringValue;
         _draft.SystemSensitivity = _systemSensitivity.IntValue;
-        _draft.HangoverMs = SettingsFields.Int(_hangover.StringValue, _draft.HangoverMs, min: 0, max: 5000);
-        _draft.PreRollMs = SettingsFields.Int(_preRoll.StringValue, _draft.PreRollMs, min: 0, max: 2000);
+        _draft.HangoverMs = SettingsFields.Int(
+            _hangover.StringValue, _draft.HangoverMs, min: 0, max: SettingsBounds.HangoverMaxMs);
+        _draft.PreRollMs = SettingsFields.Int(
+            _preRoll.StringValue, _draft.PreRollMs, min: 0, max: SettingsBounds.PreRollMaxMs);
         _draft.ProcessOnEnd = IsOn(_processOnEnd);
         CollectPinGrid();
         return _draft.ToSettings();
@@ -376,7 +374,7 @@ internal sealed class SettingsWindow : IDisposable
             // leaves both stuck that way for as long as the window is open, with nothing to
             // report it out of a fire-and-forget click.
             TapConnectionOptions options = Collect().ToConnectionOptions();
-            using var timeout = new CancellationTokenSource(TestTimeout);
+            using var timeout = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
             ConnectionTestResult result = await ConnectionTester
                 .TestAsync(options, http: null, timeout.Token)
                 .ConfigureAwait(false);

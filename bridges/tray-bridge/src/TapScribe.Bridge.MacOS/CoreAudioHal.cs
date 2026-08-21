@@ -501,15 +501,19 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         {
             if (_unpinned)
                 return;
+            int status;
             fixed (AudioObjectPropertyAddress* address = &_address)
-            {
-                // Status ignored: the only failure is a registration CoreAudio no longer has,
-                // which is the state this call is trying to reach. The seam binds a
-                // registration's release not to throw, and every caller reaches it from a
-                // teardown path with nothing to fall back on.
-                AudioObjectRemovePropertyListener(
+                status = AudioObjectRemovePropertyListener(
                     _objectId, address, &OnPropertyChanged, GCHandle.ToIntPtr(Pin));
-            }
+
+            // Not thrown (the seam binds a release not to throw) but not ignored either, for
+            // the reason DestroyIoProc gives: the pin is this listener's client data, so
+            // freeing it while CoreAudio still holds the registration hands the next
+            // notification a dangling GCHandle. Left listed and pinned instead, so the HAL's
+            // own Dispose gets one more attempt.
+            if (status != NoError)
+                return;
+
             lock (_hal._registrations)
                 _hal._listeners.Remove(this);
             Unpin();

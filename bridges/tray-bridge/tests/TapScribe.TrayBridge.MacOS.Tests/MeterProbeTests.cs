@@ -81,6 +81,29 @@ public class MeterProbeTests
         };
 
     [Fact]
+    public void Start_WhenTheCaptureRefusesToStart_DisposesItBeforeItsEnumerator()
+    {
+        // The grant prompt lands on the START, not the open: macOS asks for System Audio
+        // Recording when the IOProc starts, with a tap and an aggregate already standing. So the
+        // meter must be published BEFORE it is started, or a declined prompt leaves Stop a null
+        // meter, the tap standing, and the enumerator disposed under it.
+        var enumerator = new Enumerator([Mic])
+        {
+            StartError = new ExternalException("starting mic-1", -66748),
+        };
+        using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
+
+        probe.Start();
+
+        Assert.False(probe.Running);
+        Assert.Contains("starting mic-1", probe.Error);
+        Assert.True(enumerator.Capture!.Disposed, "a refused start left its capture open");
+        Assert.True(
+            enumerator.Capture.DisposedBeforeEnumerator,
+            "the enumerator went first, leaving a capture over a disposed owner");
+    }
+
+    [Fact]
     public void Stop_DisposesTheCaptureBeforeItsEnumerator()
     {
         // The ordering the capture seam's disposal contract exists for: the capture came from
@@ -131,6 +154,8 @@ public class MeterProbeTests
     {
         internal Exception? OpenError { get; init; }
 
+        internal Exception? StartError { get; init; }
+
         internal bool Disposed { get; private set; }
 
         internal int Opens { get; private set; }
@@ -171,9 +196,14 @@ public class MeterProbeTests
 
         public void Start()
         {
-            // Nothing to produce: these tests are about the lifecycle, and a probe's Level is
-            // the meter's business rather than this double's. Referencing the events keeps the
-            // compiler from warning them unused without pretending they fire.
+            // The one failure this double can produce, because it is the one the operator
+            // causes: the grant prompt is answered here.
+            if (owner.StartError is not null)
+                throw owner.StartError;
+
+            // Otherwise nothing to produce: these tests are about the lifecycle, and a probe's
+            // Level is the meter's business rather than this double's. Referencing the events
+            // keeps the compiler from warning them unused without pretending they fire.
             _ = DataAvailable;
             _ = Failed;
             _ = MuteChanged;

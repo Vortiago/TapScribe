@@ -149,12 +149,10 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         lock (_binding)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            // InvalidOperationException, not the native failure type: a double start is a bug
-            // in the caller rather than a Mac that refused, so the orchestrator's
-            // skip-and-carry-on filter must not swallow it. Same for a capture whose rebind was
-            // refused: it already reported the platform failure through Failed, and reporting
-            // it a second time as a start failure would have the runtime classify one dead tap
-            // as two.
+            // The seam's declared type for a call in the wrong state, not the native one:
+            // nothing on the Mac refused either of these, so a CoreAudioException would report
+            // a device fault the device does not have. Both are caller bugs, and neither is
+            // reachable from the orchestrator, which starts each capture once.
             if (_run.Running)
                 throw new InvalidOperationException("system audio is already being captured");
             if (_bound is not { } bound)

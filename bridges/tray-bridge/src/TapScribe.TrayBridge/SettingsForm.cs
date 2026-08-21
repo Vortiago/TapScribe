@@ -37,7 +37,8 @@ internal sealed class SettingsForm : Form
 
     // Connection tab.
     private readonly TextBox _host = new();
-    private readonly NumericUpDown _port = new() { Minimum = 1, Maximum = 65535, Width = 90 };
+    private readonly NumericUpDown _port =
+        new() { Minimum = SettingsBounds.PortMin, Maximum = SettingsBounds.PortMax, Width = 90 };
     private readonly CheckBox _tls = new() { Text = "Use TLS (wss://)", AutoSize = true };
     // Concise on the dialog (an AutoSize checkbox doesn't wrap and the tab is ~436px
     // wide); the full "accepts any cert / testing only" caveat lives in the README.
@@ -85,8 +86,10 @@ internal sealed class SettingsForm : Form
     private IReadOnlyList<CaptureDevice> _listedDevices = [];
 
     // Level-gate tab — the shared knobs.
-    private readonly NumericUpDown _hangover = new() { Minimum = 0, Maximum = 5000, Increment = 50, Width = 90 };
-    private readonly NumericUpDown _preRoll = new() { Minimum = 0, Maximum = 2000, Increment = 50, Width = 90 };
+    private readonly NumericUpDown _hangover =
+        new() { Minimum = 0, Maximum = SettingsBounds.HangoverMaxMs, Increment = 50, Width = 90 };
+    private readonly NumericUpDown _preRoll =
+        new() { Minimum = 0, Maximum = SettingsBounds.PreRollMaxMs, Increment = 50, Width = 90 };
 
     // Meeting tab — what End meeting does. On: run the recorder's strip/transcribe/summarize
     // pipeline and show the summary. Off: just save the session + recordings for the dashboard.
@@ -163,7 +166,7 @@ internal sealed class SettingsForm : Form
         AddRow(page, "Recorder host", _host, ref y, inputWidth);
         _host.Text = _draft.Host;
         AddRow(page, "Port", _port, ref y, inputWidth);
-        _port.Value = Math.Clamp(_draft.Port, 1, 65535);
+        _port.Value = Math.Clamp(_draft.Port, SettingsBounds.PortMin, SettingsBounds.PortMax);
         AddCheck(page, _tls, _draft.Tls, ref y, inputX);
         // Indented under TLS to read as its sub-option. Only meaningful over wss://, so it
         // is greyed out unless TLS is on and forced off when TLS is turned off — the same
@@ -538,7 +541,7 @@ internal sealed class SettingsForm : Form
         try
         {
             TapConnectionOptions options = Collect().ToConnectionOptions();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var cts = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
             // No ConfigureAwait(false): resume on the UI thread to update controls.
             ConnectionTestResult result =
                 await ConnectionTester.TestAsync(options, http: null, cts.Token);

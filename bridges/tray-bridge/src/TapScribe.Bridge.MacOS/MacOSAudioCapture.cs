@@ -148,9 +148,8 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         // outlive the only Dispose anyone was going to call.
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // InvalidOperationException, not the native failure type: a double start is a bug in
-        // the caller rather than a dead endpoint, so the orchestrator's skip-and-carry-on
-        // filter must not swallow it.
+        // The seam's declared type for a call in the wrong state, not the native one: no
+        // endpoint refused, so a CoreAudioException would report a fault it does not have.
         if (_run.Running)
             throw new InvalidOperationException($"device {_deviceId} is already capturing");
 

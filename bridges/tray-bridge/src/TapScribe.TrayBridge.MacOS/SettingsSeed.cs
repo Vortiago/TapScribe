@@ -10,9 +10,7 @@ namespace TapScribe.TrayBridge.MacOS;
 /// <see cref="SettingsDraft.ToSettings"/> collects the pin grid and the pins whose device is
 /// currently absent, and BOTH are populated by
 /// <see cref="SettingsDraft.SetAvailableDevices"/>. So a window that skips that call saves a
-/// settings file with every pin gone, and it looks exactly like a Save that worked. The Mac
-/// window has no pin grid yet (slice 9 owns device parity), which makes the call one made
-/// purely for correctness, and therefore the one most easily dropped as dead code.
+/// settings file with every pin gone, and it looks exactly like a Save that worked.
 /// </summary>
 internal static class SettingsSeed
 {
@@ -42,8 +40,8 @@ internal static class SettingsSeed
             // a wrong host or a rejected token, and because an empty list is SAFE here rather
             // than merely tolerable: every saved pin then counts as absent, and the draft
             // carries an absent pin forward verbatim. What is lost is the pin grid for this
-            // one opening of the window, which slice 9 will have to say something about when
-            // there is a grid to leave empty.
+            // one opening of the window, which reports the empty case rather than showing a
+            // blank space.
             return [];
         }
     }
