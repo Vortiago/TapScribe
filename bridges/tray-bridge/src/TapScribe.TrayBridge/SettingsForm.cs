@@ -380,13 +380,13 @@ internal sealed class SettingsForm : Form
 
         page.Controls.Add(new Label { Text = "Hangover (ms)", Location = new Point(12, y + 3), AutoSize = true });
         _hangover.Location = new Point(110, y);
-        _hangover.Value = Math.Clamp(_draft.HangoverMs, 0, 5000);
+        _hangover.Value = Math.Clamp(_draft.HangoverMs, 0, SettingsBounds.HangoverMaxMs);
         page.Controls.Add(_hangover);
         y += 32;
 
         page.Controls.Add(new Label { Text = "Pre-roll (ms)", Location = new Point(12, y + 3), AutoSize = true });
         _preRoll.Location = new Point(110, y);
-        _preRoll.Value = Math.Clamp(_draft.PreRollMs, 0, 2000);
+        _preRoll.Value = Math.Clamp(_draft.PreRollMs, 0, SettingsBounds.PreRollMaxMs);
         page.Controls.Add(_preRoll);
 
         return page;

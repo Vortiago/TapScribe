@@ -215,14 +215,16 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             _disposed = true;
         }
 
-        // The last owner of whatever is still registered. Nothing here throws or checks a
-        // status: the seam binds every release path to be throw-free, and there is no caller
-        // left who could act on a failure.
+        // The last owner of whatever is still registered, and nothing here throws: the seam
+        // binds every release path to be throw-free and no caller is left to act on a failure.
+        // The destroy's status is still read, for the reason DestroyIoProc gives: a pin freed
+        // behind a registration CoreAudio still holds is a process-level fault, where keeping
+        // it costs one leaked pin.
         foreach (IoProc ioProc in Drain(_ioProcs))
         {
             AudioDeviceStop(ioProc.DeviceId, ioProc.ProcId);
-            AudioDeviceDestroyIOProcID(ioProc.DeviceId, ioProc.ProcId);
-            ioProc.Unpin();
+            if (AudioDeviceDestroyIOProcID(ioProc.DeviceId, ioProc.ProcId) == NoError)
+                ioProc.Unpin();
         }
 
         // Each Dispose removes the registration from the list, so the copy is what makes the
@@ -509,8 +511,8 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             // Not thrown (the seam binds a release not to throw) but not ignored either, for
             // the reason DestroyIoProc gives: the pin is this listener's client data, so
             // freeing it while CoreAudio still holds the registration hands the next
-            // notification a dangling GCHandle. Left listed and pinned instead, so the HAL's
-            // own Dispose gets one more attempt.
+            // notification a dangling GCHandle. Left listed and pinned instead, so HAL.Dispose
+            // retries it once; a pin that also fails there stays allocated.
             if (status != NoError)
                 return;
 
