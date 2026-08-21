@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.MacOS.Tests;
 
@@ -121,6 +122,70 @@ public class CoreAudioUpstreamContractTests
         {
             hal.DestroyProcessTap(first);
         }
+    }
+
+    [RequiresMacOS("walk the running Mac's device tree")]
+    public void ListDevices_OnTheRunningMac_CompletesAndAnswersWellFormedRows()
+    {
+        // Symbol resolution says the property walk EXISTS; this says it works. The walk is two
+        // size-negotiated reads per device plus an unsafe AudioBufferList traversal with a
+        // clamp, none of which any other test reaches: everything above the facade runs on the
+        // fake. It needs no grant, so it runs unattended.
+        //
+        // Deliberately does NOT assert "found some": a machine may have no audio device at
+        // all, and failing for that would be a fact about the box. What each machine buys:
+        // the system-object walk and the two default-device reads always; the per-device
+        // string, channel-count and mute-probe reads for every row present; the stream-format
+        // read only where a CAPTURE endpoint exists, since it asks the input scope. A
+        // render-only box (a Mac mini with speakers and no mic, and most runners) therefore
+        // leaves that last one unexercised.
+        if (!OperatingSystem.IsMacOS())
+            return;   // unreachable: [RequiresMacOS] skips first. Here for CA1416 only.
+
+        using var hal = new CoreAudioHal();
+        IReadOnlyList<CoreAudioDevice> devices = hal.ListDevices();
+
+        Assert.All(devices, device =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(device.Uid), "a device came back with no UID");
+            Assert.NotEqual(0u, device.ObjectId);
+            // Only the capture scope: ReadStreamFormat asks the INPUT scope, which a
+            // render-only endpoint has no stream in.
+            if (device.Flow == DeviceFlow.Capture)
+            {
+                CoreAudioStreamFormat format = hal.ReadStreamFormat(device.ObjectId);
+                Assert.True(format.SampleRate > 0, $"{device.Name} reported a zero sample rate");
+                Assert.True(format.ChannelsPerFrame > 0, $"{device.Name} reported no channels");
+            }
+
+            // Tri-state on purpose: null is "the device has no mute property", which is a
+            // normal answer and the reason the seam returns bool? at all.
+            hal.TryReadMute(device.ObjectId);
+        });
+    }
+
+    [RequiresMacOS("register a real Core Audio property listener")]
+    public void APropertyListener_RegistersAndReleases_LeavingItsPinFreed()
+    {
+        // The other native path with a managed object behind it: the listener's GCHandle is
+        // what CoreAudio's client data points at, and the release only frees it when the
+        // remove succeeded. Nothing else calls add or remove for real, so a mistake in the
+        // trampoline wiring or in the release order surfaces on an operator's Mac.
+        //
+        // The system object, and the default-output selector: it always exists, needs no
+        // device present and needs no grant. Covers the SUCCESS path only. The refused-remove
+        // branch needs CoreAudio to reject a remove, which cannot be provoked here.
+        if (!OperatingSystem.IsMacOS())
+            return;   // unreachable: [RequiresMacOS] skips first. Here for CA1416 only.
+
+        using var hal = new CoreAudioHal();
+        IDisposable registration = hal.AddPropertyListener(
+            CoreAudioObject.System, CoreAudioPropertyKind.DefaultOutputDevice, () => { });
+
+        registration.Dispose();
+        // Idempotent: both captures reach a release twice on a teardown that overlaps a
+        // rebind, and the second must be a no-op rather than a second remove.
+        registration.Dispose();
     }
 
     [Fact]

@@ -593,6 +593,41 @@ jobs:
           fi
           echo "OK: a quarantined unsigned .pkg installs an unquarantined bundle."
 
+      # Nothing else runs the shell. The AppKit half carries no unit tests by
+      # design (it cannot: the bindings fault under the VSTest host), so a
+      # delegate or a status item that throws on launch passes every gate above:
+      # they compile it, package it and install it without starting it once.
+      #
+      # The INSTALLED bundle, because that is what an operator double-clicks:
+      # ad-hoc signed, written by `installer`, running from /Applications.
+      #
+      # HOME is redirected for a reason, not for tidiness: a Keychain call that
+      # wants to prompt BLOCKS instead of failing, and a fresh HOME has no
+      # stored token, so the read answers errSecItemNotFound and returns.
+      #
+      # If this ever fails for a reason that is about the runner rather than the
+      # code (no window server for an LSUIElement app, say), delete it. A launch
+      # gate that has to be retried is worse than none.
+      - name: Prove the installed app launches
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          bin=/Applications/TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS
+          HOME=$(mktemp -d) "$bin" > launch.log 2>&1 &
+          pid=$!
+          # A crash on launch is immediate, so this is a grace period rather than
+          # a race: past the delegate, the status item and the first settings load.
+          sleep 10
+          if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            echo "FAIL: the app exited $status within 10s of launching."
+            cat launch.log
+            exit 1
+          fi
+          kill "$pid"
+          echo "OK: the installed bundle launched and stayed up."
+
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
   # dependency. Building only the test project — which references the core and

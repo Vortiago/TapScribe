@@ -8,10 +8,10 @@ namespace TapScribe.TrayBridge;
 /// Paints Core's <see cref="SummaryLayout"/> runs into a <see cref="RichTextBox"/>.
 ///
 /// Everything this used to decide now lives in Core, where the Mac shell reads the same
-/// answers and a test can reach them: a RichTextBox cannot be constructed in the test suite,
-/// so the separator rule and the heading ramp shipped uncovered while they were here. What is
-/// left is the one genuinely WinForms part, the "move the caret to the end, set the selection
-/// font, AppendText" pattern that RichTextBox requires for mixed formatting.
+/// answers: the separator rule, the heading ramp and the list markers were shell-local and so
+/// were written twice. What is left is the one genuinely WinForms part, the "move the caret to
+/// the end, set the selection font, AppendText" pattern that RichTextBox requires for mixed
+/// formatting. <c>SummaryRichTextTests</c> covers the mapping over an STA-built box.
 ///
 /// A plain static class rather than a control subclass: nothing here holds state beyond the
 /// font cache, and the caller already owns the box.
