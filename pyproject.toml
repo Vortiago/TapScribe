@@ -190,7 +190,7 @@ moonshine-mlx = [
     # Moonshine port landed around v0.4.1 and is young/drift-prone (same
     # library this repo already uses for Canary). Bump the cap deliberately
     # after auditing the upstream changelog.
-    "mlx-audio>=0.4.1,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-audio>=0.4.1,<0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 moonshine-cpu = [
     # `useful-moonshine-onnx` (top-level module `moonshine_onnx`) — the
