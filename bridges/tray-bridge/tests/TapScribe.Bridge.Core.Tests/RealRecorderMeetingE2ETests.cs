@@ -164,16 +164,13 @@ public class RealRecorderMeetingE2ETests
     /// <summary>
     /// The same meeting, through <see cref="BridgeRuntime"/> instead of around it.
     ///
-    /// The test above wires the Core clients by hand, which is what a shell does NOT do: both
-    /// shells hand every decision to the runtime and implement <see cref="ITrayView"/>. So the
-    /// class an operator's Start and End actually go through had never met a real Recorder,
-    /// only <see cref="FakeRecorder"/>. What that leaves unexercised is the runtime's own
-    /// sequencing against a server that takes real time to answer: the mint, the two pipelines
-    /// opened from resolved selections, the drain-then-trigger on End, the poll to Done, the
-    /// window it renders into, and the reset to idle with a history entry behind it.
+    /// The test above wires the Core clients by hand; a shell does not. Both hand every decision
+    /// to the runtime, so the class an operator's Start and End go through had met only
+    /// <see cref="FakeRecorder"/>. What that left unexercised is its sequencing against a server
+    /// that takes real time to answer.
     ///
-    /// Platform-neutral by construction: capture is <see cref="FakeAudioCapture"/> at the same
-    /// seam CoreAudio and WASAPI fill, so this covers the Mac and the Windows shell at once.
+    /// Platform-neutral: capture is <see cref="FakeAudioCapture"/> at the seam CoreAudio and
+    /// WASAPI fill, so this covers both shells.
     /// </summary>
     [RequiresPythonAsr]
     public async Task Runtime_AMeetingAgainstTheRealRecorder_PublishesItsSummaryAndReturnsToIdle()
@@ -190,10 +187,8 @@ public class RealRecorderMeetingE2ETests
         Assert.True(maybeRec is not null, "the Python recorder failed to start though faster-whisper is importable");
         RealRecorder rec = maybeRec!;
 
-        // The gate the test above argues for, as the operator's own setting: a sensitive open
-        // threshold and a hangover longer than a pause within a turn. Spelled per device rather
-        // than left to DefaultForFlow, because a gate that chops fixture speech into fragments
-        // would fail this test for a reason that is not what it is about.
+        // The gate the test above argues for, as the operator's own setting. Spelled out rather
+        // than left to DefaultForFlow, which would fail this test for a reason it is not about.
         var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 3000, PreRollMs: 0);
         using var harness = new RuntimeHarness
         {
@@ -214,9 +209,8 @@ public class RealRecorderMeetingE2ETests
             },
             Budgets = new RuntimeBudgets
             {
-                // The shipped interval, not the harness's 10 ms: this polls a real pipeline for
-                // minutes, and a Recorder answering a status request every 10 ms is load the
-                // meeting has to compete with.
+                // Not the harness's 10 ms: a Recorder answering a status request that often is
+                // load this meeting competes with.
                 PollInterval = TimeSpan.FromMilliseconds(500),
                 StartSettleTimeout = TimeSpan.FromSeconds(30),
                 QuitTeardownCap = TimeSpan.FromSeconds(30),
@@ -250,8 +244,8 @@ public class RealRecorderMeetingE2ETests
             $"pipeline did not reach Done: {shown.Phase} / {shown.FailureReason}");
         Assert.False(string.IsNullOrWhiteSpace(shown.SummaryText), "the window was shown without a summary");
 
-        // Both speakers reached the same detached session, which is the whole point of a tray
-        // meeting: the far side is attributed, not mixed into the operator's track.
+        // Both speakers reached one detached session: the far side is attributed, not mixed
+        // into the operator's track.
         string sessionDir = Path.Join(rec.BaseDir, "recordings", session);
         using JsonDocument doc = JsonDocument.Parse(
             File.ReadAllText(Path.Join(sessionDir, "session-transcript.json")));
@@ -262,8 +256,7 @@ public class RealRecorderMeetingE2ETests
             .ToHashSet(StringComparer.Ordinal);
         Assert.True(speakers.Count >= 2, $"expected >=2 speakers, got [{string.Join(", ", speakers)}]");
 
-        // And the tray came back: Start offered again, End not, with the meeting in the history
-        // the Past-meetings submenu reads.
+        // And the tray came back, with the meeting in the history Past-meetings reads.
         Assert.True(harness.View.CanStart, "the tray never offered Start again");
         Assert.False(harness.View.CanEnd, "the tray still offers End after the meeting finished");
         MeetingRecord remembered = Assert.Single(harness.HistoryStore.Load().Meetings);

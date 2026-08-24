@@ -7258,13 +7258,9 @@ async def test_next_waveform_click_seeks_and_draws_a_playhead(running_recorder: 
             # The hero canvas draws once the lazy peaks land.
             canvas = page.locator('[data-slot="canvas"]')
             await canvas.wait_for(state="visible", timeout=10000)
-            # Visible is NOT ready: the canvas is mounted before the lazy peaks
-            # resolve, and `onSeek` returns early while the component holds no
-            # peaks or no duration (waveform.js), so a click that beats the body
-            # is silently a no-op with nothing to retry it. The mm:ss axis is
-            # rendered by `showWaveform` and cleared by `showMessage`, so its
-            # ticks are exactly the "the component has a duration" signal the
-            # seek needs.
+            # Visible is not ready: `onSeek` no-ops until `showWaveform` has run
+            # (waveform.js), and a click that beats it is lost with nothing to
+            # retry it. The mm:ss axis is that render's output, so it is the signal.
             await page.wait_for_function(
                 """() => {
                     const axis = document.querySelector('[data-slot="axis"]');
