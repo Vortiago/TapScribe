@@ -448,19 +448,19 @@ jobs:
       - name: Test the Windows tray shell
         run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
 
-      - name: Build the Windows tray shell
-        run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
-
       # The macOS job proves its .pkg installs and that the installed app launches. This
       # is that gate for Windows, and on the same thing an operator downloads: the
-      # single-file self-contained exe, round-tripped through the zip release.yml ships.
-      # A build says the code compiles; a tray that dies on its first WinForms call is a
-      # green CI and a broken release, and nothing between the two says so.
+      # single-file self-contained exe. A build says the code compiles; a tray that dies
+      # on its first WinForms call is a green CI and a broken release.
+      #
+      # This publish also IS the build gate for the shell, which is why no plain build
+      # step precedes it: if the launch half is ever deleted (see below), leave a
+      # `dotnet build` of TapScribe.TrayBridge.csproj behind.
       #
       # The publish flags are release.yml's, minus the -p:Version it stamps from the tag.
-      # A fresh APPDATA so the run cannot read the runner's settings and so the FIRST
-      # launch is what is exercised; nothing reaches a Recorder until Start meeting, so
-      # no network and no token are involved.
+      # Copied out of its build tree rather than zipped: the property under test is that
+      # the exe runs on its own, and release.yml owns the zipping. A fresh APPDATA so the
+      # FIRST launch is what runs; nothing reaches a Recorder until Start meeting.
       #
       # If this ever fails for a reason that is about the runner rather than the code (a
       # NotifyIcon in a session with no desktop, say), delete it. A launch gate that has
@@ -472,15 +472,14 @@ jobs:
             -c Release -r win-x64 --self-contained `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           $published = "bridges/tray-bridge/src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
-          Compress-Archive -Path $published -DestinationPath tray.zip -Force
-          $unpacked = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-launch")).FullName
-          Expand-Archive -Path tray.zip -DestinationPath $unpacked -Force
+          $alone = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-launch")).FullName
+          Copy-Item $published $alone
           $env:APPDATA = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-appdata")).FullName
-          $tray = Start-Process -PassThru -FilePath (Join-Path $unpacked "TapScribe.TrayBridge.exe")
-          # A crash on launch is immediate, so this is a grace period rather than a race:
-          # past the tray icon, the menu and the first settings load.
-          Start-Sleep -Seconds 10
-          if ($tray.HasExited) {
+          $tray = Start-Process -PassThru -FilePath (Join-Path $alone "TapScribe.TrayBridge.exe")
+          # Ten seconds is the ceiling, not the wait: a crash on launch returns here at
+          # once, and the grace period only has to clear the tray icon, the menu and the
+          # first settings load.
+          if ($tray.WaitForExit(10000)) {
             Write-Host "FAIL: the exe exited $($tray.ExitCode) within 10s of launching."
             exit 1
           }

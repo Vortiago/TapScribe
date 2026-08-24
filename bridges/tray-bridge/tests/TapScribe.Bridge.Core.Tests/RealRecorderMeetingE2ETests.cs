@@ -13,9 +13,13 @@ namespace TapScribe.Bridge.Core.Tests;
 /// So the cross-platform CI job, which has no Python deps, skips this cleanly.</summary>
 internal sealed class RequiresPythonAsrAttribute : FactAttribute
 {
+    // Once per process, not once per decorated test: the probe spawns a Python interpreter, and
+    // every job that BUILDS this project pays it at discovery, including the two that skip.
+    private static readonly Lazy<bool> Importable = new(FasterWhisperImportable);
+
     public RequiresPythonAsrAttribute()
     {
-        if (!FasterWhisperImportable())
+        if (!Importable.Value)
             Skip = "faster-whisper not importable — the Python recorder stack isn't present here";
     }
 
