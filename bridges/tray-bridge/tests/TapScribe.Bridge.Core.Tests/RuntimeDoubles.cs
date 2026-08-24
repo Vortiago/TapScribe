@@ -280,6 +280,12 @@ internal sealed class RuntimeHarness : IDisposable
     /// </summary>
     public FakeRecorder? Recorder { get; init; }
 
+    /// <summary>The same real-ControlClient mint, against a Recorder the harness did not start:
+    /// the Python one <see cref="RealRecorderMeetingE2ETests"/> stands up. <see cref="Recorder"/>
+    /// is only ever read as "is something listening at the settings' port", and a real Recorder
+    /// is not a <see cref="FakeRecorder"/> to hand over.</summary>
+    public bool LiveRecorder { get; init; }
+
     /// <summary>The settings that reach <see cref="Recorder"/>: its port and the token it was
     /// started with.</summary>
     public static BridgeSettings RecorderSettings(FakeRecorder recorder)
@@ -395,7 +401,7 @@ internal sealed class RuntimeHarness : IDisposable
             _mintReached.TrySetResult();
             if (MintError is not null)
                 throw MintError;
-            if (Recorder is not null)
+            if (Recorder is not null || LiveRecorder)
             {
                 using var control = new ControlClient(
                     settings.Host, settings.Port, settings.Tls, settings.Token, _http);

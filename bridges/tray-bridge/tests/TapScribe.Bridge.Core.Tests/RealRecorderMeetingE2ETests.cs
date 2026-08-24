@@ -161,6 +161,115 @@ public class RealRecorderMeetingE2ETests
         Assert.True(File.Exists(Path.Join(sessionDir, "session-summary.json")), "no persisted summary");
     }
 
+    /// <summary>
+    /// The same meeting, through <see cref="BridgeRuntime"/> instead of around it.
+    ///
+    /// The test above wires the Core clients by hand, which is what a shell does NOT do: both
+    /// shells hand every decision to the runtime and implement <see cref="ITrayView"/>. So the
+    /// class an operator's Start and End actually go through had never met a real Recorder,
+    /// only <see cref="FakeRecorder"/>. What that leaves unexercised is the runtime's own
+    /// sequencing against a server that takes real time to answer: the mint, the two pipelines
+    /// opened from resolved selections, the drain-then-trigger on End, the poll to Done, the
+    /// window it renders into, and the reset to idle with a history entry behind it.
+    ///
+    /// Platform-neutral by construction: capture is <see cref="FakeAudioCapture"/> at the same
+    /// seam CoreAudio and WASAPI fill, so this covers the Mac and the Windows shell at once.
+    /// </summary>
+    [RequiresPythonAsr]
+    public async Task Runtime_AMeetingAgainstTheRealRecorder_PublishesItsSummaryAndReturnsToIdle()
+    {
+        string repoRoot = FindRepoRoot();
+        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
+        string norwegianWav = Path.Join(audio, "marlene-nb.wav");
+        string englishWav = Path.Join(audio, "armstrong-en.wav");
+        Assert.True(
+            File.Exists(norwegianWav) && File.Exists(englishWav),
+            "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
+
+        await using RealRecorder? maybeRec = await RealRecorder.TryStartAsync(repoRoot, batchModel: "base");
+        Assert.True(maybeRec is not null, "the Python recorder failed to start though faster-whisper is importable");
+        RealRecorder rec = maybeRec!;
+
+        // The gate the test above argues for, as the operator's own setting: a sensitive open
+        // threshold and a hangover longer than a pause within a turn. Spelled per device rather
+        // than left to DefaultForFlow, because a gate that chops fixture speech into fragments
+        // would fail this test for a reason that is not what it is about.
+        var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 3000, PreRollMs: 0);
+        using var harness = new RuntimeHarness
+        {
+            LiveRecorder = true,
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = rec.Port,
+                // --no-auth, so the tap token is not the subject here.
+                Token = "",
+                Identity = "Nora",
+                Name = "Nora",
+                Devices =
+                [
+                    new DeviceSelection.FollowDefault(DeviceFlow.Capture, "Nora", "Nora", gate),
+                    new DeviceSelection.FollowDefault(DeviceFlow.Render, "Ed", "Ed", gate),
+                ],
+            },
+            Budgets = new RuntimeBudgets
+            {
+                // The shipped interval, not the harness's 10 ms: this polls a real pipeline for
+                // minutes, and a Recorder answering a status request every 10 ms is load the
+                // meeting has to compete with.
+                PollInterval = TimeSpan.FromMilliseconds(500),
+                StartSettleTimeout = TimeSpan.FromSeconds(30),
+                QuitTeardownCap = TimeSpan.FromSeconds(30),
+            },
+        };
+        FakeAudioCapture nora = harness.AddDevice("mic", DeviceFlow.Capture);
+        FakeAudioCapture ed = harness.AddDevice("out", DeviceFlow.Render);
+
+        var runtime = new BridgeRuntime(
+            harness.View, harness.Dispatcher, harness.Dependencies, harness.Settings, harness.Budgets);
+
+        // Start meeting.
+        runtime.Start();
+        await runtime.StartTask!.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.True(harness.View.CanEnd, "the tray never offered End, so no meeting was published");
+        string session = harness.SessionIdInUse!;
+
+        await Task.WhenAll(FeedAsync(nora, ReadWavPcm(norwegianWav)), FeedAsync(ed, ReadWavPcm(englishWav)));
+        await Task.Delay(TimeSpan.FromSeconds(1)); // let the last frames drain to the Recorder
+
+        // End meeting: the runtime drains both taps, triggers the real pipeline and polls it.
+        runtime.End();
+        await runtime.EndTask!.WaitAsync(PipelineBudget);
+
+        // The runtime opened ONE window and rendered the finished pipeline into it.
+        FakeMeetingWindow window = Assert.Single(harness.View.Windows);
+        PipelineView? shown = window.Last;
+        Assert.True(shown is not null, "the meeting window was opened but nothing was rendered into it");
+        Assert.True(
+            shown!.Phase == PipelinePhase.Done,
+            $"pipeline did not reach Done: {shown.Phase} / {shown.FailureReason}");
+        Assert.False(string.IsNullOrWhiteSpace(shown.SummaryText), "the window was shown without a summary");
+
+        // Both speakers reached the same detached session, which is the whole point of a tray
+        // meeting: the far side is attributed, not mixed into the operator's track.
+        string sessionDir = Path.Join(rec.BaseDir, "recordings", session);
+        using JsonDocument doc = JsonDocument.Parse(
+            File.ReadAllText(Path.Join(sessionDir, "session-transcript.json")));
+        HashSet<string> speakers = doc.RootElement.GetProperty("segments").EnumerateArray()
+            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.True(speakers.Count >= 2, $"expected >=2 speakers, got [{string.Join(", ", speakers)}]");
+
+        // And the tray came back: Start offered again, End not, with the meeting in the history
+        // the Past-meetings submenu reads.
+        Assert.True(harness.View.CanStart, "the tray never offered Start again");
+        Assert.False(harness.View.CanEnd, "the tray still offers End after the meeting finished");
+        MeetingRecord remembered = Assert.Single(harness.HistoryStore.Load().Meetings);
+        Assert.Equal(session, remembered.SessionId);
+    }
+
     private static TapConnectionOptions Tap(int port, string identity, string session) => new()
     {
         Host = "127.0.0.1",

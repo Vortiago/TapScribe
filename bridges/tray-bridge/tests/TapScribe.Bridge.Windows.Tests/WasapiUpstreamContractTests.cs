@@ -1,6 +1,7 @@
 using System.Reflection;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.Windows.Tests;
 
@@ -95,5 +96,60 @@ public class WasapiUpstreamContractTests
         Assert.True(Enum.IsDefined(DataFlow.Render));
         Assert.True(Enum.IsDefined(DeviceState.Active));
         Assert.True(Enum.IsDefined(Role.Multimedia));
+    }
+
+    [RequiresWindows("walk the real WASAPI endpoint tree")]
+    public void List_OnTheRunningWindows_CompletesAndAnswersWellFormedRows()
+    {
+        // Reflection above says the symbols EXIST; this says the calls work. Everything else in
+        // this project asserts shape, and everything above the seam runs against a fake, so the
+        // enumerator's actual walk - two default-endpoint probes plus an EnumerateAudioEndPoints
+        // per flow, each row read for ID and FriendlyName - is otherwise reached for the first
+        // time on an operator's machine. The macOS twin
+        // (CoreAudioUpstreamContractTests.ListDevices_OnTheRunningMac_...) is this test.
+        //
+        // Deliberately does NOT assert "found some": a CI runner has no audio endpoint, and
+        // failing for that would be a fact about the box rather than about the code. What a
+        // runner buys either way is the two default probes and both enumerations; a box WITH
+        // endpoints additionally buys the per-row reads and the mute probe below.
+        using var enumerator = new WasapiDeviceEnumerator();
+        IReadOnlyList<CaptureDevice> devices = enumerator.List();
+
+        Assert.All(devices, device =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(device.Id), "an endpoint came back with no id");
+            Assert.False(string.IsNullOrWhiteSpace(device.Name), $"{device.Id} came back with no name");
+            Assert.True(Enum.IsDefined(device.Flow));
+        });
+
+        // At most one default per flow. The enumerator reads the default id once per flow and
+        // stamps rows against it, so two defaults would mean the stamp is comparing the wrong
+        // thing, and CaptureDevice.DefaultFor would then pick whichever came back first.
+        Assert.All(
+            devices.GroupBy(d => d.Flow),
+            flow => Assert.True(
+                flow.Count(d => d.IsDefault) <= 1,
+                $"{flow.Key} reported {flow.Count(d => d.IsDefault)} default endpoints"));
+    }
+
+    [RequiresWindows("read a real endpoint's OS mute state")]
+    public void AnEndpointsMute_ReadsThroughAudioEndpointVolume_OrSaysTheEndpointHasNone()
+    {
+        // The other native path with a managed object behind it: WasapiCaptureBase caches an
+        // AudioEndpointVolume per capture and subscribes OnVolumeNotification to it, and a mute
+        // it cannot read is a gate that hard-closes on a device recording perfectly well. The
+        // reflection test above proves the property exists; only this reaches the COM call.
+        //
+        // No-ops on a runner with no endpoints, which is the honest outcome there.
+        using var mm = new MMDeviceEnumerator();
+        foreach (MMDevice device in mm.EnumerateAudioEndPoints(DataFlow.All, DeviceState.Active))
+        {
+            using (device)
+            {
+                // The value is whatever the operator's mixer says; that it can be READ is the
+                // claim, and a throw here is the failure.
+                _ = device.AudioEndpointVolume.Mute;
+            }
+        }
     }
 }

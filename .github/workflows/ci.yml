@@ -451,6 +451,42 @@ jobs:
       - name: Build the Windows tray shell
         run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
 
+      # The macOS job proves its .pkg installs and that the installed app launches. This
+      # is that gate for Windows, and on the same thing an operator downloads: the
+      # single-file self-contained exe, round-tripped through the zip release.yml ships.
+      # A build says the code compiles; a tray that dies on its first WinForms call is a
+      # green CI and a broken release, and nothing between the two says so.
+      #
+      # The publish flags are release.yml's, minus the -p:Version it stamps from the tag.
+      # A fresh APPDATA so the run cannot read the runner's settings and so the FIRST
+      # launch is what is exercised; nothing reaches a Recorder until Start meeting, so
+      # no network and no token are involved.
+      #
+      # If this ever fails for a reason that is about the runner rather than the code (a
+      # NotifyIcon in a session with no desktop, say), delete it. A launch gate that has
+      # to be retried is worse than none.
+      - name: Prove the published exe launches
+        timeout-minutes: 5
+        run: |
+          dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge `
+            -c Release -r win-x64 --self-contained `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          $published = "bridges/tray-bridge/src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
+          Compress-Archive -Path $published -DestinationPath tray.zip -Force
+          $unpacked = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-launch")).FullName
+          Expand-Archive -Path tray.zip -DestinationPath $unpacked -Force
+          $env:APPDATA = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-appdata")).FullName
+          $tray = Start-Process -PassThru -FilePath (Join-Path $unpacked "TapScribe.TrayBridge.exe")
+          # A crash on launch is immediate, so this is a grace period rather than a race:
+          # past the tray icon, the menu and the first settings load.
+          Start-Sleep -Seconds 10
+          if ($tray.HasExited) {
+            Write-Host "FAIL: the exe exited $($tray.ExitCode) within 10s of launching."
+            exit 1
+          }
+          Stop-Process -Id $tray.Id -Force
+          Write-Host "OK: the published exe launched and stayed up."
+
   # The compile gate for the two net10.0-macos projects, the shell and its tests
   # (ADR-0020): an app bundle needs Xcode and the macos workload, neither of
   # which the windows or ubuntu runners have, so a break in it is invisible
