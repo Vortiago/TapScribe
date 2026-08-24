@@ -69,16 +69,8 @@ public class RealRecorderMeetingE2ETests
     public async Task MultiPersonMultiLanguageMeeting_RealPipeline_ProducesAMultilingualTranscriptAndSummary()
     {
         string repoRoot = FindRepoRoot();
-        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
-        string norwegianWav = Path.Join(audio, "marlene-nb.wav");
-        string englishWav = Path.Join(audio, "armstrong-en.wav");
-        Assert.True(
-            File.Exists(norwegianWav) && File.Exists(englishWav),
-            "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
-
-        await using RealRecorder? maybeRec = await RealRecorder.TryStartAsync(repoRoot, batchModel: "base");
-        Assert.True(maybeRec is not null, "the Python recorder failed to start though faster-whisper is importable");
-        RealRecorder rec = maybeRec!;
+        (string audio, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
 
         using var http = new HttpClient();
         using var control = new ControlClient("127.0.0.1", rec.Port, tls: false, token: "", http);
@@ -176,16 +168,8 @@ public class RealRecorderMeetingE2ETests
     public async Task Runtime_AMeetingAgainstTheRealRecorder_PublishesItsSummaryAndReturnsToIdle()
     {
         string repoRoot = FindRepoRoot();
-        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
-        string norwegianWav = Path.Join(audio, "marlene-nb.wav");
-        string englishWav = Path.Join(audio, "armstrong-en.wav");
-        Assert.True(
-            File.Exists(norwegianWav) && File.Exists(englishWav),
-            "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
-
-        await using RealRecorder? maybeRec = await RealRecorder.TryStartAsync(repoRoot, batchModel: "base");
-        Assert.True(maybeRec is not null, "the Python recorder failed to start though faster-whisper is importable");
-        RealRecorder rec = maybeRec!;
+        (string audio, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
 
         // The gate the test above argues for, as the operator's own setting. Spelled out rather
         // than left to DefaultForFlow, which would fail this test for a reason it is not about.
@@ -261,6 +245,27 @@ public class RealRecorderMeetingE2ETests
         Assert.False(harness.View.CanEnd, "the tray still offers End after the meeting finished");
         MeetingRecord remembered = Assert.Single(harness.HistoryStore.Load().Meetings);
         Assert.Equal(session, remembered.SessionId);
+    }
+
+    // The two speakers' fixtures, and the check that they are on disk.
+    private static (string Dir, string Norwegian, string English) SpeechFixtures(string repoRoot)
+    {
+        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
+        string norwegian = Path.Join(audio, "marlene-nb.wav");
+        string english = Path.Join(audio, "armstrong-en.wav");
+        Assert.True(
+            File.Exists(norwegian) && File.Exists(english),
+            "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
+        return (audio, norwegian, english);
+    }
+
+    // A null here is a real FAILURE, not a skip: RequiresPythonAsr already decided the ASR stack
+    // is present, so a recorder that will not start is a healthy stack that could not boot one.
+    private static async Task<RealRecorder> StartRealRecorderAsync(string repoRoot)
+    {
+        RealRecorder? rec = await RealRecorder.TryStartAsync(repoRoot, batchModel: "base");
+        Assert.True(rec is not null, "the Python recorder failed to start though faster-whisper is importable");
+        return rec!;
     }
 
     private static TapConnectionOptions Tap(int port, string identity, string session) => new()

@@ -7255,19 +7255,12 @@ async def test_next_waveform_click_seeks_and_draws_a_playhead(running_recorder: 
             await page.goto(base + "/#recordings", wait_until="domcontentloaded")
             await _focus_session(page, sid, stage="recordings")
 
-            # The hero canvas draws once the lazy peaks land.
-            canvas = page.locator('[data-slot="canvas"]')
+            # Mounted is not seekable: `onSeek` no-ops until the component holds
+            # peaks and a duration, and a click that beats them is lost with
+            # nothing to retry it. `data-duration-s` is that precondition,
+            # published by the component for exactly this (waveform.js).
+            canvas = page.locator('[data-slot="canvas"][data-duration-s]')
             await canvas.wait_for(state="visible", timeout=10000)
-            # Visible is not ready: `onSeek` no-ops until `showWaveform` has run
-            # (waveform.js), and a click that beats it is lost with nothing to
-            # retry it. The mm:ss axis is that render's output, so it is the signal.
-            await page.wait_for_function(
-                """() => {
-                    const axis = document.querySelector('[data-slot="axis"]');
-                    return axis && axis.children.length > 0;
-                }""",
-                timeout=10000,
-            )
             box = await canvas.bounding_box()
             assert box and box["width"] > 40
 
