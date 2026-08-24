@@ -34,9 +34,8 @@ internal sealed class MacOSAudioCapture : IAudioCapture
 
 
     // Everything behind DataAvailable runs off CoreAudio's realtime IO thread, which has a
-    // buffer-period deadline this class may not spend. CaptureHandOff owns that rule for
-    // every capture in this backend; see it for why the ring, the pump and the drop are
-    // shaped the way they are.
+    // buffer-period deadline this class may not spend. CaptureHandOff owns that rule for every
+    // capture in this backend.
     private readonly CaptureHandOff _handOff;
 
     public AudioFormat Format { get; }
@@ -70,9 +69,8 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         _handOff = new CaptureHandOff(
             $"tapscribe-capture-{deviceId}", audio => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(audio)));
         _run = new IoProcRun(hal, _handOff);
-        // Classify FIRST: an unreadable layout throws, and doing it before anything is
-        // subscribed means the throw leaves this instance owning nothing to release. Same
-        // ordering, for the same reason, as the Windows sibling's ctor.
+        // Classify FIRST: an unreadable layout throws, and doing it before anything is subscribed
+        // means the throw leaves this instance owning nothing to release.
         Format = CoreAudioFormat.Classify(hal.ReadStreamFormat(deviceId));
 
         _lifeListener = hal.AddPropertyListener(deviceId, CoreAudioPropertyKind.DeviceIsAlive, OnDeviceGone);
@@ -88,34 +86,29 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         }
         catch
         {
-            // Everything after the first subscription runs inside this, because from there on
-            // a throw would leave the ctor owning something. Nobody will ever hold this
-            // instance, so nobody can Dispose it, and a listener left behind is a native
-            // registration plus the GCHandle rooting it for the process lifetime - still
-            // firing into a half-constructed capture. The seeding read is the shape that
-            // actually happens: the mute property is there, and reading it is refused.
+            // Everything after the first subscription runs inside this: from there on a throw
+            // leaves the ctor owning something, and nobody can Dispose an instance nobody holds,
+            // so a listener left behind is a native registration plus the GCHandle rooting it for
+            // the process lifetime, still firing into a half-constructed capture.
             _muteListener?.Dispose();
             _lifeListener.Dispose();
             throw;
         }
     }
 
-    // Fires on a CoreAudio notification thread when the endpoint leaves: unplugged, disabled,
-    // or an interface that went to sleep. CoreAudio simply stops calling the IOProc, so without
-    // this the meeting records nothing under this speaker for the rest of the call while the
-    // status line still says it is streaming.
+    // Fires on a CoreAudio notification thread when the endpoint leaves: unplugged, disabled, or an
+    // interface asleep. CoreAudio stops calling the IOProc, so without this the meeting records
+    // nothing under this speaker while the status line still says streaming.
     private void OnDeviceGone()
     {
-        // Only while a stream is actually running. The seam says Failed means capture ended
-        // unexpectedly MID-STREAM, and a device that leaves while nothing is capturing has
-        // ended no stream; the next Start fails on its own, which is where that belongs.
+        // Only while a stream is running: Failed means capture ended unexpectedly MID-STREAM, and a
+        // device leaving while nothing captures has ended none. The next Start fails on its own.
         if (!_run.Running)
             return;
 
-        // Deliberately releases nothing: the endpoint is gone, so stopping and destroying
-        // its IOProc is a call CoreAudio will refuse, and the owner's response to this signal
-        // is to tear the pipeline down through Dispose anyway - which is where that release
-        // happens, once, on the thread that owns it.
+        // Releases nothing: the endpoint is gone, so stopping and destroying its IOProc is a call
+        // CoreAudio refuses, and the owner's response to this signal is to tear the pipeline down
+        // through Dispose, which is where that release happens once, on the thread that owns it.
         Failed?.Invoke(this, new CoreAudioException(
             $"the endpoint behind device {_deviceId} was invalidated", CoreAudioStatus.BadDevice));
     }

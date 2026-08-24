@@ -18,10 +18,7 @@ internal static class MenuNotice
     internal const int MaxLength = 120;
 
     /// <summary>Compose the menu line for one notice.</summary>
-    /// <param name="title">The notice's headline, as the runtime named it.</param>
     /// <param name="message">The detail behind it, often empty and often exception text.</param>
-    /// <param name="kind">Whether this is something that went wrong or something that went
-    /// right.</param>
     internal static string Line(string title, string message, NoticeKind kind)
     {
         string detail = Flatten(message);

@@ -17,14 +17,11 @@ internal static class Program
 {
     private static int Main() => Run(MacOSProductVersion.Current(), Console.Error, TrayShell.RunMenuBar);
 
-    /// <summary>The launch decision, with the ambient read, the output stream and the launch
-    /// itself passed in so it can be driven for a macOS this box is not running and without
-    /// AppKit, which cannot be constructed under a test host. Returns the process exit code:
-    /// non-zero refuses the launch, and the reason goes to
-    /// <paramref name="complaints"/>.</summary>
+    /// <summary>The launch decision, with the ambient read, the output stream and the launch itself
+    /// passed in so it can be driven for a macOS this box is not running and without AppKit, which
+    /// cannot be constructed under a test host. Returns the process exit code: non-zero refuses the
+    /// launch.</summary>
     /// <param name="running">This Mac's macOS version, or null when it could not be read.</param>
-    /// <param name="complaints">Where a refusal is written.</param>
-    /// <param name="launch">Starts the menu bar. Never reached on a Mac that was refused.</param>
     internal static int Run(Version? running, TextWriter complaints, Action launch)
     {
         ArgumentNullException.ThrowIfNull(complaints);

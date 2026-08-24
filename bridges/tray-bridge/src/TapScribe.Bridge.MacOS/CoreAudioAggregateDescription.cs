@@ -6,30 +6,26 @@ namespace TapScribe.Bridge.MacOS;
 /// The description CoreAudio is handed to build the private aggregate device that carries one
 /// process tap's audio (#420).
 ///
-/// macOS has no loopback endpoint. System audio is a Core Audio process tap, and a tap is not
-/// a device: it only becomes one an IOProc can run over once it is listed inside an aggregate
-/// device bound to the output endpoint the Mac is actually playing through. That aggregate is
-/// described by a CFDictionary of CFStrings, CFNumbers and nested CFArrays.
+/// macOS has no loopback endpoint. System audio is a process tap, and a tap is not a device: it
+/// becomes one an IOProc can run over only once it is listed inside an aggregate device bound to
+/// the output endpoint the Mac is playing through. That aggregate is described by a CFDictionary of
+/// CFStrings, CFNumbers and nested CFArrays.
 ///
-/// Built here as a property list, which is the same dictionary spelled as text, rather than
-/// assembled CFDictionaryCreate call by call. Two reasons, and both are about this repo's
-/// split rather than about CoreFoundation:
+/// Built here as a property list, the same dictionary spelled as text, rather than assembled
+/// CFDictionaryCreate call by call:
 ///
 /// <list type="bullet">
-/// <item>It is REACHABLE FROM A TEST. Every key here is a four-letter string CoreAudio matches
-/// exactly and ignores silently when it does not: a misspelled "subdevices" produces an
-/// aggregate that comes up carrying no tap, which is a meeting whose far side records as
-/// silence, on a Mac, at the moment an operator starts one. Assembled through the CF calls it
-/// would sit inside <see cref="CoreAudioHal"/>, which by design nothing on any lane executes.</item>
-/// <item>It costs no second copy of the CF-collection scaffolding. Building the nested
-/// dictionaries by hand needs the CFDictionary/CFArray create calls plus the kCFType callback
-/// tables, which is the machinery <c>SecKeychainItems</c> already carries for the Keychain;
-/// the HAL instead parses this with two calls and holds one CF object.</item>
+/// <item>It is REACHABLE FROM A TEST. Every key is a four-letter string CoreAudio matches exactly
+/// and ignores silently otherwise: a misspelled "subdevices" produces an aggregate carrying no tap,
+/// which is a meeting whose far side records as silence. Assembled through the CF calls it would
+/// sit inside <see cref="CoreAudioHal"/>, which by design nothing on any lane executes.</item>
+/// <item>It costs no second copy of the CF-collection scaffolding: no create calls, no kCFType
+/// callback tables. The HAL parses this with two calls and holds one CF object.</item>
 /// </list>
 ///
-/// The value TYPES are as much of the contract as the keys: CoreAudio documents every flag
-/// below as a CFNumber, and a plist <c>&lt;true/&gt;</c> parses to a CFBoolean it does not
-/// read. So the flags are written as integers, and a test pins that they stay that way.
+/// The value TYPES are as much of the contract as the keys: CoreAudio documents every flag below as
+/// a CFNumber, and a plist <c>&lt;true/&gt;</c> parses to a CFBoolean it does not read. So the flags
+/// are written as integers, and a test pins that they stay that way.
 /// </summary>
 public static class CoreAudioAggregateDescription
 {
@@ -75,14 +71,13 @@ public static class CoreAudioAggregateDescription
             + "</dict></plist>";
     }
 
-    /// <summary>What the aggregate calls itself. It is private, so this is never a picker
-    /// label: it is what Audio MIDI Setup and a CoreAudio log show, which is the only place
-    /// anyone reads it, and it wants to say which app to go and quit.</summary>
+    /// <summary>What the aggregate calls itself. It is private, so this is never a picker label:
+    /// it is what Audio MIDI Setup and a CoreAudio log show, and it wants to say which app to
+    /// quit.</summary>
     private const string AggregateName = "TapScribe system audio";
 
-    // CoreAudio's aggregate-description keys, as the header spells them. Each is matched
-    // exactly and ignored silently otherwise, which is why they are named constants with the
-    // header's own symbol beside them rather than literals inside the document.
+    // CoreAudio's aggregate-description keys, as the header spells them. Each is matched exactly
+    // and ignored silently otherwise, hence named constants with the header's symbol beside them.
     private const string NameKey = "name";                  // kAudioAggregateDeviceNameKey
     private const string UidKey = "uid";                    // kAudioAggregateDeviceUIDKey, and
                                                             // kAudioSubDeviceUIDKey / kAudioSubTapUIDKey

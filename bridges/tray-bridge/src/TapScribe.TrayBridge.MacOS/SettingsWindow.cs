@@ -7,31 +7,27 @@ namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
 /// The Settings window: a two-way binding of AppKit controls onto Core's
-/// <see cref="SettingsDraft"/>, which owns every decision about what the edited state MEANS.
-/// The Mac sibling of WinForms' <c>SettingsForm</c>, at parity with it since #421 and laid out
-/// as one scrolling column rather than four tabs: Recorder, the two speaker rows (the
-/// microphone and the system-audio tap) with a live level meter each, the Devices pin grid, the
-/// speech-gate timings and the end-of-meeting behaviour.
+/// <see cref="SettingsDraft"/>, which owns every decision about what the edited state MEANS. The
+/// Mac sibling of WinForms' <c>SettingsForm</c>, at parity with it since #421 and laid out as one
+/// scrolling column rather than four tabs: Recorder, the microphone and system-audio rows with a
+/// live level meter each, the Devices pin grid, the speech-gate timings and the end-of-meeting
+/// behaviour.
 ///
-/// Not modal. A modal run loop would sit on the main queue that every runtime callback is
-/// posted to, so a meeting running behind the window would stop being able to report anything.
-/// Save applies through the runtime and closes; Cancel just closes.
+/// Not modal: a modal run loop would sit on the main queue every runtime callback is posted to, so
+/// a meeting running behind the window could report nothing. Save applies through the runtime and
+/// closes; Cancel just closes.
 ///
-/// Disposable for the reason <see cref="MeetingWindow"/> is: ReleaseWhenClosed is off, so
-/// AppKit frees nothing on close, and every handler below captures <c>this</c> through a
-/// control the window retains. Without a release each Settings… leaves the whole control graph
-/// behind, and the tray runs for days.
+/// Disposable for the reason <see cref="MeetingWindow"/> is: ReleaseWhenClosed is off, so without
+/// a release each Settings… leaves the whole control graph behind, on a tray that runs for days.
+/// </summary>
 /// </summary>
 internal sealed class SettingsWindow : IDisposable
 {
     private const int Width = 480;
 
-    // How tall the window OPENS, which is a taste rather than a budget: the rows live in a
-    // flipped document view inside a scroll view, so the content is as tall as it needs to be
-    // and anything past the viewport scrolls. It used to be a budget, and the comment here used
-    // to say that a new row came with a bump to this number or the last control was framed
-    // below the window and silently not drawn. The pin grid is what made that untenable, since
-    // its row count is a property of the operator's Mac and not of this file.
+    // How tall the window OPENS, which is taste rather than a budget: the rows live in a flipped
+    // document view inside a scroll view, so the content is as tall as it needs to be and
+    // anything past the viewport scrolls.
     private const int Height = 700;
     private const int Padding = 16;
     private const int LabelWidth = 120;
@@ -84,8 +80,7 @@ internal sealed class SettingsWindow : IDisposable
     private nfloat _y = Padding;
 
     // Where NextRow last placed a row, so a second control can join it without restating the
-    // height the first one used. Reconstructing that from the cursor would put the same literal
-    // in two places and misalign a Cancel button the day Save's height changed.
+    // first one's height and misaligning the day that height changes.
     private nfloat _lastRowTop;
     private bool _disposed;
 
@@ -114,9 +109,8 @@ internal sealed class SettingsWindow : IDisposable
         _apply = apply;
         _dispatcher = dispatcher;
         _draft = SettingsSeed.From(current, listDevices);
-        // CaptureDevice.DefaultFor, not a comparison written here: its whole reason to exist is
-        // that the meter samples the endpoint the gate it is tuning will tap, so re-deriving the
-        // rule is how the bar starts describing a different device than the meeting records.
+        // CaptureDevice.DefaultFor, not a comparison written here: the meter must sample the
+        // endpoint the gate it is tuning will tap, and re-deriving that rule is how they drift.
         _micProbe = new MeterProbe(
             openEnumerator, devices => CaptureDevice.DefaultFor(devices, DeviceFlow.Capture));
         _systemProbe = new MeterProbe(
@@ -136,9 +130,8 @@ internal sealed class SettingsWindow : IDisposable
         _window.Center();
 
         // Every row goes into a flipped document view inside a scroll view. Flipped so the
-        // top-down cursor below can place a row without knowing the total height, which is what
-        // lets the pin grid be as long as the operator's Mac requires. The document is given its
-        // real height once the layout is done, at the end of this constructor.
+        // top-down cursor can place a row without knowing the total height, which is what lets the
+        // pin grid be as long as the operator's Mac requires. Its real height is set below.
         var content = new FlippedView { Frame = new CGRect(0, 0, Width, Height) };
         var scroll = new NSScrollView(new CGRect(0, 0, Width, Height))
         {
@@ -158,11 +151,10 @@ internal sealed class SettingsWindow : IDisposable
         _token = Secret(content, "Tap token", _draft.Token);
         _tls = Check(content, "Connect over TLS", _draft.Tls);
         _allowSelfSigned = Check(content, "Accept a self-signed certificate", _draft.AllowSelfSignedCert);
-        // The insecure opt-in only means anything under TLS, and SettingsDraft.ToSettings drops
-        // it when TLS is off. Shown rather than applied silently: an operator who ticks this
-        // over an unticked TLS would otherwise find it unticked again next time they opened
-        // Settings, with nothing having said why. The WinForms sibling greys and force-clears it
-        // the same way (BuildConnectionTab); this is that rule surfaced, not a second enforcer.
+        // The insecure opt-in only means anything under TLS, and SettingsDraft.ToSettings drops it
+        // when TLS is off. Shown rather than applied silently: an operator who ticks it over an
+        // unticked TLS would otherwise find it unticked next time with nothing having said why.
+        // The WinForms sibling greys and force-clears it the same way.
         _tls.Activated += OnTlsToggled;
         ApplyTlsCoupling();
 
@@ -188,10 +180,9 @@ internal sealed class SettingsWindow : IDisposable
         _systemSensitivity.Activated += OnSystemSensitivity;
         (_systemMeterOn, _systemMeter, _systemMeterNote) = MeterRow(content, "Show output level");
         _systemMeterOn.Activated += OnSystemMeterToggled;
-        // The one thing about this row an operator cannot discover by looking at it: the grant
-        // is asked for at the first Start rather than here, so a meeting that records only one
-        // speaker is usually a prompt that was dismissed. Said in the window because the
-        // recovery (System Settings, not this dialog) is somewhere else entirely.
+        // The one thing about this row an operator cannot discover by looking: the grant is asked
+        // for at the first Start, so a meeting that records one speaker is usually a dismissed
+        // prompt. Said here because the recovery is in System Settings, not this dialog.
         Note(
             content,
             "macOS asks for permission the first time a meeting records system audio. If only "
@@ -201,9 +192,8 @@ internal sealed class SettingsWindow : IDisposable
 
         Section(content, "Devices");
         // Follow-default is the norm and needs no row: the two sections above already say
-        // "record my microphone" and "record what this Mac plays", and each binds late, at
-        // Start. This grid is for the operator who wants a SPECIFIC endpoint every time, which
-        // matters on a Mac that sees a different default depending on what is plugged in.
+        // "record my microphone" and "record what this Mac plays", each binding late at Start.
+        // This grid is for the operator who wants a SPECIFIC endpoint every time.
         Note(
             content,
             "The sections above follow whatever this Mac is using when a meeting starts. Pin a "
@@ -223,26 +213,22 @@ internal sealed class SettingsWindow : IDisposable
         _save.KeyEquivalent = "\r"; // Return saves, the way a Mac dialog's default button does
         _cancel = Button(content, "Cancel", Width - Padding - 100 - Gap - 100, 100, sameRow: true);
         _cancel.Activated += OnCancel;
-        // U+001B is what Escape sends, and claiming it here is what closes the window on it: a
-        // plain NSWindow has no Escape handling of its own. Escaped rather than written as the
-        // raw control byte, which an editor or an encoding pass can silently eat.
+        // U+001B is Escape, and claiming it here is what closes the window on it; a plain
+        // NSWindow has no Escape handling. Escaped rather than the raw byte, which editors eat.
         _cancel.KeyEquivalent = "\u001b";
 
-        // Closing the window must stop the meters, and the red button is a close this class
-        // would otherwise never hear about: Dispose only runs when the shell next opens
-        // Settings, so without this a window closed and left alone keeps a microphone capture
-        // (or a process tap) running for as long as the tray does.
+        // Closing must stop the meters, and the red button is a close this class would never hear
+        // about otherwise: Dispose only runs when the shell next opens Settings, so a window
+        // closed and left alone would keep a capture running for as long as the tray does.
         _window.WillClose += OnWillClose;
 
-        // The cursor now knows what the layout came to, so the document takes that height and
-        // the scroll view has something to scroll. At least the viewport, so a short layout
-        // does not leave the rows floating in a taller document than there is content for.
+        // The cursor knows what the layout came to, so the document takes that height. At least
+        // the viewport, so a short layout does not float the rows in a taller document.
         content.Frame = new CGRect(0, 0, Width, Math.Max(_y + Padding, Height));
     }
 
-    // AppKit's default origin is bottom-left, which puts a top-down cursor in the position of
-    // having to know the total height before it places the first row. Flipping the document
-    // means y is a distance from the top and the layout can simply run.
+    // AppKit's origin is bottom-left, which would make a top-down cursor need the total height
+    // before placing the first row. Flipped, y is a distance from the top and the layout runs.
     private sealed class FlippedView : NSView
     {
         public override bool IsFlipped => true;
@@ -274,14 +260,11 @@ internal sealed class SettingsWindow : IDisposable
 
     private void OnCancel(object? sender, EventArgs e) => Close();
 
-    /// <summary>Release the window and everything it draws.
-    ///
-    /// Needed because ReleaseWhenClosed is off, which is what lets the shell ask IsOpen
-    /// after a close. Without a release the graph (window, every control, the seeded token)
-    /// survives every close, and the handlers above capture <c>this</c> through
-    /// controls AppKit retains, so the cycle runs through objects it holds. The shell
-    /// disposes the stale window when a later Settings… builds a new one. Also what stops an
-    /// in-flight connection test posting into controls that are already gone.</summary>
+    /// <summary>Release the window and everything it draws. ReleaseWhenClosed is off, which is
+    /// what lets the shell ask IsOpen after a close, so without this the whole control graph
+    /// survives every close, held by handlers that capture <c>this</c> through controls AppKit
+    /// retains. Also stops an in-flight connection test posting into controls that are gone.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed)
@@ -328,13 +311,10 @@ internal sealed class SettingsWindow : IDisposable
     // which gate a device keeps.
     private BridgeSettings Collect()
     {
-        // End the edit first. A text field being edited keeps its text in the window's field
-        // editor and hands StringValue the LAST COMMITTED value, and clicking a button does not
-        // move first responder off it (a button only accepts focus under full keyboard access).
-        // So without this, typing a host and clicking Save with the mouse saves the old one, and
-        // says nothing about it. MakeFirstResponder(null) resigns the field editor, which is
-        // what commits its text into the cell. The WinForms sibling's _devices.EndEdit() is the
-        // same call for the same reason.
+        // End the edit first. A field being edited keeps its text in the window's field editor
+        // and hands StringValue the LAST COMMITTED value, and clicking a button does not move
+        // first responder off it. So typing a host and clicking Save with the mouse would save
+        // the old one, silently. MakeFirstResponder(null) commits the text into the cell.
         _window.MakeFirstResponder(null);
 
         _draft.Host = _host.StringValue.Trim();
@@ -369,10 +349,9 @@ internal sealed class SettingsWindow : IDisposable
         string outcome;
         try
         {
-            // Inside the try, not before it: this is the point of the filter below. The button
-            // is disabled and the status reads "Testing…" from here, so anything that escapes
-            // leaves both stuck that way for as long as the window is open, with nothing to
-            // report it out of a fire-and-forget click.
+            // Inside the try, not before it: the button is disabled and the status reads
+            // "Testing…" from here, so anything that escapes leaves both stuck that way for as
+            // long as the window is open.
             TapConnectionOptions options = Collect().ToConnectionOptions();
             using var timeout = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
             ConnectionTestResult result = await ConnectionTester
@@ -382,13 +361,11 @@ internal sealed class SettingsWindow : IDisposable
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // Deliberately the widest filter in this project, for the same reason
-            // BridgeSettingsStore's token read has one. ConnectionTester answers a bad host, a
-            // refused token and a timeout as RESULTS, so what is left here is whatever a
-            // malformed entry makes some layer below throw, and this runs fire-and-forget from
-            // a click: anything escaping would be swallowed by the task scheduler, leaving the
-            // button dead and the operator with no answer at all. What is lost is the stack,
-            // and the message is what they could have acted on anyway.
+            // Deliberately the widest filter here, like BridgeSettingsStore's token read.
+            // ConnectionTester answers a bad host, a refused token and a timeout as RESULTS, so
+            // what is left is a malformed entry throwing somewhere below. This runs
+            // fire-and-forget from a click, so anything escaping is swallowed by the scheduler and
+            // leaves the button dead with no answer at all. What is lost is the stack.
             outcome = $"Test failed: {ex.Message}";
         }
 
@@ -513,9 +490,9 @@ internal sealed class SettingsWindow : IDisposable
         if (_draft.DeviceRows.Count == 0)
         {
             // The empty case is a REPORT, not a blank space. SettingsSeed swallows a CoreAudio
-            // enumeration failure so a wrong host or a rejected token stays fixable, and this
-            // is the only place the operator learns that is why the grid is empty. A saved pin
-            // is still carried forward untouched by a Save made from this state.
+            // enumeration failure so a wrong host or a rejected token stays fixable, and this is
+            // where the operator learns that is why the grid is empty. A saved pin is carried
+            // forward untouched by a Save made from this state.
             Note(
                 content,
                 "No audio devices could be listed, so there is nothing to pin. Any device you "
@@ -545,9 +522,8 @@ internal sealed class SettingsWindow : IDisposable
             };
             content.AddSubview(name);
 
-            // The device's own label under the editable name, because the name is the SPEAKER
-            // identity and the label is which endpoint it is: an operator who renames a row
-            // "Alice" still needs to see it is the USB interface and not the built-in mic.
+            // The device's own label under the editable name: the name is the SPEAKER identity,
+            // the label is which endpoint it is.
             Note(content, row.DisplayLabel, lines: 1);
 
             _pinRows.Add((row, pin, name));
@@ -679,8 +655,7 @@ internal sealed class SettingsWindow : IDisposable
 
     private NSButton Button(NSView content, string title, nfloat x, nfloat width, bool sameRow = false)
     {
-        // sameRow puts a second button beside the one just placed, which is what a
-        // Cancel/Save pair is: one row, two frames.
+        // sameRow puts a second button beside the one just placed: a Cancel/Save pair is one row.
         nfloat y = sameRow ? _lastRowTop : NextRow(RowHeight + 6);
         var button = new NSButton
         {

@@ -5,23 +5,20 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
-/// Paints Core's <see cref="SummaryLayout"/> runs into an <see cref="NSTextView"/>: the Mac
-/// sibling of WinForms' <c>SummaryRichText</c>, and the last piece of the meeting card (#422).
+/// Paints Core's <see cref="SummaryLayout"/> runs into an <see cref="NSTextView"/>: the Mac sibling
+/// of WinForms' <c>SummaryRichText</c>, and the last piece of the meeting card (#422).
 ///
-/// It decides nothing. Where a blank line goes, how tight a list is, what marker a bullet gets
-/// and how far a heading steps up are all Core's answers, so the two shells cannot drift on
-/// them. What is here is the mapping from a run to an <see cref="NSFont"/>, which is the only
-/// part that is about AppKit.
+/// It decides nothing. Where a blank line goes, how tight a list is, what marker a bullet gets and
+/// how far a heading steps up are Core's answers, so the two shells cannot drift. What is here is
+/// the mapping from a run to an <see cref="NSFont"/>.
 ///
-/// Sizes are the system body size plus the run's step, rather than fixed points: a summary
-/// should follow the operator's text size, and Core deliberately expresses the ramp as a step
-/// so each shell resolves it against its own baseline.
+/// Sizes are the system body size plus the run's step rather than fixed points: a summary should
+/// follow the operator's text size, which is why Core expresses the ramp as a step.
 /// </summary>
 internal static class SummaryAttributedText
 {
-    // The handful of distinct faces a summary actually uses, resolved once. A body of forty
-    // spans is forty NSFont lookups without this, for the five or six faces it really has, and
-    // the WinForms sibling caches for the same reason (SummaryRichText.FontCache).
+    // The handful of distinct faces a summary uses, resolved once: a body of forty spans is forty
+    // NSFont lookups for the five or six faces it really has.
     private static readonly Dictionary<(bool Mono, SummaryEmphasis Emphasis, double Size), NSFont> Faces = [];
 
     internal static NSAttributedString Build(IReadOnlyList<MarkdownBlock> blocks)
@@ -49,10 +46,9 @@ internal static class SummaryAttributedText
         return painted;
     }
 
-    // Keyed on the run's face rather than on the run, so two spans differing only in text share
-    // a font. On the RESOLVED size, not on SizePlus: the two are interchangeable only while the
-    // system body size holds, and keying on the step would hand back fonts at the old size after
-    // an operator changed their text size.
+    // Keyed on the run's face, so two spans differing only in text share a font. On the RESOLVED
+    // size, not on SizePlus: keying on the step would hand back fonts at the old size after an
+    // operator changed their text size.
     private static NSFont CachedFace(SummaryRun run, nfloat size)
     {
         (bool, SummaryEmphasis, double) key = (run.Mono, run.Emphasis, (double)size);
@@ -65,18 +61,15 @@ internal static class SummaryAttributedText
         return face;
     }
 
-    // Bold and italic go on through the font MANAGER's trait conversion rather than by asking
-    // for a named face: "Segoe UI Bold" has no macOS equivalent to name, and the system font
-    // is not addressable by family name at all on recent versions. Mono asks for the
-    // monospaced system face, which is the one guaranteed present.
+    // Bold and italic go on through the font MANAGER's trait conversion rather than a named face:
+    // "Segoe UI Bold" has no macOS equivalent, and the system font is not addressable by family name
+    // at all on recent versions. Mono asks for the monospaced system face.
     private static NSFont Face(SummaryRun run, nfloat size)
     {
-        // Every one of these is typed as nullable by the bindings and none of them can
-        // actually answer null: the system font at a valid size always resolves, and a null
-        // here would mean AppKit had no system font at all. Coalescing keeps the summary
-        // painted rather than throwing inside a window Apply, which runs from a poll tick and
-        // would take the meeting card down with it. Resolved lazily, so a mono or bold run does
-        // not pay for a plain face it discards.
+        // All nullable by the bindings and none can answer null: the system font at a valid size
+        // always resolves. Coalescing keeps the summary painted rather than throwing inside an
+        // Apply that runs from a poll tick and would take the meeting card down. Resolved lazily, so
+        // a mono or bold run does not pay for a plain face it discards.
         if (run.Mono)
             return NSFont.MonospacedSystemFont(size, NSFontWeight.Regular) ?? Fallback(size);
 
@@ -87,10 +80,9 @@ internal static class SummaryAttributedText
         if (!run.Emphasis.HasFlag(SummaryEmphasis.Italic))
             return font;
 
-        // Italic is a trait conversion because there is no BoldItalicSystemFont, and the
-        // converted font is what carries BOTH when a heading contains an emphasised word.
-        // ConvertFont answers the ORIGINAL font when the family has no italic face, which is
-        // the correct degradation: the word keeps the heading's weight instead of vanishing.
+        // Italic is a trait conversion because there is no BoldItalicSystemFont, and the converted
+        // font is what carries BOTH in an emphasised word inside a heading. ConvertFont answers the
+        // ORIGINAL font when the family has no italic face, which is the right degradation.
         return NSFontManager.SharedFontManager.ConvertFont(font, NSFontTraitMask.Italic) ?? font;
     }
 

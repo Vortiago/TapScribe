@@ -6,11 +6,10 @@ streams each to the Recorder over the standard `/tap` wire contract as its own
 speaker, so both sides of a meeting land as separately-attributed WAVs in one
 **detached session**. Two shells share that job: the Windows tray, which takes
 system audio off a WASAPI loopback, and the macOS menu bar, which uses a Core
-Audio process tap because macOS has no loopback endpoint (ADR-0020). Each ships
-on the newest release under a stable filename the dashboard's Settings → **Get a
-bridge** card links: a copy-and-run zip for Windows, an installer package for
-the Mac (Packaging below says why a `.pkg` and what an operator does with one).
-See `../README.md` for the wire contract every Bridge speaks and
+Audio process tap because macOS has no loopback endpoint (ADR-0020). Both ship on
+the newest release under a stable filename the dashboard's Settings → **Get a
+bridge** card links: a zip for Windows, a `.pkg` for the Mac (Packaging says
+why). See `../README.md` for the wire contract every Bridge speaks and
 `../../CONTEXT.md` for the vocabulary (Bridge, Tap, Recorder, Utterance,
 Session).
 
@@ -53,16 +52,15 @@ Session).
   endpoint (#420, ADR-0020). Everything it asks the OS goes through P/Invoke,
   never the managed ObjC bindings (`MacOSProductVersion` states that rule and
   why), with one exception `CoreAudioHal.Tap.cs` explains: `CATapDescription`
-  is an ObjC class that `Microsoft.macOS` does not bind, so it is built through
-  the runtime's own C entry points rather than through a hand-written binding
-  that no test host could construct. The plain TFM is therefore still enough,
-  and its tests run on every CI lane rather than only on a Mac.
+  is an ObjC class `Microsoft.macOS` does not bind, so it is built through the
+  runtime's own C entry points, which no test host could construct a binding
+  for. Its tests therefore run on every CI lane, not only on a Mac.
 
   Recording system audio needs the **System Audio Recording** TCC grant, which
-  macOS asks for the first time the IOProc starts rather than when the tap is
+  macOS asks for when the IOProc first starts rather than when the tap is
   created. A process with no bundle identity cannot be prompted, so a bare
   `dotnet run` against the HAL BLOCKS at `AudioDeviceCreateIOProcID`; only the
-  built `.app` is a supported way to exercise that path.
+  built `.app` exercises that path.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
   menu-bar shell, Core's `ITrayView` over an `NSStatusItem`: the same menu as
   the Windows tray, plus the Settings and per-meeting windows. It also holds
@@ -74,15 +72,12 @@ Session).
   a build just produced rather than the source file the SDK is free to rewrite.
 
   **Nothing NSObject-derived in it can carry a unit test**: constructing one
-  under the `dotnet test` host throws inside `ObjCRuntime`, because the bridge
-  is never initialised. So the AppKit types (`TrayShell`, `MeetingWindow`,
-  `SettingsWindow`) are covered by the build and by a manual check on a Mac,
-  and every decision that could live below them does: the glyph per state
-  (`StatusSymbols`), the notice line (`MenuNotice`), the draft seed
-  (`SettingsSeed`), the field parse (`SettingsFields`), the launch decision
-  (`Program.Run`, which takes the menu-bar launch as a parameter) and the whole
-  meeting lifecycle (`BridgeRuntime`). An `if` inside an AppKit class is a
-  decision that has escaped its test.
+  under the `dotnet test` host throws inside `ObjCRuntime`. So the AppKit types
+  (`TrayShell`, `MeetingWindow`, `SettingsWindow`) are covered by the build and
+  a manual check on a Mac, and every decision that could live below them does:
+  `StatusSymbols`, `MenuNotice`, `SettingsSeed`, `SettingsFields`, `Program.Run`
+  and `BridgeRuntime`. An `if` inside an AppKit class is a decision that has
+  escaped its test.
 
 **The cross-platform invariant:** `TapScribe.Bridge.Core` references **no
 NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
@@ -128,12 +123,12 @@ dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c
 open src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
 ```
 
-`open` (rather than `dotnet run`) because the app has to launch as a **bundle**:
-the `Info.plist` beside the binary is what makes it a menu-bar app and what
-carries the microphone usage string TCC shows in its prompt. Run the inner
-binary directly and macOS has no manifest to read, so the app takes a Dock icon
-and the mic prompt has nothing to say. Launching it from a terminal IS the way
-to see its stderr and to seed `TAPSCRIBE_*` (see Configuration).
+`open` rather than `dotnet run`, because the app has to launch as a **bundle**:
+the `Info.plist` beside the binary is what makes it menu-bar-only and what
+carries the microphone usage string TCC shows in its prompt. Run the inner binary
+directly and there is no manifest to read, so the app takes a Dock icon and the
+mic prompt has nothing to say. That IS the way to see its stderr and to seed
+`TAPSCRIBE_*` (see Configuration).
 
 **Both lines need Xcode matching the installed `macos` workload** (Xcode 26.4
 or newer for workload 26.4; `dotnet workload list` prints the version), plus
@@ -207,22 +202,17 @@ if it is wrong:
   receives only the installer package, which `CreatePackage=false` suppresses
   because its filename carries the version a permanent URL cannot have.
 - **`ditto`, never `zip -r`**: a `.app` is symlinks and executable bits, and a
-  naive zip drops both, producing an archive that unpacks into something macOS
-  will not launch.
-- The release job adds `-p:Version=<tag>` and then asserts the bundle's
+  naive zip drops both, unpacking into something macOS will not launch.
+- The release job adds `-p:Version=<tag>` and asserts the bundle's
   `CFBundleShortVersionString` against the tag. The `Info.plist` declares no
-  version of its own and the csproj derives both version keys from `$(Version)`,
-  so a publish missing the flag stamps the SDK's own default without failing.
-- **`tools/build-macos-pkg.sh` owns the packaging, and both workflows call it.**
-  The release job builds the shipped package with it and CI's *Prove
-  installer-written payload is not quarantined* step asserts against it, so the
-  gate cannot drift into testing a package nobody downloads. Its header explains
-  the one non-obvious flag: `BundleIsRelocatable` defaults to true, which makes
-  `installer` write payload over any existing copy of the bundle id it finds and
-  ignore `--install-location`. The script refuses its own output if that leaks
-  back in. `--version` carries the tag for `pkgutil --pkg-info`; the filename
-  stays unversioned because a permanent `releases/latest/download/` URL cannot
-  carry one (ADR-0012).
+  version of its own and the csproj derives both keys from `$(Version)`, so a
+  publish missing the flag stamps the SDK's default without failing.
+- **`tools/build-macos-pkg.sh` owns the packaging, and both workflows call it**,
+  so the quarantine gate cannot drift into testing a package nobody downloads.
+  Its header explains the one non-obvious flag: `BundleIsRelocatable` defaults
+  to true, which makes `installer` write payload over any existing copy of the
+  bundle id and ignore `--install-location`; the script refuses its own output
+  if that leaks back in.
 
 ### Installing the Mac build
 
@@ -239,16 +229,14 @@ if it is wrong:
    Gatekeeper prompt.**
 
 **Why a package and not the zip.** The bundle carries an ad-hoc signature (the
-macOS SDK applies one, and arm64 will not execute a bundle with none at all),
-and Gatekeeper reads a signature it cannot validate as tampering. So a
-*quarantined* ad-hoc bundle is reported as **damaged**, offering only Move to
-Trash: there is no in-UI way forward at all, and right-click → **Open** does
-not rescue it, that being the bypass for the milder "unidentified developer"
-dialog a signed-but-not-notarised app gets. An unsigned *package* gets that
-milder treatment instead, and `installer` writes its payload outside the path
-that applies quarantine, so the installed app is not quarantined and launches
-straight away. CI asserts that last part on a real runner rather than trusting
-it, since Apple documents none of it.
+SDK applies one, and arm64 will not execute a bundle with none), and Gatekeeper
+reads a signature it cannot validate as tampering. So a *quarantined* ad-hoc
+bundle is reported as **damaged**, offering only Move to Trash, with no in-UI way
+forward: right-click → **Open** is the bypass for the milder "unidentified
+developer" dialog, and does not rescue it. An unsigned *package* gets that milder
+treatment, and `installer` writes its payload outside the path that applies
+quarantine, so the installed app launches straight away. CI asserts that last
+part on a real runner, since Apple documents none of it.
 
 If you took the zip instead, the `xattr` step is still the only escape:
 
@@ -285,34 +273,27 @@ own on-disk contract, `TrayStores.SettingsFileName` again) with the tap token in
 the **login Keychain** rather than in the file at all. Two differences worth
 knowing before you reach for one:
 
-- **`TAPSCRIBE_*` seeding does not reach a Finder-launched `.app`.** Those
-  variables seed the first run, and a bundle opened from Finder, the Dock or
-  `open -a` inherits `launchd`'s environment, not your shell's, so an export in
-  `~/.zshrc` is simply not there. Launching the binary inside the bundle from a
-  terminal
+- **`TAPSCRIBE_*` seeding does not reach a Finder-launched `.app`.** A bundle
+  opened from Finder, the Dock or `open -a` inherits `launchd`'s environment,
+  not your shell's, so an export in `~/.zshrc` is simply not there. Launching
+  the binary inside the bundle from a terminal
   (`TAPSCRIBE_HOST=… TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
-  does seed it, and so does typing the values into Settings once, which is the
-  supported route.
+  does seed it, and so does typing the values into Settings once.
 - **An update asks for your login password to reach the token.** A Keychain
   item's ACL trusts the app that created it, identified by its code signature,
-  and an ad-hoc signature is a fresh identity on every build (ADR-0020). So the
-  Keychain treats each new version as a different app and asks you to authorise
-  it, once per item per build. Choosing **Always Allow** settles it for that
-  build, not for the next one. Nothing in the code can fix this: a stable
-  Developer ID signature is what makes the ACL keep trusting the app, which is
-  the same thing that would stop macOS re-prompting for the microphone and
-  system-audio grants.
+  and an ad-hoc signature is a fresh identity on every build (ADR-0020), so the
+  Keychain treats each version as a different app. **Always Allow** settles it
+  for that build only. A Developer ID signature is what fixes it, and the same
+  thing stops macOS re-prompting for the microphone and system-audio grants.
 - **The meters are on-demand toggles, unlike the Windows dialog's always-on
-  bars.** A system-audio meter is a second process tap, and reading audio
-  through one needs the Screen and System Audio Recording grant, so an eager
-  meter would fire that prompt at someone who opened Settings to correct a
-  hostname. Hangover and pre-roll are shared across devices on both platforms,
-  which is parity rather than a gap.
+  bars.** A system-audio meter is a second process tap, and reading one needs
+  the System Audio Recording grant, so an eager meter would fire that prompt at
+  someone who opened Settings to correct a hostname. Hangover and pre-roll are
+  shared across devices on both platforms, which is parity rather than a gap.
 - **System audio needs a permission the Mac asks for at the first Start**, not
-  at install and not when Settings is opened: macOS prompts for **System Audio
-  Recording** the first time a meeting's process tap actually runs. Dismiss it
-  and the meeting records your microphone only, and says so. The grant is per
-  signature, so an ad-hoc build re-prompts on every update (ADR-0020).
+  at install and not when Settings opens. Dismiss the prompt and the meeting
+  records your microphone only, and says so. The grant is per signature, so an
+  ad-hoc build re-prompts on every update (ADR-0020).
 
 - **Connection** — Recorder host (tolerant: a hostname, an IP, or a pasted
   `wss://host:9000/` all work; Port/TLS stay authoritative), port (default

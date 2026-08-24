@@ -62,12 +62,10 @@ internal sealed class MeterProbe(
             }
 
             // Published BEFORE the start, so every way the start can fail has an owner for what
-            // the Open already built. Assigned after it, a refused start left Stop with a null
-            // meter: the capture was never disposed, and disposing the ENUMERATOR under a live
-            // capture is the ownership order the seam forbids. It is the likeliest failure of
-            // the whole feature - macOS asks for the System Audio Recording grant when the
-            // IOProc starts, not when the tap is created, so a declined prompt lands exactly
-            // here with a process tap and an aggregate device already standing.
+            // Open already built. Assigned after it, a refused start left Stop with a null meter,
+            // an undisposed capture and an enumerator disposed under it. It is the likeliest
+            // failure of the whole feature: macOS asks for the System Audio Recording grant when
+            // the IOProc starts, so a declined prompt lands exactly here.
             _meter = meter;
             meter.Start();
         }

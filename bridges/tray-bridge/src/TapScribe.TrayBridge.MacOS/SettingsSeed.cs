@@ -35,13 +35,11 @@ internal static class SettingsSeed
         }
         catch (ExternalException)
         {
-            // CoreAudio could not be asked to walk the device tree, which is the enumerator
-            // seam's declared failure. Swallowed because it must not stop the operator fixing
-            // a wrong host or a rejected token, and because an empty list is SAFE here rather
-            // than merely tolerable: every saved pin then counts as absent, and the draft
-            // carries an absent pin forward verbatim. What is lost is the pin grid for this
-            // one opening of the window, which reports the empty case rather than showing a
-            // blank space.
+            // CoreAudio could not be asked to walk the device tree, the enumerator seam's declared
+            // failure. Swallowed because it must not stop the operator fixing a wrong host or a
+            // rejected token, and because an empty list is SAFE here: every saved pin then counts
+            // as absent, and the draft carries an absent pin forward verbatim. What is lost is the
+            // pin grid for this one opening of the window, which reports the empty case.
             return [];
         }
     }

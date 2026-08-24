@@ -4,24 +4,21 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
-/// The Mac shell's <see cref="IDispatcher"/>: the main dispatch queue, which is the thread
-/// AppKit may be touched from. There is no <c>SynchronizationContext</c> to wrap here, which
-/// is the whole reason the seam is <see cref="IDispatcher"/> rather than a context.
+/// <summary>
+/// The Mac shell's <see cref="IDispatcher"/>: the main dispatch queue, the thread AppKit may be
+/// touched from. There is no <c>SynchronizationContext</c> to wrap here, which is the whole reason
+/// the seam is <see cref="IDispatcher"/> rather than a context.
 ///
 /// It queues, always, and never asks whether the caller is already on the main thread. That
-/// shortcut looks free and is not: the runtime posts a status and then the menu state that
-/// goes with it, and running one inline while the other queues puts them on screen in the
-/// wrong order. A posted callback that throws is left to escape, matching the WinForms
-/// sibling: this adapter has no opinion about failures, and slice 7 owns the ones it would be
-/// swallowing.
+/// shortcut is not free: the runtime posts a status and then the menu state that goes with it, and
+/// running one inline while the other queues puts them on screen in the wrong order. A posted
+/// callback that throws is left to escape, matching the WinForms sibling.
 /// </summary>
 internal sealed class MainQueueDispatcher : IDispatcher
 {
-    // Resolved once. DispatchQueue.MainQueue is a PROPERTY that builds a fresh managed
-    // wrapper per access (measured: 32 bytes and a finalizable object each time), and Post
-    // runs on every marshalled callback, so reading it per call was a few MB of finalizer
-    // queue per meeting-heavy day. The main queue is a process singleton, so caching it
-    // changes nothing else.
+    // Resolved once. DispatchQueue.MainQueue is a PROPERTY that builds a fresh managed wrapper per
+    // access (32 bytes and a finalizable object each), and Post runs on every marshalled callback.
+    // The main queue is a process singleton, so caching it changes nothing else.
     private static readonly DispatchQueue Main = DispatchQueue.MainQueue;
 
     private readonly Action<Action> _enqueue;
@@ -43,7 +40,6 @@ internal sealed class MainQueueDispatcher : IDispatcher
     }
 
     /// <summary>Queue <paramref name="action"/> for the main thread and return.</summary>
-    /// <param name="action">The work to run there.</param>
     public void Post(Action action)
     {
         ArgumentNullException.ThrowIfNull(action);

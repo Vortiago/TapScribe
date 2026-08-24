@@ -4,17 +4,15 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
-/// Pins every native symbol <see cref="CoreAudioHal"/> binds (#419), the CoreAudio sibling of
-/// the Windows layer's <c>WasapiUpstreamContractTests</c>.
+/// Pins every native symbol <see cref="CoreAudioHal"/> binds (#419), the CoreAudio sibling of the
+/// Windows layer's <c>WasapiUpstreamContractTests</c>.
 ///
-/// The facade is a dumb passthrough on purpose, so every decision above it is unit-tested
-/// against a fake and NOTHING exercises these declarations. A mistyped entry point therefore
-/// compiles, ships, and fails on an operator's Mac the first time they start a meeting. This
-/// resolves each one against the real framework instead, which is the only check standing
-/// between a typo and that.
+/// The facade is a dumb passthrough on purpose, so every decision above it is unit-tested against a
+/// fake and NOTHING exercises these declarations. A mistyped entry point therefore compiles, ships,
+/// and fails on an operator's Mac the first time they start a meeting.
 ///
-/// It asks dyld whether the symbol exists rather than calling it: resolution is the whole
-/// claim, and calling would need a real device, an IOProc and a microphone grant.
+/// It asks dyld whether the symbol exists rather than calling it: resolution is the whole claim, and
+/// calling would need a real device, an IOProc and a microphone grant.
 /// </summary>
 public class CoreAudioUpstreamContractTests
 {
@@ -48,27 +46,23 @@ public class CoreAudioUpstreamContractTests
         (CoreAudio, "AudioHardwareCreateAggregateDevice"),
         (CoreAudio, "AudioHardwareDestroyAggregateDevice"),
         // CATapDescription is the one ObjC class in the whole backend and is NOT bound by
-        // Microsoft.macOS, which carries no CoreAudio namespace at all. It is reached through
-        // the ObjC runtime's own C entry points rather than through a hand-written NSObject
-        // binding: constructing any NSObject-derived type under the test host faults inside
-        // ObjCRuntime, so a binding would make this class untestable even for its symbols.
-        // Two objc_msgSend declarations, because the ABI needs the real signature at each
-        // call: one for the no-argument selectors and one for the initialiser's array.
+        // Microsoft.macOS. It is reached through the ObjC runtime's own C entry points rather than a
+        // hand-written NSObject binding: constructing any NSObject-derived type under the test host
+        // faults inside ObjCRuntime. Two objc_msgSend declarations, because the ABI needs the real
+        // signature at each call: no-argument selectors, and the initialiser's array.
         (ObjC, "objc_getClass"),
         (ObjC, "sel_registerName"),
         (ObjC, "objc_msgSend"),
         (ObjC, "objc_msgSend"),
-        // An empty NSArray for that initialiser (toll-free bridged), and the aggregate's
-        // description, which is parsed from a property list rather than assembled call by
-        // call - see CoreAudioAggregateDescription for why.
+        // An empty NSArray for that initialiser (toll-free bridged), and the aggregate's description,
+        // parsed from a property list - see CoreAudioAggregateDescription for why.
         (CoreFoundation, "CFArrayCreate"),
         (CoreFoundation, "CFDataCreate"),
         (CoreFoundation, "CFPropertyListCreateWithData"),
     ];
 
-    // One fact over the whole set rather than a case each, so a run reports EVERY symbol that
-    // moved. A rename usually arrives as a family, and learning them one CI round at a time
-    // is the slow way to find that out.
+    // One fact over the whole set rather than a case each, so a run reports EVERY symbol that moved.
+    // A rename usually arrives as a family.
     [RequiresMacOS("resolve symbols in a macOS framework")]
     public void EverySymbolTheHalBinds_ResolvesInItsFramework()
     {
@@ -95,19 +89,15 @@ public class CoreAudioUpstreamContractTests
     [RequiresMacOS("create a real Core Audio process tap")]
     public void TwoProcessTaps_CanBeLiveAtOnce()
     {
-        // The one claim about this backend that symbol resolution cannot make: that the calls
-        // WORK, not merely that they exist. Creating a tap goes through CATapDescription via
-        // objc_msgSend against a class Microsoft.macOS does not bind, so a rename or an ABI
-        // mistake in that path is invisible to every other test here and shows up as a meeting
-        // that records one speaker.
+        // The one claim symbol resolution cannot make: that the calls WORK, not merely that they
+        // exist. Creating a tap goes through CATapDescription via objc_msgSend against a class
+        // Microsoft.macOS does not bind, so a rename or an ABI mistake there is invisible to every
+        // other test here and shows up as a meeting that records one speaker.
         //
-        // Two of them, because the system-audio level meter would open a second while a meeting
-        // holds the first, and nothing else establishes that the OS permits it. Measured
-        // PERMITTED on macOS 26.4; if a future release refuses, this is where that is learned.
-        //
-        // Deliberately does NOT run an IOProc: reading audio through a tap needs the Audio
-        // Capture grant, which no CI runner can answer. Creating one does not, which is what
-        // makes this runnable unattended.
+        // Two of them, because the system-audio level meter opens a second while a meeting holds the
+        // first. Measured PERMITTED on macOS 26.4; if a future release refuses, this is where that
+        // is learned. Deliberately does NOT run an IOProc: reading audio through a tap needs the
+        // Audio Capture grant, which no CI runner can answer. Creating one does not.
         if (!OperatingSystem.IsMacOS())
             return;   // unreachable: [RequiresMacOS] skips first. Here for CA1416 only.
 
@@ -128,17 +118,13 @@ public class CoreAudioUpstreamContractTests
     public void ListDevices_OnTheRunningMac_CompletesAndAnswersWellFormedRows()
     {
         // Symbol resolution says the property walk EXISTS; this says it works. The walk is two
-        // size-negotiated reads per device plus an unsafe AudioBufferList traversal with a
-        // clamp, none of which any other test reaches: everything above the facade runs on the
-        // fake. It needs no grant, so it runs unattended.
+        // size-negotiated reads per device plus an unsafe AudioBufferList traversal with a clamp,
+        // none of which any other test reaches. It needs no grant, so it runs unattended.
         //
-        // Deliberately does NOT assert "found some": a machine may have no audio device at
-        // all, and failing for that would be a fact about the box. What each machine buys:
-        // the system-object walk and the two default-device reads always; the per-device
-        // string, channel-count and mute-probe reads for every row present; the stream-format
-        // read only where a CAPTURE endpoint exists, since it asks the input scope. A
-        // render-only box (a Mac mini with speakers and no mic, and most runners) therefore
-        // leaves that last one unexercised.
+        // Deliberately does NOT assert "found some": a machine may have no audio device at all. What
+        // each machine buys: the system-object walk and the two default-device reads always; the
+        // per-device string, channel-count and mute-probe reads for every row present; the
+        // stream-format read only where a CAPTURE endpoint exists, since it asks the input scope.
         if (!OperatingSystem.IsMacOS())
             return;   // unreachable: [RequiresMacOS] skips first. Here for CA1416 only.
 
@@ -167,14 +153,12 @@ public class CoreAudioUpstreamContractTests
     [RequiresMacOS("register a real Core Audio property listener")]
     public void APropertyListener_RegistersAndReleases_LeavingItsPinFreed()
     {
-        // The other native path with a managed object behind it: the listener's GCHandle is
-        // what CoreAudio's client data points at, and the release only frees it when the
-        // remove succeeded. Nothing else calls add or remove for real, so a mistake in the
-        // trampoline wiring or in the release order surfaces on an operator's Mac.
+        // The other native path with a managed object behind it: the listener's GCHandle is what
+        // CoreAudio's client data points at, and the release only frees it when the remove
+        // succeeded. Nothing else calls add or remove for real.
         //
-        // The system object, and the default-output selector: it always exists, needs no
-        // device present and needs no grant. Covers the SUCCESS path only. The refused-remove
-        // branch needs CoreAudio to reject a remove, which cannot be provoked here.
+        // The system object and the default-output selector: always there, no device and no grant
+        // needed. SUCCESS path only, since a refused remove cannot be provoked here.
         if (!OperatingSystem.IsMacOS())
             return;   // unreachable: [RequiresMacOS] skips first. Here for CA1416 only.
 
@@ -191,10 +175,9 @@ public class CoreAudioUpstreamContractTests
     [Fact]
     public void TheBoundSet_MatchesWhatTheHalActuallyDeclares()
     {
-        // The list above is hand-written, so on its own it pins whatever someone remembered
-        // to add. This counts the real [LibraryImport] declarations by reflection and makes
-        // the two agree, which is what stops a twelfth import from riding in unpinned. It
-        // runs on every lane, because it is about this assembly rather than about the OS.
+        // The list above is hand-written, so on its own it pins whatever someone remembered to add.
+        // This counts the real [LibraryImport] declarations by reflection and makes the two agree,
+        // which is what stops a twelfth import riding in unpinned. It runs on every lane.
         int declared = typeof(CoreAudioHal)
             .GetMethods(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
             .Count(m => m.GetCustomAttributes(typeof(DllImportAttribute), false).Length > 0

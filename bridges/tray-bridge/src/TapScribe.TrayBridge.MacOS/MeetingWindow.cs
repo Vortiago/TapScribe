@@ -5,24 +5,23 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
-/// A window for one meeting: the Mac sibling of WinForms' <c>MeetingForm</c>. It renders the
-/// tested Core <see cref="MeetingFormView"/> projection of a <see cref="PipelineView"/> onto a
-/// caption, a read-only text view and a Copy button, and decides nothing of its own.
+/// A window for one meeting: the Mac sibling of WinForms' <c>MeetingForm</c>. It renders the tested
+/// Core <see cref="MeetingFormView"/> projection of a <see cref="PipelineView"/> onto a caption, a
+/// read-only text view and a Copy button, and decides nothing of its own.
 ///
-/// Two callers (#107 + #168), both through <see cref="ITrayView.OpenMeetingWindow"/>: the
-/// End-meeting flow opens it and renders the finished summary into it, and a Past-meetings
-/// re-open leaves it in the Loading state while a <c>MeetingController</c>'s emissions arrive.
-/// It starts in that state so an empty window is never on screen.
+/// Two callers (#107 + #168), both through <see cref="ITrayView.OpenMeetingWindow"/>: End meeting
+/// opens it and renders the finished summary, and a Past-meetings re-open leaves it Loading while a
+/// <c>MeetingController</c>'s emissions arrive. It starts in that state so an empty window is never
+/// on screen.
 ///
-/// A plain object that OWNS an <see cref="NSWindow"/> rather than a subclass of one: the
-/// closed flag and the <see cref="Closed"/> event are then this class's own, and there is one
-/// less NSObject in a shell whose NSObjects cannot be constructed under a test host.
+/// A plain object that OWNS an <see cref="NSWindow"/> rather than a subclass of one: the closed flag
+/// and the <see cref="Closed"/> event are then this class's own, and there is one less NSObject in a
+/// shell whose NSObjects cannot be constructed under a test host.
 ///
 /// The summary body is painted through <see cref="SummaryAttributedText"/> over Core's
-/// <see cref="SummaryLayout"/>, the same runs the WinForms sibling paints, and only when Core
-/// says the body IS markdown (<see cref="MeetingFormView.BodyIsMarkdown"/>). A raw recorder
-/// error goes through <see cref="SummaryMarkdown.Plain"/> instead, so an asterisk in a path
-/// stays an asterisk.
+/// <see cref="SummaryLayout"/>, and only when Core says the body IS markdown
+/// (<see cref="MeetingFormView.BodyIsMarkdown"/>). A raw recorder error goes through
+/// <see cref="SummaryMarkdown.Plain"/> instead, so an asterisk in a path stays an asterisk.
 /// </summary>
 internal sealed class MeetingWindow : IMeetingWindow, IDisposable
 {
@@ -39,9 +38,8 @@ internal sealed class MeetingWindow : IMeetingWindow, IDisposable
     private readonly NSTextView _body;
     private readonly NSButton _copy;
 
-    // The markdown behind the rendered view: Copy hands back the source the Recorder sent,
-    // and the re-render guard skips an unchanged body. Apply runs on every poll tick, and a
-    // run of identical "Transcribing 2/3…" bodies should not rebuild the text view.
+    // The markdown behind the rendered view: Copy hands back the source the Recorder sent, and the
+    // re-render guard skips an unchanged body on a poll tick.
     private string _rawBody = "";
     private bool _closed;
     private bool _disposed;
@@ -120,7 +118,6 @@ internal sealed class MeetingWindow : IMeetingWindow, IDisposable
     /// <summary>Re-render from the latest poll view, or from <c>null</c> for the
     /// pre-first-poll loading state. Pure projection through Core's
     /// <see cref="MeetingFormView"/>.</summary>
-    /// <param name="view">The latest poll emission.</param>
     public void Render(PipelineView? view) => Apply(MeetingFormView.For(view));
 
     /// <summary>Put the window on screen and bring the app forward with it. A menu-bar app is
@@ -144,14 +141,10 @@ internal sealed class MeetingWindow : IMeetingWindow, IDisposable
     /// <see cref="Closed"/>.</summary>
     internal void Close() => _window.Close();
 
-    /// <summary>Release the window and everything it draws.
-    ///
-    /// Needed because ReleaseWhenClosed is off, which is what lets this class read the window
-    /// after AppKit has closed it. Without a release the graph (window, scroll view, text view
-    /// and the whole summary it holds) survives every close, and both handlers below capture
-    /// `this`, so the cycle runs through an object AppKit retains. The Windows sibling gets
-    /// this free: a non-modal WinForms Form disposes itself on close. One meeting window is a
-    /// few hundred KB and the tray runs for days.</summary>
+    /// <summary>Release the window and everything it draws. ReleaseWhenClosed is off, which is what
+    /// lets this class read the window after AppKit has closed it, so without a release the whole
+    /// graph survives every close, held by handlers that capture <c>this</c>. The Windows sibling
+    /// gets this free: a non-modal Form disposes itself on close.</summary>
     public void Dispose()
     {
         if (_disposed)
@@ -169,9 +162,8 @@ internal sealed class MeetingWindow : IMeetingWindow, IDisposable
         if (view.Body != _rawBody)
         {
             _rawBody = view.Body;
-            // Parsed only when Core says the body IS markdown. A raw recorder error is not,
-            // and reinterpreting one as markup would turn a path with an asterisk in it into
-            // emphasis and silently eat the asterisk.
+            // Parsed only when Core says the body IS markdown: reinterpreting a raw recorder
+            // error as markup turns a path with an asterisk into emphasis and eats the asterisk.
             _body.TextStorage!.SetString(SummaryAttributedText.Build(
                 view.BodyIsMarkdown ? SummaryMarkdown.Parse(view.Body) : SummaryMarkdown.Plain(view.Body)));
         }

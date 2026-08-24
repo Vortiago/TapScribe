@@ -7,39 +7,33 @@ namespace TapScribe.Bridge.MacOS;
 /// <summary>
 /// The real <see cref="ICoreAudioHal"/>: CoreAudio's HAL, reached by P/Invoke.
 ///
-/// DELIBERATELY WITHOUT LOGIC. Every method is a property read, a registration or a status
-/// check, and the only branch is "did the call succeed". Every
-/// judgement this backend makes (which layouts are readable, what a clean stop means, what a
-/// missing mute property implies, teardown order) lives in <see cref="CoreAudioFormat"/>,
-/// <see cref="MacOSAudioCapture"/> and <see cref="MacOSAudioDeviceEnumerator"/>, which have no
-/// native dependency and are unit-tested on a lane with no audio hardware. This class is
-/// covered by <c>CoreAudioUpstreamContractTests</c> and a manual check on a Mac, and that is
-/// only an acceptable bargain while it stays this thin: an <c>if</c> here that is not a status
-/// check is a decision that has escaped its test, and belongs above the facade.
+/// DELIBERATELY WITHOUT LOGIC. Every method is a property read, a registration or a status check,
+/// and the only branch is "did the call succeed". Every judgement this backend makes (which layouts
+/// are readable, what a clean stop means, what a missing mute property implies, teardown order)
+/// lives in <see cref="CoreAudioFormat"/>, <see cref="MacOSAudioCapture"/> and
+/// <see cref="MacOSAudioDeviceEnumerator"/>, unit-tested on a lane with no audio hardware. This
+/// class is covered by <c>CoreAudioUpstreamContractTests</c> and a manual check on a Mac, which is
+/// only acceptable while it stays this thin: an <c>if</c> here that is not a status check is a
+/// decision that has escaped its test.
 ///
 /// P/Invoke throughout, never the managed ObjC bindings, per the rule in
-/// <see cref="MacOSProductVersion"/>. The HAL proper is a plain C API; the one ObjC class the
-/// backend touches (<c>CATapDescription</c>) is reached through the runtime's own C entry
-/// points in the tap half of this class, which says why.
+/// <see cref="MacOSProductVersion"/>. The one ObjC class the backend touches
+/// (<c>CATapDescription</c>) is reached through the runtime's own C entry points in
+/// <c>CoreAudioHal.Tap.cs</c>, which carries the process-tap surface (#420). Partial rather than a
+/// second class so the upstream-contract test, which counts this type's <c>[LibraryImport]</c>s,
+/// still sees every native declaration.
 ///
-/// Two files, one type: <c>CoreAudioHal.Tap.cs</c> carries the process-tap surface (#420).
-/// Partial rather than a second class so the reflection half of the upstream-contract test,
-/// which counts this type's <c>[LibraryImport]</c>s, still sees every native declaration.
+/// The native calls are CoreAudio's own to serialise; what this class adds is the four lists of what
+/// it still holds, every touch of one under <c>_registrations</c>. Needed since #420: the
+/// system-audio capture rebinds its tap from a CoreAudio NOTIFICATION thread while the tray thread
+/// may be ending the meeting through the same HAL, and one enumerator's HAL is shared by every
+/// capture it opened, so the race is ACROSS captures. The IOProc trampoline touches none of it, so
+/// the realtime path pays nothing.
 ///
-/// The native calls are CoreAudio's own to serialise; what this class adds is the four lists
-/// of what it still holds, and every touch of one is under <c>_registrations</c>. That is
-/// needed since #420: the system-audio capture rebinds its tap from a CoreAudio NOTIFICATION
-/// thread while the tray thread may be ending the meeting through the same HAL, and one
-/// enumerator's HAL is shared by every capture it opened, so the race is ACROSS captures
-/// rather than within one. The lists are the only shared state; the IOProc trampoline touches
-/// none of it, so the realtime path pays nothing.
-///
-/// The macos platform attribute is on the TYPE, so the "never touch a native symbol off a Mac"
-/// rule is decided once, where this is CONSTRUCTED, and CA1416 proves it at compile time.
-/// Per-method guards were the alternative and were worse three ways: nine of them answered in
-/// three different shapes, nothing executed any of them on any lane, and the shape ListDevices
-/// used (an empty list) told the enumerator "no endpoints" when the truth was "this host
-/// cannot be asked", which is precisely the distinction the layer above pins a test on.
+/// The macos platform attribute is on the TYPE, so "never touch a native symbol off a Mac" is
+/// decided once, where this is CONSTRUCTED, and CA1416 proves it at compile time. Per-method guards
+/// answered in three different shapes, ran on no lane, and the one ListDevices used (an empty list)
+/// told the enumerator "no endpoints" when the truth was "this host cannot be asked".
 /// </summary>
 [SupportedOSPlatform("macos")]
 public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
@@ -57,12 +51,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     // worth asking anyway.
     private static long _callbackFaults;
 
-    /// <summary>How many times a native callback swallowed an exception. Non-zero is the only
-    /// trace either trampoline can leave: both MUST swallow, because an exception unwinding
-    /// into CoreAudio tears the process down, and neither runs anywhere a report could go (one
-    /// is a notification thread, the other the realtime IO thread). Without this a handler that
-    /// throws on EVERY call looks exactly like a device that never fires: mute silently stops
-    /// updating, or every buffer is dropped, with nothing anywhere to say so.</summary>
+    /// <summary>How many times a native callback swallowed an exception. Non-zero is the only trace
+    /// either trampoline can leave: both MUST swallow, since an exception unwinding into CoreAudio
+    /// tears the process down, and neither runs anywhere a report could go. Without this a handler
+    /// throwing on EVERY call looks exactly like a device that never fires.</summary>
     internal static long CallbackFaults => Interlocked.Read(ref _callbackFaults);
 
     public IReadOnlyList<CoreAudioDevice> ListDevices()
@@ -192,12 +184,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     {
         IoProc live = Live(ioProc, nameof(DestroyIoProc));
         int status = AudioDeviceDestroyIOProcID(live.DeviceId, live.ProcId);
-        // Unpinned only once CoreAudio says the registration is GONE. A failed destroy leaves
-        // the IOProc registered, and the pin is what its client data points at: freeing it
-        // hands the next callback a dangling GCHandle, which is a process-level access
-        // violation rather than a managed throw the trampoline could contain. Leaving the
-        // registration listed instead gives Dispose one more attempt at process teardown, and
-        // costs at worst one pinned callback on a device that is already failing.
+        // Unpinned only once CoreAudio says the registration is GONE. A failed destroy leaves the
+        // IOProc registered, and the pin is what its client data points at: freeing it hands the
+        // next callback a dangling GCHandle, a process-level access violation rather than a managed
+        // throw the trampoline could contain. Leaving it listed costs at worst one pinned callback.
         if (status != NoError)
             throw new CoreAudioException($"destroying the IOProc on device {live.DeviceId}", status);
 
@@ -215,11 +205,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             _disposed = true;
         }
 
-        // The last owner of whatever is still registered, and nothing here throws: the seam
-        // binds every release path to be throw-free and no caller is left to act on a failure.
-        // The destroy's status is still read, for the reason DestroyIoProc gives: a pin freed
-        // behind a registration CoreAudio still holds is a process-level fault, where keeping
-        // it costs one leaked pin.
+        // The last owner of whatever is still registered, and nothing here throws: the seam binds
+        // every release path to be throw-free and no caller is left to act on a failure. The
+        // destroy's status is still read, for the reason DestroyIoProc gives: a pin freed behind a
+        // registration CoreAudio still holds is a process-level fault.
         foreach (IoProc ioProc in Drain(_ioProcs))
         {
             AudioDeviceStop(ioProc.DeviceId, ioProc.ProcId);
@@ -244,24 +233,17 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         return live;
     }
 
-    /// <summary>Whether this HAL still holds <paramref name="handle"/>, which is what makes a
-    /// handle from another HAL, or one already released, refusable.</summary>
-    /// <typeparam name="T">What the list holds.</typeparam>
-    /// <param name="held">The list to look in.</param>
-    /// <param name="handle">The handle to look for.</param>
-    /// <returns>True when the list holds it.</returns>
+    /// <summary>Whether this HAL still holds <paramref name="handle"/>, which is what makes a handle
+    /// from another HAL, or one already released, refusable.</summary>
     private bool Holds<T>(List<T> held, T handle)
     {
         lock (_registrations)
             return held.Contains(handle);
     }
 
-    /// <summary>Take everything a list holds and empty it, so the caller walks a snapshot
-    /// nothing else can be releasing at the same time. The teardown shape: whoever drains owns
-    /// what came out.</summary>
-    /// <typeparam name="T">What the list holds.</typeparam>
-    /// <param name="held">The list to empty.</param>
-    /// <returns>What it held.</returns>
+    /// <summary>Take everything a list holds and empty it, so the caller walks a snapshot nothing
+    /// else can be releasing at the same time. The teardown shape: whoever drains owns what came
+    /// out.</summary>
     private List<T> Drain<T>(List<T> held)
     {
         lock (_registrations)
@@ -292,10 +274,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         if (status != NoError)
             throw new CoreAudioException($"reading property {selector:X} on object {objectId}", status);
 
-        // CoreAudio writes back what it actually filled, and the device list can shrink between
-        // the sizing call and this one: unplug a mic in that window and the tail of the array
-        // is untouched zeros, which the walk above would read as device id 0. That is
-        // kAudioObjectUnknown, no device at all, and every property read against it fails.
+        // CoreAudio writes back what it actually filled, and the device list can shrink between the
+        // sizing call and this one: unplug a mic in that window and the tail of the array is
+        // untouched zeros, which the walk above would read as device id 0.
         int written = (int)(size / sizeof(uint));
         return written < values.Length ? values[..written] : values;
     }
@@ -307,10 +288,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         uint size = sizeof(uint);
         int status = AudioObjectGetPropertyData(
             CoreAudioObject.System, &address, 0, IntPtr.Zero, &size, &deviceId);
-        // A box with no default configured is not a failure, and neither is one where the
-        // property is momentarily unreadable: 0 is kAudioObjectUnknown, which no device has, so
-        // nothing gets flagged default. CaptureDevice.DefaultFor then falls back to the first
-        // endpoint of the flow, which is the documented headless/RDP behaviour.
+        // A box with no default configured is not a failure, nor is a momentarily unreadable
+        // property: 0 is kAudioObjectUnknown, which no device has. CaptureDevice.DefaultFor then
+        // falls back to the first endpoint of the flow, the documented headless/RDP behaviour.
         return status == NoError ? deviceId : 0;
     }
 
@@ -320,10 +300,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         IntPtr cfString = IntPtr.Zero;
         uint size = (uint)IntPtr.Size;
         int status = AudioObjectGetPropertyData(objectId, &address, 0, IntPtr.Zero, &size, &cfString);
-        // Status-checked like every other read here, rather than answered as "". This one
-        // produces the device UID, which is the key a saved selection round-trips through, so
-        // "" for a failed read means two unreadable devices collide on one id and a stored ""
-        // reopens whichever the walk happens to reach first.
+        // Status-checked like every other read here, rather than answered as "". This one produces
+        // the device UID, the key a saved selection round-trips through, so "" for a failed read
+        // means two unreadable devices collide on one id.
         if (status != NoError)
             throw new CoreAudioException($"reading property {selector:X} on object {objectId}", status);
         // noErr and no string is the property being present and empty: a device that named
@@ -360,11 +339,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         AudioObjectPropertyAddress address = Address(Selector.StreamConfiguration, scope);
         uint size = 0;
         int status = AudioObjectGetPropertyDataSize(deviceId, &address, 0, IntPtr.Zero, &size);
-        // Status-checked rather than read as "no streams in this scope". A device CoreAudio
-        // refuses to answer for is one the question could not be ASKED about, and answering 0
-        // drops it from the walk silently: the picker then reports the mic as gone when the
-        // truth is that the HAL refused. That is exactly the distinction ListDevices is
-        // declared to keep, and the reason this class carries no per-method off-a-Mac guard.
+        // Status-checked rather than read as "no streams in this scope". A device CoreAudio refuses
+        // to answer for is one the question could not be ASKED about, and answering 0 drops it from
+        // the walk silently: the picker reports the mic as gone when the HAL refused. That is the
+        // distinction ListDevices is declared to keep.
         if (status != NoError)
             throw new CoreAudioException(
                 $"sizing the stream configuration of device {deviceId} in scope {scope:X}", status);
@@ -381,11 +359,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
                 throw new CoreAudioException(
                     $"reading the stream configuration of device {deviceId} in scope {scope:X}", status);
 
-            // AudioBufferList is a count followed by that many AudioBuffers. The array starts
-            // at offset 8, not 4: AudioBuffer holds a pointer, so it is 8-aligned and the
-            // count is followed by four bytes of padding. Capped at what the returned size can
-            // actually hold, because the count is native data and walking past it reads off
-            // the end of this array.
+            // AudioBufferList is a count followed by that many AudioBuffers. The array starts at
+            // offset 8, not 4: AudioBuffer holds a pointer, so it is 8-aligned and the count is
+            // followed by four bytes of padding. Capped at what the returned size can hold, since
+            // the count is native data and walking past it reads off the end.
             uint buffers = Math.Min(
                 *(uint*)target, (size - BufferListHeaderBytes) / (uint)sizeof(AudioBuffer));
             uint channels = 0;
@@ -410,11 +387,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         }
         catch (Exception)
         {
-            // Nothing may cross back into CoreAudio: an exception unwinding through a native
-            // frame tears the process down. The handler is a one-line "re-read the property"
-            // in every caller, so what is swallowed is a state refresh that the next
-            // notification, or the next read, redoes. There is no channel to report on from a
-            // CoreAudio notification thread, so the count is the trace it leaves instead.
+            // Nothing may cross back into CoreAudio: an exception unwinding through a native frame
+            // tears the process down. What is swallowed is a state refresh the next notification
+            // redoes, and a notification thread has no channel to report on, so the count is the
+            // trace it leaves.
             Interlocked.Increment(ref _callbackFaults);
         }
         return NoError;
@@ -439,20 +415,17 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
             if (*(uint*)list == 0)
                 return NoError;
 
-            // The FIRST buffer only. A multi-channel non-interleaved stream puts each channel
-            // in its own buffer, and CoreAudioFormat refuses that layout at open time, so
-            // whatever is running here has all its channels interleaved in buffer zero.
+            // The FIRST buffer only. A multi-channel non-interleaved stream puts each channel in
+            // its own buffer, and CoreAudioFormat refuses that layout at open time.
             var buffer = (AudioBuffer*)(list + BufferListHeaderBytes);
             if (buffer->Data != IntPtr.Zero && buffer->DataByteSize > 0)
                 ioProc.Callback(new ReadOnlySpan<byte>((void*)buffer->Data, (int)buffer->DataByteSize));
         }
         catch (Exception)
         {
-            // Same rule as above, and stricter: this is the realtime IO thread. Letting an
-            // exception unwind into CoreAudio tears the process down, so a handler that throws
-            // costs one buffer of audio rather than the meeting. Counted for the same reason,
-            // and the increment is on the failure path only, so the deadline pays nothing for
-            // it while things are working.
+            // Same rule as above, and stricter: this is the realtime IO thread, so a handler that
+            // throws costs one buffer of audio rather than the meeting. The increment is on the
+            // failure path only, so the deadline pays nothing while things work.
             Interlocked.Increment(ref _callbackFaults);
         }
         return NoError;
@@ -474,10 +447,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         public Action Handler { get; }
 
         /// <summary>Pin this registration so a native callback can find it.</summary>
-        /// <param name="hal">The HAL that holds it.</param>
-        /// <param name="objectId">The object being watched.</param>
-        /// <param name="address">The property being watched.</param>
-        /// <param name="handler">What to run on a change.</param>
         public Registration(
             CoreAudioHal hal, uint objectId, AudioObjectPropertyAddress address, Action handler)
         {
@@ -508,11 +477,10 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
                 status = AudioObjectRemovePropertyListener(
                     _objectId, address, &OnPropertyChanged, GCHandle.ToIntPtr(Pin));
 
-            // Not thrown (the seam binds a release not to throw) but not ignored either, for
-            // the reason DestroyIoProc gives: the pin is this listener's client data, so
-            // freeing it while CoreAudio still holds the registration hands the next
-            // notification a dangling GCHandle. Left listed and pinned instead, so HAL.Dispose
-            // retries it once; a pin that also fails there stays allocated.
+            // Not thrown (the seam binds a release not to throw) but not ignored either, for the
+            // reason DestroyIoProc gives: the pin is this listener's client data, so freeing it
+            // while CoreAudio still holds the registration hands the next notification a dangling
+            // GCHandle. Left listed and pinned, so HAL.Dispose retries it once.
             if (status != NoError)
                 return;
 
@@ -529,8 +497,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
         private bool _unpinned;
 
         /// <summary>Pin this IOProc so the native callback can find it.</summary>
-        /// <param name="deviceId">The device it runs against.</param>
-        /// <param name="callback">Where its buffers go.</param>
         public IoProc(uint deviceId, CoreAudioIoCallback callback)
         {
             DeviceId = deviceId;
@@ -694,10 +660,9 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
     [LibraryImport(CoreAudioFramework)]
     private static partial int AudioDeviceStop(uint deviceId, IntPtr ioProcId);
 
-    // bufferSize is a CFIndex, which is a signed long: nint, not int, the way every other
-    // CFIndex this backend declares is spelled (SecKeychainItems' CFDataGetLength and
-    // CFDataCreate). A 32-bit argument leaves the top half of the register undefined by the
-    // arm64 ABI, and the callee reads all 64 bits of it as the size of this buffer.
+    // bufferSize is a CFIndex, a signed long: nint, not int, the way every other CFIndex this
+    // backend declares is spelled. A 32-bit argument leaves the top half of the register undefined
+    // by the arm64 ABI, and the callee reads all 64 bits of it as the size of this buffer.
     [LibraryImport(CoreFoundationFramework)]
     private static partial byte CFStringGetCString(IntPtr theString, byte* buffer, nint bufferSize, uint encoding);
 

@@ -60,18 +60,17 @@ download the browser can fetch directly.
 - Cutting a release is a documented ritual (see `RELEASING.md`), never
   automatic.
 - Neither tray build is signed, and each OS objects in its own way, so the card
-  documents both. Windows shows SmartScreen, which is a click-through. macOS is
-  harder, and it is why the Mac artifact the card offers is a `.pkg` while
-  Windows ships a zip. The bundle carries only an ad-hoc signature, and
-  Gatekeeper reads a signature it cannot validate as tampering, so a quarantined
-  copy is reported as DAMAGED with Move to Trash as the only offer. Right-click
-  -> Open does not bypass that (it bypasses the milder unidentified-developer
-  prompt, which needs a real signature), leaving `xattr` as the only route out
-  of a zip. An unsigned PACKAGE gets the milder treatment instead, and
-  `installer` writes payload outside the path that applies quarantine, so the
-  installed app is not quarantined and opens straight away. Apple documents none
-  of that, so `ci.yml` asserts it on a real runner rather than the card trusting
-  it. The zip stays published for anyone who wants the bundle without an
-  installer, and it still needs the command. Notarisation is what would remove
-  the one remaining block, and it needs a paid Apple Developer account; that,
-  code signing and auto-update all stay out of scope for v1.
+  documents both. Windows shows SmartScreen, a click-through. macOS is why the
+  Mac artifact the card offers is a `.pkg` while Windows ships a zip: the bundle
+  carries only an ad-hoc signature, Gatekeeper reads a signature it cannot
+  validate as tampering, and a quarantined copy is therefore reported as DAMAGED
+  with Move to Trash as the only offer. Right-click -> Open does not bypass that
+  (it bypasses the milder unidentified-developer prompt, which needs a real
+  signature), leaving `xattr` as the only route out of a zip. An unsigned PACKAGE
+  gets the milder treatment, and `installer` writes payload outside the path that
+  applies quarantine, so the installed app opens straight away. Apple documents
+  none of that, so `ci.yml` asserts it on a real runner. The zip stays published
+  for anyone who wants the bundle without an installer, and it still needs the
+  command. Notarisation would remove the one remaining block and needs a paid
+  Apple Developer account; that, code signing and auto-update stay out of scope
+  for v1.

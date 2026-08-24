@@ -5,16 +5,13 @@ namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
 /// The IOProc orderings, driven directly (#420). Both captures route through
-/// <see cref="IoProcRun"/>, and its whole reason to exist is owning four rules that were
-/// previously written twice and had drifted. A rule with one owner and no test is no better
-/// than a rule with two owners: the extraction only helps if breaking it goes red.
+/// <see cref="IoProcRun"/>, whose whole reason to exist is owning four rules that are one line from
+/// a bug each. A rule with one owner and no test is no better than a rule with two owners.
 ///
 /// Driven through <c>FakeCoreAudioHal</c> wrapped in a recorder, not a double of its own: these
-/// assertions are about WHEN a call arrives relative to the pump, which the shared fake has no
-/// way to observe, but every rule it DOES enforce still applies here. A standalone double would
-/// have to restate handle validation to keep them, and the one written first did not: its
-/// destroy was a no-op, so nothing here could observe a registration that CoreAudio refused to
-/// destroy.
+/// assertions are about WHEN a call arrives relative to the pump, which the shared fake cannot
+/// observe, while every rule it DOES enforce still applies. A standalone double would have to
+/// restate handle validation to keep them.
 /// </summary>
 public class IoProcRunTests
 {
@@ -23,10 +20,9 @@ public class IoProcRunTests
     [Fact]
     public void Start_HasThePumpRunningBeforeTheIoProcIsRegistered()
     {
-        // The ordering that had no test until this one, and the reason it matters: CoreAudio can
-        // deliver the first buffer the instant the IOProc is created, and a pump that starts
-        // afterwards drops whatever arrives in the gap. Silent, and it looks like a device that
-        // took a moment to warm up.
+        // CoreAudio can deliver the first buffer the instant the IOProc is created, and a pump that
+        // starts afterwards drops whatever arrives in the gap. Silent, and it looks like a device
+        // that took a moment to warm up.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff);
         var run = new IoProcRun(hal, handOff);
@@ -41,10 +37,9 @@ public class IoProcRunTests
     [Fact]
     public void Start_WhenTheDeviceRefusesTheIoProc_LeavesNoPumpRunning()
     {
-        // The pump is up before the create, so every way out of Start has to take it down again.
-        // Left running it is a thread parked on a semaphore nothing will release, holding its
-        // ring, and nothing holds a handle to reach it: the tray retries a refused device, so
-        // that is one thread and one ring per attempt for the process lifetime.
+        // The pump is up before the create, so every way out of Start has to take it down again. Left
+        // running it is a thread parked on a semaphore nothing will release, holding its ring, with
+        // nothing holding a handle to reach it - and the tray retries a refused device.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff) { CreateError = new CoreAudioException("creating", -66748) };
         var run = new IoProcRun(hal, handOff);
@@ -58,10 +53,9 @@ public class IoProcRunTests
     [Fact]
     public void Stop_ReportsWhatCoreAudioSaidAboutTheStop()
     {
-        // IAudioCapture.Stop declares ExternalException for an endpoint invalidated mid-capture
-        // and says teardown swallows it. So the primitive propagates and the CALLER decides:
-        // swallowing here would make every backend quietly stricter than the seam, which is the
-        // divergence the two captures had before they shared this.
+        // IAudioCapture.Stop declares ExternalException for an endpoint invalidated mid-capture and
+        // says teardown swallows it. So the primitive propagates and the CALLER decides: swallowing
+        // here would make every backend quietly stricter than the seam.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff) { StopError = new CoreAudioException("stopping", -66748) };
         var run = new IoProcRun(hal, handOff);
@@ -78,9 +72,8 @@ public class IoProcRunTests
     [Fact]
     public void Abandon_OnTheSameFailure_ReleasesWithoutThrowing()
     {
-        // The other half of that decision. Dispose and a rebind have no other owner and must
-        // carry on, so they take this one; it differs from Stop ONLY in what it does with the
-        // report.
+        // The other half of that decision. Dispose and a rebind have no other owner and must carry
+        // on, so they take this one; it differs from Stop ONLY in what it does with the report.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff) { StopError = new CoreAudioException("stopping", -66748) };
         var run = new IoProcRun(hal, handOff);
@@ -95,9 +88,8 @@ public class IoProcRunTests
     [Fact]
     public void Abandon_WhatItSwallows_IsStillCounted()
     {
-        // Abandon reports nothing by contract, which is the right call for a path with no other
-        // owner and the wrong one for a device that has quietly stayed busy since the meeting
-        // ended. The counter is the only trace such a teardown leaves.
+        // Abandon reports nothing by contract, which is right for a path with no other owner and
+        // wrong for a device quietly still busy. The counter is the only trace it leaves.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff) { StopError = new CoreAudioException("stopping", -66748) };
         var run = new IoProcRun(hal, handOff);
@@ -125,9 +117,8 @@ public class IoProcRunTests
     [Fact]
     public void Start_WhenTheHandOffRefuses_GivesTheClaimBack()
     {
-        // The claim is taken before the hand-off starts, so every way OUT of Start must give it
-        // back. A claim stranded here answers "already running" about a run that never began,
-        // permanently, which for the system-audio capture kills every later rebind too.
+        // The claim is taken before the hand-off starts, so every way OUT of Start must give it back.
+        // A stranded claim answers "already running" about a run that never began, permanently.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff);
         var run = new IoProcRun(hal, handOff);
@@ -144,11 +135,10 @@ public class IoProcRunTests
     [Fact]
     public void Release_LeavesNoRegistrationBehind()
     {
-        // Asserted on the registration rather than on the call order, because a leak is what an
-        // inverted teardown actually produces: CoreAudio refuses to destroy an IOProc that was
-        // not stopped first, and Release swallows that refusal (correctly, since a destroy can
-        // also fail because the object is already gone). The refusal is therefore invisible and
-        // only the surviving registration says the order was wrong.
+        // Asserted on the registration rather than the call order, because a leak is what an inverted
+        // teardown produces: CoreAudio refuses to destroy an IOProc that was not stopped first, and
+        // Release swallows that refusal (correctly, since a destroy can also fail because the object
+        // is already gone). Only the surviving registration says the order was wrong.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff);
         var run = new IoProcRun(hal, handOff);
@@ -163,8 +153,7 @@ public class IoProcRunTests
     public void Release_ClaimsTheHandleOnce_SoTwoCallersCannotBothStopIt()
     {
         // Stop and Dispose both reach the release, and a read-then-null lets both claim one
-        // registration: CoreAudio is asked to stop and destroy it twice, and the second Stop
-        // announces an end of stream that already ended.
+        // registration: CoreAudio is asked to stop and destroy it twice.
         var handOff = new CaptureHandOff("test-pump", _ => { });
         var hal = new OrderingHal(handOff);
         var run = new IoProcRun(hal, handOff);
@@ -175,10 +164,9 @@ public class IoProcRunTests
         Assert.Equal(1, hal.Stops);
     }
 
-    // FakeCoreAudioHal with the one thing it cannot report added: what the pump was doing at the
-    // moment each call arrived, which is the only way to assert an ordering from outside. Every
-    // call forwards, so the fake's handle validation still governs, including the refusal to
-    // destroy an IOProc that was not stopped first.
+    // FakeCoreAudioHal with the one thing it cannot report added: what the pump was doing when each
+    // call arrived, the only way to assert an ordering from outside. Every call forwards, so the
+    // fake's handle validation still governs.
     private sealed class OrderingHal(CaptureHandOff handOff) : ICoreAudioHal
     {
         private readonly FakeCoreAudioHal _inner = new();

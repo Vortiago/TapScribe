@@ -9,12 +9,10 @@ namespace TapScribe.Bridge.MacOS;
 /// </summary>
 internal static class BridgeAppData
 {
-    // Composed from the home directory rather than from SpecialFolder.ApplicationData,
-    // which is what the Windows sibling uses and which does resolve to
-    // ~/Library/Application Support on a Mac. The reason is the LANE, not the mapping:
-    // this assembly is plain net10.0 and its tests run on ubuntu, where that same call
-    // answers ~/.config. Composing the path makes this value the operator's Mac path on
-    // every host, so TrayStoresTests can assert it without needing a Mac to run on.
+    // Composed from the home directory rather than from SpecialFolder.ApplicationData, which does
+    // resolve to ~/Library/Application Support on a Mac. The reason is the LANE: this assembly is
+    // plain net10.0 and its tests run on ubuntu, where that call answers ~/.config. Composing the
+    // path makes this the operator's Mac path on every host.
     public static string Directory => Path.Join(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         "Library",
@@ -27,35 +25,30 @@ internal static class BridgeAppData
 /// the tray's files live and how its one secret is protected is decided here and nowhere
 /// else; the stores themselves are OS-agnostic.
 ///
-/// An INSTANCE with a <see cref="Production"/> singleton, rather than a static set, because
-/// the settings store's token half is the login Keychain: a Save writes a real Keychain item
-/// and a Save of a blank token DELETES one, and there is no temp-directory escape for either
-/// the way there is for the three files. So the shell takes a set rather than reaching for a
-/// static one, and anything exercising the shell hands it a directory and a token store it
-/// owns. <c>Production</c> is what the app runs, matching <c>TrayDependencies.Production</c>
-/// on the Windows side.
+/// An INSTANCE with a <see cref="Production"/> singleton, rather than a static set, because the
+/// settings store's token half is the login Keychain: a Save writes a real Keychain item and a Save
+/// of a blank token DELETES one, with no temp-directory escape the way there is for the three
+/// files. So the shell takes a set, and anything exercising it hands over a directory and a token
+/// store it owns. <c>Production</c> is what the app runs.
 /// </summary>
 public sealed class TrayStores
 {
     /// <summary>
-    /// The on-disk settings filename, an operator-facing contract: a change orphans every
-    /// operator's saved settings, so it needs a migration rather than a rename. Its own
-    /// name rather than the Windows file's, which is stuck saying "windows-tray-bridge"
-    /// for a migration reason this platform has no share in.
+    /// The on-disk settings filename, an operator-facing contract: a change orphans every operator's
+    /// saved settings, so it needs a migration rather than a rename. Its own name rather than the
+    /// Windows file's, which is stuck saying "windows-tray-bridge".
     /// </summary>
     public const string SettingsFileName = "macos-tray-bridge.json";
 
     /// <summary>
-    /// The identity a tap streams under when neither the operator nor the Mac offers one -
-    /// the WAV filename slug, and the key the Recorder attributes those recordings by. Same
-    /// class of value as the filename above, and living here for the same reason: it is
-    /// operator-facing, it is frozen, and changing it re-attributes every recording made under
-    /// it as a new speaker rather than renaming anything.
+    /// The identity a tap streams under when neither the operator nor the Mac offers one: the WAV
+    /// filename slug, and the key the Recorder attributes those recordings by. Frozen and
+    /// operator-facing like the filename above, since changing it re-attributes every recording
+    /// made under it as a new speaker.
     ///
-    /// Core's own default is "windows-tray", which is right where it is frozen and simply
-    /// wrong here: it would file a Mac operator's recordings under a Windows tray they have
-    /// never run. <see cref="BridgeSettingsStore"/> takes this and stamps it, so there is one
-    /// place per platform rather than one per member that falls back to it.
+    /// Core's own default is "windows-tray", which would file a Mac operator's recordings under a
+    /// Windows tray they have never run. <see cref="BridgeSettingsStore"/> takes this and stamps it,
+    /// so there is one place per platform rather than one per member that falls back to it.
     /// </summary>
     public const string FallbackIdentity = "mac-tray";
 
@@ -66,8 +59,6 @@ public sealed class TrayStores
         new(BridgeAppData.Directory, new KeychainTapTokenStore());
 
     /// <summary>Build the three stores over one directory.</summary>
-    /// <param name="directory">Where all three files live.</param>
-    /// <param name="tokens">How the tap token is kept at rest.</param>
     public TrayStores(string directory, ITapTokenStore tokens)
     {
         ArgumentNullException.ThrowIfNull(directory);

@@ -7,7 +7,7 @@ namespace TapScribe.Bridge.MacOS;
 /// One IOProc running over one device id, and the hand-off it publishes into.
 ///
 /// Shared by both macOS captures, which need it identically over different devices (a real
-/// endpoint, or an aggregate wrapping a process tap). Written twice, it had drifted.
+/// endpoint, or an aggregate wrapping a process tap).
 ///
 /// Five orderings, each one line from a bug and each with a test that goes red if the line
 /// moves. See <c>IoProcRunTests</c>:

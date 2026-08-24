@@ -27,10 +27,9 @@ public sealed record SummaryRun(string Text, SummaryEmphasis Emphasis, bool Mono
 /// Flattens <see cref="SummaryMarkdown"/>'s block model into painted runs.
 ///
 /// Here rather than in a shell because every decision it makes is one both shells make
-/// identically: where a blank line goes, how tight a run of list items is, what marker a
-/// bullet gets, how far a heading steps up, and which face an inline span takes. What is left
-/// for a shell is mapping a run to a font object, which is the only part that is genuinely
-/// about a toolkit.
+/// identically: where a blank line goes, how tight a run of list items is, what marker a bullet
+/// gets, how far a heading steps up, and which face an inline span takes. What is left for a shell
+/// is mapping a run to a font object.
 /// </summary>
 public static class SummaryLayout
 {

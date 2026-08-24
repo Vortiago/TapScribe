@@ -4,14 +4,13 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge.MacOS.Tests;
 
 /// <summary>
-/// The Settings level meter's capture lifecycle (#421). The window around it is AppKit and
-/// cannot be tested; <see cref="MeterProbe"/> touches no AppKit type at all, so the part that
-/// decides anything is testable and belongs tested, the way SettingsSeed is.
+/// The Settings level meter's capture lifecycle (#421). The window around it is AppKit and cannot be
+/// tested; <see cref="MeterProbe"/> touches no AppKit type, so the part that decides anything is
+/// testable and belongs tested, the way SettingsSeed is.
 ///
 /// What it decides: which native failures become which message, that a pick which finds nothing
-/// stops cleanly rather than half-started, and that the enumerator outlives the capture it
-/// produced. All three are invisible to an operator until the bar is dead or a device stays
-/// busy after the window closed.
+/// stops cleanly, and that the enumerator outlives the capture it produced. All three are invisible
+/// until the bar is dead or a device stays busy after the window closed.
 /// </summary>
 public class MeterProbeTests
 {
@@ -32,9 +31,8 @@ public class MeterProbeTests
     [Fact]
     public void Start_WhenThePickFindsNothing_ReportsItAndLeavesNothingOpen()
     {
-        // The device the meter is about is simply not present: a mic unplugged between opening
-        // Settings and ticking the box. Distinct from a failure, and the operator needs the
-        // difference, so it is its own message rather than an exception's.
+        // The device is simply not present: a mic unplugged between opening Settings and ticking the
+        // box. Distinct from a failure, and the operator needs the difference.
         var enumerator = new Enumerator([]);
         using var probe = new MeterProbe(() => enumerator, static _ => null);
 
@@ -49,10 +47,9 @@ public class MeterProbeTests
     [MemberData(nameof(DeclaredOpenFailures))]
     public void Start_WhenOpenFails_ReportsItRatherThanThrowing(Exception refusal, string expected)
     {
-        // One test for the seam's whole declared set, because the probe treats them as one path
-        // and separate copies differing only in a type would say otherwise. The set is the
-        // point: the filter listed two of these four, and the rest escaped an NSButton handler,
-        // which on AppKit ends the tray rather than merely leaving a bar dead.
+        // One test for the seam's whole declared set, because the probe treats them as one path. The
+        // set is the point: a filter listing two of these four lets the rest escape an NSButton
+        // handler, which on AppKit ends the tray rather than merely leaving a bar dead.
         var enumerator = new Enumerator([Mic]) { OpenError = refusal };
         using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
 
@@ -83,10 +80,9 @@ public class MeterProbeTests
     [Fact]
     public void Start_WhenTheCaptureRefusesToStart_DisposesItBeforeItsEnumerator()
     {
-        // The grant prompt lands on the START, not the open: macOS asks for System Audio
-        // Recording when the IOProc starts, with a tap and an aggregate already standing. So the
-        // meter must be published BEFORE it is started, or a declined prompt leaves Stop a null
-        // meter, the tap standing, and the enumerator disposed under it.
+        // The grant prompt lands on the START, not the open: macOS asks for System Audio Recording
+        // when the IOProc starts, with a tap and an aggregate already standing. So the meter must be
+        // published BEFORE it is started, or a declined prompt leaves Stop a null meter.
         var enumerator = new Enumerator([Mic])
         {
             StartError = new ExternalException("starting mic-1", -66748),
@@ -106,9 +102,8 @@ public class MeterProbeTests
     [Fact]
     public void Stop_DisposesTheCaptureBeforeItsEnumerator()
     {
-        // The ordering the capture seam's disposal contract exists for: the capture came from
-        // the enumerator, so a live capture over a disposed enumerator is use-after-free
-        // wearing a managed type.
+        // The ordering the capture seam's disposal contract exists for: a live capture over a
+        // disposed enumerator is use-after-free wearing a managed type.
         var enumerator = new Enumerator([Mic]);
         using var probe = new MeterProbe(() => enumerator, devices => devices[0]);
         probe.Start();
@@ -201,9 +196,8 @@ public class MeterProbeTests
             if (owner.StartError is not null)
                 throw owner.StartError;
 
-            // Otherwise nothing to produce: these tests are about the lifecycle, and a probe's
-            // Level is the meter's business rather than this double's. Referencing the events
-            // keeps the compiler from warning them unused without pretending they fire.
+            // Otherwise nothing to produce: these tests are about the lifecycle. Referencing the
+            // events keeps the compiler quiet without pretending they fire.
             _ = DataAvailable;
             _ = Failed;
             _ = MuteChanged;

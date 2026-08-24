@@ -4,14 +4,13 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.Bridge.MacOS.Tests;
 
 /// <summary>
-/// The macOS system-audio <see cref="IAudioCapture"/>: a Core Audio process tap inside a
-/// private aggregate device (#420). Driven entirely through <see cref="FakeCoreAudioHal"/>,
-/// which validates handle lifetime and refuses the orderings CoreAudio refuses, so the three
-/// objects' composition and teardown are exercised on a lane with no audio hardware and no
-/// TCC grant.
+/// The macOS system-audio <see cref="IAudioCapture"/>: a Core Audio process tap inside a private
+/// aggregate device (#420). Driven entirely through <see cref="FakeCoreAudioHal"/>, which validates
+/// handle lifetime and refuses the orderings CoreAudio refuses, so the three objects' composition
+/// and teardown are exercised on a lane with no audio hardware and no TCC grant.
 ///
-/// This is the half of a meeting the Bridge exists for: the operator's microphone is one
-/// speaker, and what the Mac PLAYS is everyone else.
+/// This is the half of a meeting the Bridge exists for: the microphone is one speaker, and what the
+/// Mac PLAYS is everyone else.
 /// </summary>
 public class MacOSSystemAudioCaptureTests
 {
@@ -29,11 +28,10 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhileStarted_HoldsOneTapOneAggregateAndOneRunningIoProc()
     {
-        // The whole shape of the platform in one assertion. There is no loopback endpoint to
-        // open on macOS: a tap is an object with no audio path, an aggregate device is what
-        // gives it an AudioObjectID, and only then is there something an IOProc can run over.
-        // Counted rather than merely "it started", because each of the three is a separate
-        // native lifetime and any one of them left unmade is a capture that delivers nothing.
+        // The whole shape of the platform in one assertion: a tap is an object with no audio path, an
+        // aggregate device is what gives it an AudioObjectID, and only then is there something an
+        // IOProc can run over. Counted because any one left unmade is a capture that delivers
+        // nothing.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
 
@@ -48,11 +46,10 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_AfterDispose_LeavesNoLiveHandleBehind()
     {
-        // Three native objects and a listener, released in an order CoreAudio enforces: the
-        // IOProc before the aggregate that carries it, the aggregate before the tap it lists.
-        // The fake refuses each of those backwards, so reaching zero on every counter is the
-        // ORDER as much as the count. A tap left behind is a private aggregate device sitting
-        // in the operator's Mac until they log out.
+        // Three native objects and a listener, released in an order CoreAudio enforces: the IOProc
+        // before the aggregate that carries it, the aggregate before the tap it lists. The fake
+        // refuses each backwards, so reaching zero is the ORDER as much as the count. A tap left
+        // behind is a private aggregate sitting in the operator's Mac until they log out.
         FakeCoreAudioHal hal = WithSpeakers();
         // Scoped rather than method-scoped, because disposing IS the act here and the
         // assertions below have to run AFTER it.
@@ -71,11 +68,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_BindsTheAggregateToTheEndpointTheMacIsPlayingThrough()
     {
-        // "System audio" means what the Mac is PLAYING, and what it is playing goes to the
-        // default output by definition. An aggregate built around any other endpoint records
-        // silence, which is why this capture is not opened against whichever render device it
-        // was handed: it finds the default itself, through the same rule the meeting's
-        // follow-default selection resolves by.
+        // "System audio" means what the Mac is PLAYING, which goes to the default output by
+        // definition. An aggregate built around any other endpoint records silence, so this capture
+        // finds the default itself rather than using whichever render device it was handed.
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Output(63, "MacBook Pro Speakers"));
         hal.AddDevice(Devices.Output(71, "External Headphones", isDefault: true));
@@ -89,9 +84,8 @@ public class MacOSSystemAudioCaptureTests
     public void SystemAudio_OnAMacWithNoOutputAtAll_RefusesToOpenRatherThanTapNothing()
     {
         // A Mac with every output unplugged (a headless mini between reboots is the real one).
-        // ExternalException is the capture seam's declared native failure, which is what
-        // BridgeRuntime filters on to skip a device and record the meeting on the rest: the
-        // microphone still has to make it into the session.
+        // ExternalException is the capture seam's declared native failure, which is what BridgeRuntime
+        // filters on to skip a device and still get the microphone into the session.
         var hal = new FakeCoreAudioHal();
         hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
 
@@ -108,10 +102,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheMacRefusesTheTap_SurfacesTheNativeFailureAndHoldsNothing()
     {
-        // What a missing "System Audio Recording" grant looks like from here, and what a Mac
-        // below the 14.4 floor would look like if one got this far. Same declared type, for
-        // the same reason: the caller's question is "did the platform refuse", not "at which
-        // call".
+        // What a missing "System Audio Recording" grant looks like from here, and what a Mac below
+        // the 14.4 floor would look like if one got this far. Same declared type: the caller's
+        // question is "did the platform refuse", not "at which call".
         FakeCoreAudioHal hal = WithSpeakers();
         hal.CreateProcessTapError = new CoreAudioException("creating a system-audio process tap", -66748);
 
@@ -126,9 +119,8 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheAggregateIsRefused_ReleasesTheTapItAlreadyMade()
     {
-        // The one ctor step that can fail with something already owned. A tap with no
-        // aggregate is invisible to every counter an operator or a developer can read, and it
-        // survives for the process lifetime, so the unwind is the whole claim here.
+        // The one ctor step that can fail with something already owned. A tap with no aggregate is
+        // invisible to every counter anyone can read, and survives for the process lifetime.
         FakeCoreAudioHal hal = WithSpeakers();
         hal.CreateAggregateDeviceError = new CoreAudioException("creating the aggregate device", -66748);
 
@@ -141,10 +133,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_ReportsTheTapsOwnFormat_NotTheOutputDevices()
     {
-        // The tap is a stereo mixdown that CoreAudio resamples for us, and its format is a
-        // property of the TAP object rather than of the endpoint underneath. Reading the
-        // wrong one is how a pipeline ends up resampling 48 kHz stereo float as though it
-        // were whatever the speakers happen to be configured for.
+        // The tap is a stereo mixdown CoreAudio resamples for us, and its format is a property of the
+        // TAP rather than of the endpoint underneath. Reading the wrong one resamples 48 kHz stereo
+        // float as whatever the speakers happen to be configured for.
         FakeCoreAudioHal hal = WithSpeakers();
         hal.TapFormat = Formats.Float32Stereo48k;
         using var capture = new MacOSSystemAudioCapture(hal);
@@ -155,10 +146,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_ReportsUnmuted_BecauseATapHasNoOsMuteToHonour()
     {
-        // Matching the Windows loopback sibling: a render path has no mute event, so the level
-        // gate is the only mute there is (#159). Asserted rather than left implicit, because
-        // "muted" would hard-close the gate and record the far side of every meeting as
-        // silence.
+        // Matching the Windows loopback sibling: a render path has no mute event, so the level gate
+        // is the only mute there is (#159). Asserted rather than left implicit, because "muted" would
+        // hard-close the gate and record the far side of every meeting as silence.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
 
@@ -170,9 +160,8 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhileStarted_SurfacesTapAudioAsDataAvailable()
     {
-        // The point of the whole file. The fake refuses to deliver into a device with no
-        // RUNNING IOProc, so this also pins that Start registered and started one on the
-        // AGGREGATE rather than leaving the callback wired to the tap, which is not a device.
+        // The point of the whole file. The fake refuses to deliver into a device with no RUNNING
+        // IOProc, so this also pins that Start ran one on the AGGREGATE, not on the tap.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<byte[]> received = [];
@@ -197,14 +186,12 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_AfterDispose_HasNoHandleLeftForCoreAudioToDeliverInto()
     {
-        // The other half of the release. A destroyed aggregate cannot be delivered into, and
-        // the fake refuses to model one that could: a capture whose IOProc outlived its owner
-        // is a meeting still streaming PCM after the operator ended it.
+        // The other half of the release. A capture whose IOProc outlived its owner is a meeting still
+        // streaming PCM after the operator ended it, and the fake refuses to model one.
         FakeCoreAudioHal hal = WithSpeakers();
         uint aggregate;
-        // Scoped rather than method-scoped, because disposing IS the act here and the assertion
-        // below has to run AFTER it. A bare `using var` would release at the end of the method,
-        // i.e. after the push had already been attempted against a live handle.
+        // Scoped rather than method-scoped, because disposing IS the act here: a bare `using var`
+        // would release after the push had already been attempted against a live handle.
         {
             using var capture = new MacOSSystemAudioCapture(hal);
             capture.Start();
@@ -217,10 +204,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_OnACleanStop_RaisesFailedWithNoError()
     {
-        // Failed is how the pipeline learns this capture stopped delivering, and the seam
-        // spells a clean stop as a null payload precisely so it does not read as "system audio
-        // lost". Same contract as the microphone's, because the pipeline above cannot tell the
-        // two backends apart.
+        // Failed is how the pipeline learns this capture stopped delivering, and the seam spells a
+        // clean stop as a null payload precisely so it does not read as "system audio lost". Same
+        // contract as the microphone's, because the pipeline cannot tell the two backends apart.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<Exception?> failures = [];
@@ -241,10 +227,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheAggregateGoesAwayMidStream_RaisesFailedWithTheReason()
     {
-        // An aggregate device whose sub-device leaves is itself invalidated, and CoreAudio just
-        // stops calling the IOProc. Without this the far side of the meeting records as silence
-        // for the rest of the call with the status line still claiming both devices are
-        // streaming - the exact failure the tap was added to fix, arriving by a different door.
+        // An aggregate whose sub-device leaves is itself invalidated, and CoreAudio stops calling the
+        // IOProc. Without this the far side records as silence for the rest of the call with the
+        // status line still claiming both devices are streaming.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<Exception?> failures = [];
@@ -259,9 +244,8 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_StartedTwice_ThrowsInvalidOperationAndLeavesTheRunningStreamAlone()
     {
-        // InvalidOperationException, deliberately NOT the native failure type: a double start
-        // is a bug in the caller rather than a Mac that refused, so the orchestrator's
-        // skip-and-carry-on filter must not swallow it.
+        // InvalidOperationException, deliberately NOT the native failure type: a double start is a
+        // caller bug, so the orchestrator's skip-and-carry-on filter must not swallow it.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         capture.Start();
@@ -275,10 +259,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheDefaultOutputMoves_RebindsTheTapToTheNewEndpoint()
     {
-        // Plugging in headphones mid-meeting is the everyday case, and it moves what the Mac
-        // plays through. The aggregate is built AROUND one endpoint, so the old binding does
-        // not follow: left alone it records the rest of the call as silence, with the meeting
-        // still showing as streaming and nothing anywhere to say the far side went away.
+        // Plugging in headphones mid-meeting is the everyday case, and it moves what the Mac plays
+        // through. The aggregate is built AROUND one endpoint, so left alone it records the rest of
+        // the call as silence with the meeting still showing as streaming.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         capture.Start();
@@ -295,10 +278,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_RebindingWhileStreaming_KeepsDeliveringFromTheNewEndpoint()
     {
-        // The rebind is only worth doing if the meeting carries on through it. The fake
-        // refuses to deliver into anything but a RUNNING IOProc on that exact device, so
-        // audio arriving from the new aggregate is the whole claim: registered, started, and
-        // wired to the same handler as before.
+        // The rebind is only worth doing if the meeting carries on through it. The fake refuses to
+        // deliver into anything but a RUNNING IOProc on that exact device, so audio arriving from
+        // the new aggregate is the whole claim.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<byte[]> received = [];
@@ -337,11 +319,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenThePropertyFiresWithoutTheOutputMoving_KeepsTheBindingItHas()
     {
-        // CoreAudio fires the default-output property on changes this capture has no stake in,
-        // and a rebind is not free: it destroys and rebuilds a tap and an aggregate device, and
-        // drops however many buffers land in the gap. Rebuilding on every notification would
-        // punch a hole in the recording each time something else on the Mac touched the
-        // property.
+        // CoreAudio fires the default-output property on changes this capture has no stake in, and a
+        // rebind destroys and rebuilds a tap and an aggregate device, dropping whatever lands in the
+        // gap. Rebuilding on every notification would punch a hole in the recording each time.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         capture.Start();
@@ -357,12 +337,10 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheNewEndpointsTapReadsDifferently_ReportsFailedRatherThanGarbage()
     {
-        // Format is read once, at Open, and everything downstream is built from it: the
-        // Resampler that turns these bytes into the wire format was constructed against that
-        // description and cannot be told otherwise mid-stream. So an endpoint whose tap reads
-        // differently is not something to quietly carry on with - the bytes would be
-        // reinterpreted at the wrong rate and channel count, which is noise recorded as
-        // speech. Failed is what the pipeline surfaces as "system audio stopped".
+        // Format is read once, at Open, and the Resampler downstream was built from it and cannot be
+        // told otherwise mid-stream. An endpoint whose tap reads differently would have the bytes
+        // reinterpreted at the wrong rate and channel count, which is noise recorded as speech.
+        // Failed is what the pipeline surfaces as "system audio stopped".
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<Exception?> failures = [];
@@ -388,9 +366,8 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheRebindItselfIsRefused_ReportsFailedAndHoldsNothing()
     {
-        // The output moved to an endpoint this Mac then refuses to tap. There is nothing left
-        // to record the far side with, so the pipeline is told; what it must not be left with
-        // is a capture that reports fine and delivers nothing.
+        // The output moved to an endpoint this Mac refuses to tap. Nothing is left to record the far
+        // side with, so the pipeline is told rather than left with a capture that delivers nothing.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<Exception?> failures = [];
@@ -408,11 +385,10 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheRebuiltTapWillNotSayWhatItCarries_HoldsNothing()
     {
-        // The one rebind failure that happens AFTER both system-wide objects exist: the tap and
-        // its aggregate were built, and reading the tap's format is what refused. Neither has an
-        // owner at that moment - the old binding is already gone and the new one is not
-        // published - so an unwind that releases only what it can SEE strands a process tap and
-        // a Mac-wide aggregate device for the life of the process, once per output switch.
+        // The one rebind failure that happens AFTER both system-wide objects exist: the tap and its
+        // aggregate were built, and reading the tap's format refused. Neither has an owner at that
+        // moment, so an unwind that releases only what it can SEE strands a process tap and a
+        // Mac-wide aggregate for the life of the process, once per output switch.
         FakeCoreAudioHal hal = WithSpeakers();
         using var capture = new MacOSSystemAudioCapture(hal);
         List<Exception?> failures = [];
@@ -431,9 +407,8 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_DisposedAfterARefusedRebind_StillReleasesCleanly()
     {
-        // A capture that lost its binding is still an object its owner will Dispose, from a
-        // finally with nothing to fall back on. It has nothing left to release, and saying so
-        // by throwing would strand the rest of the teardown.
+        // A capture that lost its binding is still an object its owner will Dispose, from a finally
+        // with nothing to fall back on. Throwing would strand the rest of the teardown.
         FakeCoreAudioHal hal = WithSpeakers();
         var capture = new MacOSSystemAudioCapture(hal);
         capture.Start();
@@ -447,10 +422,9 @@ public class MacOSSystemAudioCaptureTests
     [Fact]
     public void SystemAudio_WhenTheAggregateRefusesToStart_LeavesNoIoProcAndNoPumpBehind()
     {
-        // The tray retries a device that refused, so a registration or a pump thread left by
-        // each attempt is one per attempt for the process lifetime. The tap and the aggregate
-        // deliberately SURVIVE: they are the ctor's, not this call's, and the retry reuses
-        // them.
+        // The tray retries a device that refused, so a registration or a pump thread left behind is
+        // one per attempt for the process lifetime. The tap and the aggregate deliberately SURVIVE:
+        // they are the ctor's, not this call's, and the retry reuses them.
         FakeCoreAudioHal hal = WithSpeakers();
         hal.StartIoError = new CoreAudioException("starting the IOProc", -66780);
         using var capture = new MacOSSystemAudioCapture(hal);

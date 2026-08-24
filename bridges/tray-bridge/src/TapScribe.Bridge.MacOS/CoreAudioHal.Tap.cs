@@ -6,25 +6,21 @@ namespace TapScribe.Bridge.MacOS;
 /// <summary>
 /// The system-audio half of the HAL: Core Audio process taps (#420).
 ///
-/// Same bargain as the rest of <see cref="CoreAudioHal"/> and the same rule - no logic, only
-/// native calls and status checks. Which endpoint to tap, what a rebind means and what order
-/// to tear the three objects down in are all decided in
-/// <see cref="MacOSSystemAudioCapture"/>, where a fake can drive them; the description handed
-/// to CoreAudio is built by <see cref="CoreAudioAggregateDescription"/>, where a test can read
-/// it. What is left here is the eleven native symbols and the twelfth thing, which is the one
-/// awkward part of the whole backend:
+/// Same rule as the rest of <see cref="CoreAudioHal"/> - no logic, only native calls and status
+/// checks. Which endpoint to tap, what a rebind means and what order to tear the three objects down
+/// in are decided in <see cref="MacOSSystemAudioCapture"/>, where a fake can drive them; the
+/// description handed to CoreAudio is built by <see cref="CoreAudioAggregateDescription"/>, where a
+/// test can read it. What is left is eleven native symbols and one awkward twelfth:
 ///
-/// <c>CATapDescription</c> is an ObjC class and is NOT bound by <c>Microsoft.macOS</c>, which
-/// carries no CoreAudio namespace at all. It is reached through the ObjC runtime's own C entry
-/// points rather than through a hand-written <c>NSObject</c> binding, because constructing any
-/// NSObject-derived type under the test host faults inside <c>ObjCRuntime</c>: a binding would
-/// make this file unreachable even by the symbol smoke test, and would push the facade upward
-/// into the class that is supposed to be testable.
+/// <c>CATapDescription</c> is an ObjC class and is NOT bound by <c>Microsoft.macOS</c>. It is
+/// reached through the ObjC runtime's own C entry points rather than a hand-written
+/// <c>NSObject</c> binding, because constructing any NSObject-derived type under the test host
+/// faults inside <c>ObjCRuntime</c>: a binding would put this file out of reach of even the symbol
+/// smoke test, and push the facade up into the class that is supposed to be testable.
 ///
 /// A separate file rather than a separate class, so the reflection half of
-/// <c>CoreAudioUpstreamContractTests</c> - which counts the <c>[LibraryImport]</c>s on this
-/// ONE type and makes the pinned table agree - still sees every native declaration the
-/// backend makes.
+/// <c>CoreAudioUpstreamContractTests</c>, which counts the <c>[LibraryImport]</c>s on this ONE
+/// type, still sees every native declaration the backend makes.
 /// </summary>
 public sealed unsafe partial class CoreAudioHal
 {
@@ -50,11 +46,9 @@ public sealed unsafe partial class CoreAudioHal
             }
             catch
             {
-                // The tap EXISTS - only naming it failed. It is not on _taps yet, so Dispose
-                // would never reach it and no caller holds a handle to hand back: leaving it
-                // is a system-wide object stranded for the process lifetime. Status ignored
-                // for the reason every release path here gives, and the read's failure is what
-                // propagates.
+                // The tap EXISTS; only naming it failed. It is not on _taps yet and no caller
+                // holds a handle, so leaving it strands a system-wide object for the process
+                // lifetime. Status ignored for the reason every release path here gives.
                 AudioHardwareDestroyProcessTap(tapId);
                 throw;
             }
@@ -65,9 +59,8 @@ public sealed unsafe partial class CoreAudioHal
         }
         finally
         {
-            // The description is a plain ObjC object this call alloc'd; the tap it produced
-            // does not hold it. Released here rather than kept, because a rebind builds a
-            // fresh one and there is nothing to reuse.
+            // The description is a plain ObjC object this call alloc'd and the tap does not hold
+            // it. Released rather than kept, because a rebind builds a fresh one.
             ObjCMessageSend(description, ObjCSelector.Release);
         }
     }
@@ -83,9 +76,8 @@ public sealed unsafe partial class CoreAudioHal
     {
         ProcessTap live = LiveTap(tap, nameof(DestroyProcessTap));
         int status = AudioHardwareDestroyProcessTap(live.ObjectId);
-        // Listed until CoreAudio says it is gone, for the reason DestroyIoProc gives: a failed
-        // destroy leaves the object registered, and forgetting it here would leave nothing able
-        // to try again at Dispose.
+        // Listed until CoreAudio says it is gone, for the reason DestroyIoProc gives: forgetting a
+        // failed destroy leaves the object registered with nothing able to try again at Dispose.
         if (status != NoError)
             throw new CoreAudioException($"destroying the process tap {live.ObjectId}", status);
 
@@ -136,9 +128,9 @@ public sealed unsafe partial class CoreAudioHal
     }
 
     // The last owner of whatever tap or aggregate is still registered, called from Dispose.
-    // Aggregates first: one lists a tap, and destroying the tap out from under it leaves the
-    // device referring to an object that is gone. Nothing here checks a status - the seam binds
-    // every release path to be throw-free, and there is no caller left who could act on one.
+    // Aggregates first: one lists a tap, and destroying the tap out from under it leaves the device
+    // referring to an object that is gone. No status checks: the seam binds every release path to
+    // be throw-free, and no caller is left who could act on one.
     private void ReleaseTapObjects()
     {
         foreach (Aggregate aggregate in Drain(_aggregates))
@@ -187,22 +179,20 @@ public sealed unsafe partial class CoreAudioHal
 
     // ---- the two CoreFoundation / ObjC shapes this half needs -----------------------------
 
-    // [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]] - everything the
-    // Mac plays, in stereo, excluding nothing, left audible (the initialiser's own default
-    // mute behaviour, which is why nothing here sets one).
-    // Loaded once. The ObjC runtime only knows CATapDescription after the framework defining
-    // it is mapped, and this is the one call that needs that guarantee; reloading per tap took
-    // the dyld loader lock again for an image already in memory and leaked a refcount nothing
-    // balances, since the handle was discarded.
+    // [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]] - everything the Mac
+    // plays, in stereo, excluding nothing, left audible (the initialiser's own default, which is
+    // why nothing here sets one).
+    //
+    // Loaded once: the ObjC runtime only knows CATapDescription after its framework is mapped, and
+    // reloading per tap took the dyld loader lock again and leaked a refcount nothing balances.
     private static readonly IntPtr CoreAudioImage = NativeLibrary.Load(CoreAudioFramework);
 
     private static void EnsureCoreAudioLoaded() => _ = CoreAudioImage;
 
     private static IntPtr NewGlobalStereoTapDescription()
     {
-        // Loaded explicitly rather than relied upon: the ObjC class lives in CoreAudio, and the
-        // LibraryImports below bring the framework in lazily, so without this the very first
-        // call could ask the runtime for a class from an image nothing has opened yet.
+        // Loaded explicitly: the ObjC class lives in CoreAudio and the LibraryImports below bring
+        // the framework in lazily, so the first call could ask for a class from an unopened image.
         EnsureCoreAudioLoaded();
 
         IntPtr tapDescription = objc_getClass("CATapDescription");
@@ -210,9 +200,8 @@ public sealed unsafe partial class CoreAudioHal
             throw new CoreAudioException("finding the CATapDescription class", ClassMissing);
 
         IntPtr allocated = ObjCMessageSend(tapDescription, ObjCSelector.Alloc);
-        // An empty CFArray, which is an empty NSArray: the two are toll-free bridged, so this
-        // is the exclude-nothing argument without a second runtime to talk to. Null callbacks
-        // are what an empty collection wants - there is nothing to retain.
+        // An empty CFArray, which is an empty NSArray: toll-free bridged, so this is the
+        // exclude-nothing argument. Null callbacks are what an empty collection wants.
         IntPtr excludeNothing = CFArrayCreate(IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
         try
         {
@@ -238,17 +227,15 @@ public sealed unsafe partial class CoreAudioHal
         {
             IntPtr error = IntPtr.Zero;
             // CFPropertyListFormat is CF_ENUM(CFIndex, …), so CoreFoundation writes EIGHT bytes
-            // through this pointer. A 32-bit local would have the other four land on whatever
-            // the frame put next to it - `error` among the candidates, which the check below
-            // then CFReleases. nint is the same CFIndex spelling every other one here uses.
+            // through this pointer. A 32-bit local would have the other four land on whatever the
+            // frame put next to it, `error` among them, which the check below then CFReleases.
             nint format = 0;
             IntPtr parsed = CFPropertyListCreateWithData(IntPtr.Zero, data, 0, &format, &error);
             if (error != IntPtr.Zero)
                 CFRelease(error);
-            // The document is built from a template right here, so a parse failure is this
-            // repo's bug rather than the platform's; it is still status-checked, because the
-            // alternative is handing CoreAudio a null description and reading its complaint
-            // about that instead.
+            // The document is built from a template right here, so a parse failure is this repo's
+            // bug rather than the platform's. Still status-checked, because the alternative is
+            // handing CoreAudio a null description and reading its complaint about that.
             return parsed != IntPtr.Zero
                 ? parsed
                 : throw new CoreAudioException("parsing the aggregate device description", ClassMissing);
@@ -277,8 +264,7 @@ public sealed unsafe partial class CoreAudioHal
 
     // Not an OSStatus CoreAudio produced: a missing ObjC class or an unparseable description is
     // this backend failing to reach the platform at all. kAudioHardwareUnspecifiedError ('what')
-    // is the platform's own word for that, and using it keeps every failure out of here one
-    // CoreAudioException with a real code rather than two shapes to filter on.
+    // is the platform's own word for that, so every failure here is one shape to filter on.
     private const int ClassMissing = 2003329396;
 
     private const string ObjCRuntimeLibrary = "/usr/lib/libobjc.A.dylib";
@@ -317,10 +303,8 @@ public sealed unsafe partial class CoreAudioHal
     private static partial IntPtr CFDataCreate(IntPtr allocator, [In] byte[] bytes, nint length);
 
     // options is a CFOptionFlags (unsigned long) and format points at a CFPropertyListFormat,
-    // which is CF_ENUM(CFIndex, …): both are 64-bit on every Mac this ships to. Declaring
-    // either as uint is the same class of bug CFStringGetCString's bufferSize note describes -
-    // a narrow argument leaves the top half of the register undefined, and a narrow OUT pointer
-    // has the callee write past the caller's slot.
+    // which is CF_ENUM(CFIndex, …): both 64-bit on every Mac this ships to. A narrow argument
+    // leaves the top half of the register undefined; a narrow OUT pointer writes past the slot.
     [LibraryImport(CoreFoundationFramework)]
     private static partial IntPtr CFPropertyListCreateWithData(
         IntPtr allocator, IntPtr data, nuint options, nint* format, IntPtr* error);

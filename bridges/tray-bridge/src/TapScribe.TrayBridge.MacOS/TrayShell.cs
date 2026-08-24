@@ -5,19 +5,17 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
-/// The menu bar: an <see cref="NSStatusItem"/> with a status header line, Start meeting /
-/// End meeting / Past meetings / Settings… / Quit. It owns the AppKit half of the Bridge and
-/// nothing else. Every decision about what a meeting DOES belongs to
-/// <see cref="BridgeRuntime"/>, which is written once and tested without AppKit; this class is
-/// its <see cref="ITrayView"/> and its menu, the same split the WinForms <c>TrayContext</c>
-/// makes (ADR-0020).
+/// The menu bar: an <see cref="NSStatusItem"/> with a status header line, Start meeting / End
+/// meeting / Past meetings / Settings… / Quit. It owns the AppKit half of the Bridge and nothing
+/// else. Every decision about what a meeting DOES belongs to <see cref="BridgeRuntime"/>, which is
+/// written once and tested without AppKit; this class is its <see cref="ITrayView"/> and its menu,
+/// the same split the WinForms <c>TrayContext</c> makes (ADR-0020).
 ///
-/// Nothing here can carry a unit test: constructing any NSObject-derived type under the test
-/// host throws inside ObjCRuntime, because the bridge is never initialised. So the rule this
-/// file lives by is that it must not be worth testing. Every branch that is a judgement has
-/// been moved out already: the glyph per state is <see cref="StatusSymbols"/>, the notice line
-/// is <see cref="MenuNotice"/>, the status text is Core's <see cref="StatusView"/>, and the
-/// meeting lifecycle is the runtime's. What is left is widget construction and forwarding.
+/// Nothing here can carry a unit test: constructing any NSObject-derived type under the test host
+/// throws inside ObjCRuntime. So the rule this file lives by is that it must not be worth testing.
+/// Every judgement has moved out already: the glyph per state to <see cref="StatusSymbols"/>, the
+/// notice line to <see cref="MenuNotice"/>, the status text to Core's <see cref="StatusView"/>,
+/// the meeting lifecycle to the runtime. What is left is widget construction and forwarding.
 /// </summary>
 internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDelegate
 {
@@ -42,36 +40,31 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     private bool _uiReleased;
 
     /// <summary>Build the menu bar over an explicit outside world.</summary>
-    /// <param name="dependencies">What a meeting needs: the enumerator, the session mint and
-    /// the three stores. Passed straight to <see cref="BridgeRuntime"/>; the shell neither
-    /// reads nor writes any of it.</param>
+    /// <param name="dependencies">What a meeting needs: the enumerator, the session mint and the
+    /// three stores. Passed straight to <see cref="BridgeRuntime"/>.</param>
     internal TrayShell(BridgeDependencies dependencies)
     {
         ArgumentNullException.ThrowIfNull(dependencies);
         _deps = dependencies;
 
-        // Empty on purpose. DidFinishLaunching renders the idle status through ShowStatus
-        // before the status item exists, so anything seeded here is overwritten before it can
-        // be seen; the Windows sibling seeds it because its menu is built inside a live
-        // message loop, which is the difference.
+        // Empty on purpose. DidFinishLaunching renders the idle status through ShowStatus before
+        // the status item exists, so anything seeded here is overwritten before it can be seen.
         _statusHeader = new NSMenuItem("") { Enabled = false };
         _notice = new NSMenuItem("") { Enabled = false, Hidden = true };
         _start = new NSMenuItem("Start meeting", (_, _) => OnRuntime(runtime => runtime.Start()));
         _end = new NSMenuItem("End meeting", (_, _) => OnRuntime(runtime => runtime.End())) { Enabled = false };
         _pastMeetings = new NSMenuItem("Past meetings") { Submenu = _pastMeetingsMenu };
         // Seeded rather than left empty until menuWillOpen: fills it. AppKit will not open a
-        // submenu with no items, so an empty one is a Past-meetings entry that never fires the
-        // delegate that would have populated it. The placeholder is also what an empty history
-        // shows, so the seed is the same line RebuildPastMeetings writes.
+        // submenu with no items, so an empty one never fires the delegate that would populate it.
+        // The placeholder is also what an empty history shows.
         _pastMeetingsMenu.AddItem(NoPastMeetings());
         var settings = new NSMenuItem("Settings…", (_, _) => OpenSettings());
         var quit = new NSMenuItem("Quit", "q", (_, _) => _ = QuitAsync());
 
-        // AppKit's automatic enablement asks each item's target whether it is live and
-        // overrides Enabled every time the menu opens, which would undo every SetMenuState
-        // the runtime makes. The runtime is the one deciding, so the menu stops guessing. Both
-        // menus: the Past-meetings items carry a managed handler rather than a target/action
-        // pair AppKit can interrogate, so auto-enablement would grey out every meeting in it.
+        // AppKit's automatic enablement asks each item's target whether it is live and overrides
+        // Enabled every time the menu opens, which would undo every SetMenuState the runtime makes.
+        // Both menus: the Past-meetings items carry a managed handler rather than a target/action
+        // pair, so auto-enablement would grey out every meeting in it.
         _menu.AutoEnablesItems = false;
         _pastMeetingsMenu.AutoEnablesItems = false;
         _menu.AddItem(_statusHeader);
@@ -85,20 +78,16 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _menu.AddItem(quit);
 
         // Past meetings (#168) is rebuilt each time the submenu opens, so it reflects meetings
-        // ended since it was last shown, including ones another process ended. On the
-        // Past-meetings SUBMENU, not the whole menu: AppKit fires menuWillOpen: for whichever
-        // menu carries the delegate, so hanging it on _menu would re-read and re-parse the
-        // history file on every status-item click, whether or not the operator went near Past
-        // meetings. The Windows sibling hooks the item's own DropDownOpening for the same
-        // reason. WeakDelegate rather than Delegate: this is already an NSApplicationDelegate
-        // and so cannot also derive from NSMenuDelegate, and the exported selector below is
-        // what AppKit actually looks for.
+        // ended since it was last shown, including ones another process ended. On the SUBMENU, not
+        // the whole menu: AppKit fires menuWillOpen: for whichever menu carries the delegate, so
+        // hanging it on _menu would re-parse the history file on every status-item click.
+        // WeakDelegate rather than Delegate: this is already an NSApplicationDelegate and cannot
+        // also derive from NSMenuDelegate, and the exported selector is what AppKit looks for.
         _pastMeetingsMenu.WeakDelegate = this;
     }
 
-    /// <summary>AppKit is about to show the Past-meetings submenu: rebuild it from the
-    /// persisted history, so it reflects meetings ended since it was last shown.</summary>
-    /// <param name="menu">The menu being opened, which is the Past-meetings submenu.</param>
+    /// <summary>AppKit is about to show the Past-meetings submenu: rebuild it from the persisted
+    /// history, so it reflects meetings ended since it was last shown.</summary>
     [Export("menuWillOpen:")]
     public void MenuWillOpen(NSMenu menu) => RebuildPastMeetings();
 
@@ -108,19 +97,17 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     {
         NSApplication.Init();
         NSApplication app = NSApplication.SharedApplication;
-        // Accessory, not Regular: no Dock icon and no Cmd-Tab entry. The bundle's LSUIElement
-        // already says so for a Finder launch, and this says it again for the binary run
-        // straight out of bin/, which Launch Services never sees.
+        // Accessory, not Regular: no Dock icon and no Cmd-Tab entry. The bundle's LSUIElement says
+        // so for a Finder launch; this says it again for the binary run straight out of bin/.
         app.ActivationPolicy = NSApplicationActivationPolicy.Accessory;
         app.Delegate = new TrayShell(TrayWiring.Production);
         app.Run();
     }
 
     /// <summary>Put the status item on screen and build the runtime behind it, in that order:
-    /// <see cref="BridgeRuntime.Startup"/> renders through this view immediately, so the menu
-    /// has to exist first. Nothing can be clicked in between, because a click is delivered by
-    /// the run loop this method has not returned to yet.</summary>
-    /// <param name="notification">AppKit's launch notification, unread.</param>
+    /// <see cref="BridgeRuntime.Startup"/> renders through this view immediately. Nothing can be
+    /// clicked in between, since a click is delivered by the run loop this has not returned to.
+    /// </summary>
     public override void DidFinishLaunching(NSNotification notification)
     {
         _statusItem = NSStatusBar.SystemStatusBar.CreateStatusItem(NSStatusItemLength.Variable);
@@ -139,7 +126,6 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
     /// <summary>Render the at-a-glance state onto the menu header, the menu-bar glyph and its
     /// tooltip.</summary>
-    /// <param name="status">What the runtime wants shown.</param>
     public void ShowStatus(StatusView status)
     {
         ArgumentNullException.ThrowIfNull(status);
@@ -168,21 +154,17 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         button.ToolTip = status.Tooltip;
     }
 
-    /// <summary>Show a notice as the line under the status header. See
-    /// <see cref="MenuNotice"/> for why that rather than a system notification.</summary>
-    /// <param name="title">The notice's headline.</param>
-    /// <param name="message">The detail behind it.</param>
-    /// <param name="kind">Whether something went wrong or something went right.</param>
+    /// <summary>Show a notice as the line under the status header. See <see cref="MenuNotice"/> for
+    /// why that rather than a system notification.</summary>
     public void ShowNotice(string title, string message, NoticeKind kind)
     {
         _notice.Title = MenuNotice.Line(title, message, kind);
         _notice.Hidden = false;
     }
 
-    /// <summary>Take the notice line back out of the menu. The Mac shell needs this because
-    /// its notice is a menu item rather than a balloon: shown once, it stays until something
-    /// removes it. See <see cref="ITrayView.ClearNotice"/> for why the runtime removes it when
-    /// a meeting starts and not when one ends.</summary>
+    /// <summary>Take the notice line back out of the menu. Needed here because the notice is a menu
+    /// item rather than a balloon: shown once, it stays until something removes it. See
+    /// <see cref="ITrayView.ClearNotice"/> for when the runtime removes it.</summary>
     public void ClearNotice()
     {
         _notice.Title = "";
@@ -190,8 +172,6 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     }
 
     /// <summary>Enable or disable the two meeting commands.</summary>
-    /// <param name="canStart">Whether Start meeting is live.</param>
-    /// <param name="canEnd">Whether End meeting is live.</param>
     public void SetMenuState(bool canStart, bool canEnd)
     {
         _start.Enabled = canStart;
@@ -207,17 +187,16 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         window.Closed += () =>
         {
             _windows.Remove(window);
-            // Posted rather than disposed inline: this runs from inside -[NSWindow close],
-            // and releasing the window while AppKit is still unwinding that call is how a
-            // close turns into a crash. The post lands after it returns.
+            // Posted rather than disposed inline: this runs from inside -[NSWindow close], and
+            // releasing the window while AppKit is unwinding that call is how a close crashes.
             _dispatcher.Post(window.Dispose);
         };
         window.Show();
         return window;
     }
 
-    /// <summary>Teardown has finished: release the UI and stop the app. Nothing is streaming
-    /// and no callback is in flight by the time the runtime calls this.</summary>
+    /// <summary>Teardown has finished: release the UI and stop the app. Nothing is streaming and no
+    /// callback is in flight by the time the runtime calls this.</summary>
     public void Shutdown()
     {
         ReleaseUi();
@@ -242,12 +221,10 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
     private void OpenSettings()
     {
-        // Editing while a meeting is live is allowed, and what that means for the running
-        // pipelines is the runtime's business (connection and device changes bind at the next
-        // Start; the per-device level-gate knobs re-tune in place). This owns the window only.
-        //
-        // Before the app has finished launching there is no runtime and so no settings to
-        // edit; the window would seed itself from nothing.
+        // Editing while a meeting is live is allowed, and what that means for the running pipelines
+        // is the runtime's business (connection and device changes bind at the next Start; the
+        // per-device gate knobs re-tune in place). This owns the window only. Before the app has
+        // finished launching there is no runtime, so the window would seed itself from nothing.
         if (_runtime is not { } runtime)
             return;
 
@@ -258,13 +235,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         }
 
         // The previous window is closed but not freed (ReleaseWhenClosed is off, which is what
-        // makes IsOpen answerable above), so dropping the reference alone would leave its whole
-        // control graph behind once per Settings…, on a tray that runs for days.
+        // makes IsOpen answerable above), so dropping the reference alone leaves its control graph
+        // behind once per Settings…, on a tray that runs for days.
         //
-        // Forgotten BEFORE it is released, never after: the build below can throw (it lists
-        // devices and constructs a window full of AppKit), and a field still naming a disposed
-        // window would have the next Settings… ask a freed NSWindow whether it IsOpen. That
-        // throws out of a menu action, which on AppKit ends the tray.
+        // Forgotten BEFORE it is released: the build below can throw, and a field still naming a
+        // disposed window would have the next Settings… ask a freed NSWindow whether it IsOpen.
         SettingsWindow? stale = _settingsWindow;
         _settingsWindow = null;
         stale?.Dispose();
@@ -304,12 +279,10 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     /// <summary>
     /// Run a command against the runtime, or do nothing if it does not exist yet.
     ///
-    /// The window this covers is narrow rather than absent. The status item goes on screen a
-    /// few statements before the runtime is built, both inside DidFinishLaunching, and a menu
-    /// click cannot be delivered until that method returns to the run loop. So the guard is
-    /// about the ORDER inside that method rather than about a fifth of a second of clickable
-    /// tray, which is the shape the WinForms sibling has. Doing nothing still beats throwing:
-    /// this runs from a menu action, where an exception reaches AppKit and takes the process.
+    /// The window is narrow rather than absent: the status item goes on screen a few statements
+    /// before the runtime is built, both inside DidFinishLaunching, and a menu click cannot be
+    /// delivered until that method returns to the run loop. Doing nothing still beats throwing,
+    /// since an exception from a menu action reaches AppKit and takes the process.
     /// </summary>
     private void OnRuntime(Action<BridgeRuntime> command)
     {
