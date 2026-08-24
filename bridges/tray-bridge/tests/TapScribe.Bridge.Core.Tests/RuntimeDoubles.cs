@@ -272,19 +272,16 @@ internal sealed class RuntimeHarness : IDisposable
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
 
     /// <summary>
-    /// A live Recorder to run against, instead of the refused port. Set it and the mint goes
-    /// through a real <see cref="ControlClient"/>, so End drains real taps, triggers the real
-    /// end-of-meeting pipeline and polls it to a real summary. The End path is the one that
-    /// genuinely has to talk to a Recorder: faking the control client there would leave every
-    /// step of it unexercised. Pair with <see cref="RecorderSettings"/>.
+    /// Mint through a real <see cref="ControlClient"/> at the settings' port, instead of handing
+    /// back a canned session id. End then drains real taps, triggers the real end-of-meeting
+    /// pipeline and polls it to a real summary, which is the path faking the control client would
+    /// leave entirely unexercised. Pair with <see cref="RecorderSettings"/>.
+    ///
+    /// A flag rather than the server, because the harness neither starts nor disposes one and
+    /// reads the port off <see cref="Settings"/>: whether it is a <see cref="FakeRecorder"/> or
+    /// the Python one <see cref="RealRecorderMeetingE2ETests"/> stands up is the caller's affair.
     /// </summary>
-    public FakeRecorder? Recorder { get; init; }
-
-    /// <summary>The same real-ControlClient mint, against a Recorder the harness did not start:
-    /// the Python one <see cref="RealRecorderMeetingE2ETests"/> stands up.
-    /// <see cref="Recorder"/> is only read as "is something listening at the settings'
-    /// port".</summary>
-    public bool LiveRecorder { get; init; }
+    public bool RealMint { get; init; }
 
     /// <summary>The settings that reach <see cref="Recorder"/>: its port and the token it was
     /// started with.</summary>
@@ -401,7 +398,7 @@ internal sealed class RuntimeHarness : IDisposable
             _mintReached.TrySetResult();
             if (MintError is not null)
                 throw MintError;
-            if (Recorder is not null || LiveRecorder)
+            if (RealMint)
             {
                 using var control = new ControlClient(
                     settings.Host, settings.Port, settings.Tls, settings.Token, _http);

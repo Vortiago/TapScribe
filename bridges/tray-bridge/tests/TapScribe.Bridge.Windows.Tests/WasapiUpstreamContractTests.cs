@@ -9,9 +9,10 @@ namespace TapScribe.Bridge.Windows.Tests;
 /// Pins the undocumented NAudio symbols the WASAPI backends bind to, so an NAudio
 /// bump that renames or moves one fails THIS test at CI time instead of at first tap
 /// on an operator's machine — the same upstream-contract discipline CLAUDE.md
-/// prescribes for the MLX adapters. Reflection-only: it asserts shape without opening
-/// a real audio endpoint (CI runners have none), and the NAudio package is pinned to
-/// an exact version (2.2.1) as the primary defence.
+/// prescribes for the MLX adapters, with the NAudio package pinned to an exact
+/// version (2.2.1) as the primary defence. Mostly reflection, which asserts shape
+/// without an audio endpoint; the two [RequiresWindows] facts at the bottom make the
+/// calls for real, and neither needs a device present either.
 /// </summary>
 public class WasapiUpstreamContractTests
 {

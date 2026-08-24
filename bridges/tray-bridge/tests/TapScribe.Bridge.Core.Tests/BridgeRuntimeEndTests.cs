@@ -20,7 +20,7 @@ public class BridgeRuntimeEndTests
         await using FakeRecorder recorder = await FakeRecorder.StartAsync();
         using var harness = new RuntimeHarness
         {
-            Recorder = recorder,
+            RealMint = true,
             Settings = RuntimeHarness.RecorderSettings(recorder),
         };
         FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);

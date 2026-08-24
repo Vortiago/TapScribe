@@ -221,6 +221,12 @@ export function createWaveform() {
     mount(axisHost, out);
   };
 
+  /** Whether a click can be served: `onSeek` needs peaks to point into AND a duration
+   * to scale by. ONE owner, because the canvas hook below publishes the same question
+   * and a hook that disagreed with the handler would lie in the one direction it
+   * exists to catch. */
+  const seekable = () => !!peaks && durationS > 0;
+
   /** Derive the overlay chrome — the data-cut-spans / data-previewSpans /
    * data-duration-s e2e hooks, the ✂ badge, and the legend — from the current
    * cutSpans / previewSpans / duration state. ONE owner, called by every
@@ -234,7 +240,7 @@ export function createWaveform() {
     // What `onSeek` requires before it will act. Published because a click that
     // beats the body is dropped with nothing to retry it, so "mounted" is not
     // the same question as "seekable".
-    if (peaks && durationS > 0) canvas.dataset.durationS = String(durationS);
+    if (seekable()) canvas.dataset.durationS = String(durationS);
     else delete canvas.dataset.durationS;
     cutBadge.hidden = !cutSpans;
     legend.hidden = !(cutSpans || previewSpans);
@@ -331,7 +337,7 @@ export function createWaveform() {
   /** @param {(offsetS: number) => void} cb */
   const onSeek = (cb) => {
     canvas.addEventListener("click", (e) => {
-      if (!peaks || durationS <= 0) return; // nothing drawn = nothing to seek
+      if (!seekable()) return; // nothing drawn = nothing to seek
       const frac = seekFractionFromClick(e.offsetX, canvas.clientWidth);
       if (frac == null) return;
       cb(frac * durationS);

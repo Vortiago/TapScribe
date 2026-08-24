@@ -131,11 +131,7 @@ public class RealRecorderMeetingE2ETests
         JsonElement root = doc.RootElement;
         string plain = root.GetProperty("plain_text").GetString() ?? "";
 
-        HashSet<string> speakers = root.GetProperty("segments").EnumerateArray()
-            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
-            .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
-            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> speakers = SpeakersIn(root);
         Assert.True(
             speakers.Count >= 2,
             $"expected >=2 speakers, got [{string.Join(", ", speakers)}]; plain={Trunc(plain)}");
@@ -180,7 +176,7 @@ public class RealRecorderMeetingE2ETests
         var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 3000, PreRollMs: 0);
         using var harness = new RuntimeHarness
         {
-            LiveRecorder = true,
+            RealMint = true,
             Settings = new BridgeSettings
             {
                 Host = "127.0.0.1",
@@ -237,11 +233,7 @@ public class RealRecorderMeetingE2ETests
         string sessionDir = Path.Join(rec.BaseDir, "recordings", session);
         using JsonDocument doc = JsonDocument.Parse(
             File.ReadAllText(Path.Join(sessionDir, "session-transcript.json")));
-        HashSet<string> speakers = doc.RootElement.GetProperty("segments").EnumerateArray()
-            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
-            .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
-            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> speakers = SpeakersIn(doc.RootElement);
         Assert.True(speakers.Count >= 2, $"expected >=2 speakers, got [{string.Join(", ", speakers)}]");
 
         // And the tray came back, with the meeting in the history Past-meetings reads.
@@ -250,6 +242,14 @@ public class RealRecorderMeetingE2ETests
         MeetingRecord remembered = Assert.Single(harness.HistoryStore.Load().Meetings);
         Assert.Equal(session, remembered.SessionId);
     }
+
+    // Who the merged transcript attributes segments to.
+    private static HashSet<string> SpeakersIn(JsonElement transcript) =>
+        transcript.GetProperty("segments").EnumerateArray()
+            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!)
+            .ToHashSet(StringComparer.Ordinal);
 
     // The two speakers' fixtures, and the check that they are on disk.
     private static (string Dir, string Norwegian, string English) SpeechFixtures(string repoRoot)

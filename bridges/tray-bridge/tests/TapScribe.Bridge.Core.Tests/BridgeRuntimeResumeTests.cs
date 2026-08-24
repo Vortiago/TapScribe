@@ -17,7 +17,7 @@ public class BridgeRuntimeResumeTests
         await using FakeRecorder recorder = await FakeRecorder.StartAsync();
         using var harness = new RuntimeHarness
         {
-            Recorder = recorder,
+            RealMint = true,
             Settings = RuntimeHarness.RecorderSettings(recorder),
         };
 

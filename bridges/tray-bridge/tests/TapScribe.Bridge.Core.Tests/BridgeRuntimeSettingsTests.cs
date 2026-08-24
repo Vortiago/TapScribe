@@ -38,7 +38,7 @@ public class BridgeRuntimeSettingsTests
         await using FakeRecorder recorder = await FakeRecorder.StartAsync();
         using var harness = new RuntimeHarness
         {
-            Recorder = recorder,
+            RealMint = true,
             Settings = WithMicSensitivity(recorder, sensitivity: 0), // deaf to quiet speech
         };
         FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
