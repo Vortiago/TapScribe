@@ -58,9 +58,11 @@ Session).
 
   Recording system audio needs the **System Audio Recording** TCC grant, which
   macOS asks for when the IOProc first starts rather than when the tap is
-  created. A process with no bundle identity cannot be prompted, so a bare
-  `dotnet run` against the HAL BLOCKS at `AudioDeviceCreateIOProcID`; only the
-  built `.app` exercises that path.
+  created. A process with no bundle identity of its own is attributed to whatever
+  is responsible for it, so `dotnet test` and `dotnet run` from a terminal that
+  already holds the grant capture perfectly well (that is what the tap smoke
+  above relies on) while inheriting a grant the operator never gave THIS build.
+  Only the built `.app` is prompted for, and refused, as itself.
 - **`src/TapScribe.TrayBridge.MacOS`** (net10.0-macos app bundle): the Mac
   menu-bar shell, Core's `ITrayView` over an `NSStatusItem`: the same menu as
   the Windows tray, plus the Settings and per-meeting windows. It also holds
@@ -326,12 +328,27 @@ knowing before you reach for one:
 
 ## Dev loop (the acceptance check)
 
+On macOS, one step of this is automated. It plays a fixture through the speakers
+and asserts the real Core Audio tap captures it, which is the half no fake can
+claim:
+
+```bash
+# from this directory (bridges/tray-bridge/)
+TAPSCRIBE_TAP_SMOKE=1 dotnet test tests/TapScribe.Bridge.MacOS.Tests -c Release
+```
+
+It is opt-in and reports as SKIPPED without the variable, because a tap over a
+Mac playing nothing delivers no callbacks at all rather than silent ones: on a CI
+runner it would be indistinguishable from a broken tap. The microphone half, and
+everything below, still needs a person.
+
 1. Start a Recorder: `python -m tapscribe --no-auth` (or `./start.ps1`).
 2. `dotnet run --project src/TapScribe.TrayBridge`. On macOS launch the built
    bundle instead (`open …/TapScribe.TrayBridge.MacOS.app`, or its inner binary
-   from a terminal when you want the stderr): a process without bundle identity
-   is one macOS refuses to prompt for, so `dotnet run` never reaches the capture
-   paths at all.
+   from a terminal when you want the stderr): only the bundle carries the
+   `Info.plist` that makes it a menu-bar app and names the microphone in the TCC
+   prompt, and only a bundle gets its own grants rather than inheriting the
+   terminal's.
 3. Right-click → **Start meeting**. Play meeting audio while you speak,
    pausing between sentences, then **End meeting**.
 4. **Two** sets of WAVs appear under the Recorder's new detached session —
