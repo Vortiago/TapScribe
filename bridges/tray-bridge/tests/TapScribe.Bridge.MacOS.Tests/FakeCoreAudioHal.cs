@@ -146,7 +146,7 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
             .Where(l => l.Live && l.ObjectId == objectId && l.Kind == kind)
             .ToList())
         {
-            listener.Handler();
+            listener.Invoke();
         }
     }
 
@@ -203,8 +203,15 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         handle.Callback(pcm);
     }
 
-    public IReadOnlyList<CoreAudioDevice> ListDevices() =>
-        ListDevicesError is not null ? throw ListDevicesError : _devices.ToList();
+    /// <summary>Runs at the top of <see cref="ListDevices"/>. The rebind calls it while holding
+    /// the capture's binding lock, so it is where a test can act with that lock held.</summary>
+    public Action? BeforeListDevices { get; set; }
+
+    public IReadOnlyList<CoreAudioDevice> ListDevices()
+    {
+        BeforeListDevices?.Invoke();
+        return ListDevicesError is not null ? throw ListDevicesError : _devices.ToList();
+    }
 
     public CoreAudioStreamFormat ReadStreamFormat(uint deviceId)
     {
@@ -397,12 +404,28 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
 
     private sealed class Registration(uint objectId, CoreAudioPropertyKind kind, Action handler) : IDisposable
     {
+        // What makes removal WAIT for a callback that is already running, which is the half of
+        // AudioObjectRemovePropertyListener's contract a caller can deadlock against.
+        private readonly Lock _inFlight = new();
+
         public uint ObjectId { get; } = objectId;
         public CoreAudioPropertyKind Kind { get; } = kind;
         public Action Handler { get; } = handler;
         public bool Live { get; private set; } = true;
 
-        public void Dispose() => Live = false;
+        public void Invoke()
+        {
+            lock (_inFlight)
+                Handler();
+        }
+
+        // Reentrant, so a handler disposing its own registration still returns. A DIFFERENT
+        // thread's removal blocks here until the callback it raced returns.
+        public void Dispose()
+        {
+            Live = false;
+            lock (_inFlight) { }
+        }
     }
 }
 

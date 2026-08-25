@@ -49,6 +49,11 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     private Bound? _bound;
     private bool _disposed;
 
+    // Listeners whose bindings are gone, waiting to be detached OUTSIDE the lock. Detaching one
+    // under it is the deadlock: AudioObjectRemovePropertyListener waits for a callback already
+    // running, and that callback's first statement takes this same lock.
+    private readonly List<IDisposable> _detachOnceUnlocked = [];
+
     /// <summary>The tap, its aggregate device and the listener watching that device leave: one
     /// value, because they are made, released and replaced together, and because three fields is
     /// what makes a half-torn-down binding writable.</summary>
@@ -58,7 +63,21 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         CoreAudioTapHandle Tap,
         CoreAudioAggregateHandle Aggregate,
         string OutputDeviceUid,
-        IDisposable Gone);
+        IDisposable Gone,
+        BindingLife Life);
+
+    /// <summary>Whether a binding is still the current one. Its own object because the listener
+    /// closes over it at registration, before the <see cref="Bound"/> exists, and because a
+    /// notification that arrives after its binding was replaced must be able to say so.</summary>
+    private sealed class BindingLife
+    {
+        // Written under the lock, read from a CoreAudio notification thread.
+        private volatile bool _retired;
+
+        internal bool Retired => _retired;
+
+        internal void Retire() => _retired = true;
+    }
 
     public AudioFormat Format { get; }
 
@@ -110,6 +129,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         catch
         {
             Release(bound);
+            Detach();
             throw;
         }
 
@@ -174,8 +194,9 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             _bound = null;
         }
 
-        // Outside the lock: the notification it detaches may be waiting on that lock right now,
+        // Outside the lock: a notification either detaches may be waiting on that lock right now,
         // so detaching under it deadlocks against a mid-flight rebind.
+        Detach();
         _defaultOutputListener.Dispose();
         GC.SuppressFinalize(this);
     }
@@ -198,9 +219,10 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // Watched on the AGGREGATE, not the endpoint underneath: an aggregate whose sub-device
             // leaves is itself invalidated, so it is the object whose departure means this capture
             // stopped delivering.
+            var life = new BindingLife();
             IDisposable gone = _hal.AddPropertyListener(
-                aggregate.DeviceId, CoreAudioPropertyKind.DeviceIsAlive, OnAggregateGone);
-            return new Bound(tap, aggregate, outputUid, gone);
+                aggregate.DeviceId, CoreAudioPropertyKind.DeviceIsAlive, () => OnAggregateGone(life));
+            return new Bound(tap, aggregate, outputUid, gone, life);
         }
         catch
         {
@@ -225,11 +247,30 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
                 "finding an output endpoint to tap: this Mac reports none", CoreAudioStatus.BadDevice);
     }
 
+    // Caller holds the lock, and owes a Detach() once it has left it.
     private void Release(Bound bound)
     {
-        bound.Gone.Dispose();
+        bound.Life.Retire();
+        _detachOnceUnlocked.Add(bound.Gone);
         SwallowRelease(() => _hal.DestroyAggregateDevice(bound.Aggregate));
         SwallowRelease(() => _hal.DestroyProcessTap(bound.Tap));
+    }
+
+    // Detach what Release retired, with the lock RELEASED. A handler this waits for is then free
+    // to take the lock, find its binding retired and leave. Safe to call with nothing queued.
+    private void Detach()
+    {
+        IDisposable[] listeners;
+        lock (_binding)
+        {
+            if (_detachOnceUnlocked.Count == 0)
+                return;
+            listeners = [.. _detachOnceUnlocked];
+            _detachOnceUnlocked.Clear();
+        }
+
+        foreach (IDisposable listener in listeners)
+            listener.Dispose();
     }
 
     // Every release path reaches CoreAudio for an object that may already be gone, from a teardown
@@ -263,6 +304,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         Exception? failure;
         lock (_binding)
             failure = Rebind();
+        Detach();
 
         // Outside the lock: a handler may reach back into this capture, and the pipeline's tears
         // the whole session down.
@@ -368,10 +410,16 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     // Fires on a CoreAudio notification thread when the aggregate leaves: its sub-device went away,
     // so the device carrying the tap is invalidated and CoreAudio stops calling the IOProc. Nothing
     // to re-read: a device that ARRIVES carries no listener, so this can only mean it is gone.
-    private void OnAggregateGone()
+    private void OnAggregateGone(BindingLife life)
     {
         lock (_binding)
         {
+            // This binding was replaced while the notification was in flight, so it says nothing
+            // about the one running now. Checked here rather than before the lock because the
+            // retirement happens under it: a check outside could still read false and then block.
+            if (life.Retired)
+                return;
+
             // Only while a stream was running: Failed means capture ended unexpectedly MID-STREAM,
             // and a binding never started has ended nothing. The next Start fails on its own.
             if (!_run.Running || _bound is not { } bound)
@@ -382,6 +430,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
             // with the whole Mac, and a Start free to run over an id CoreAudio has forgotten.
             Unbind(bound);
         }
+        Detach();
 
         // Outside the lock: the pipeline's handler tears the whole session down and may reach back
         // into this capture.

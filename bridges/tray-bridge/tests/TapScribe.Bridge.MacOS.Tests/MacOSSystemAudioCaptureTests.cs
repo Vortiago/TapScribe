@@ -26,6 +26,49 @@ public class MacOSSystemAudioCaptureTests
     }
 
     [Fact]
+    public async Task ADefaultOutputMove_WhileTheAggregateIsLeaving_TearsDownRatherThanWedging()
+    {
+        // Both notifications this capture subscribes arrive on CoreAudio threads, and unplugging a
+        // USB DAC that is BOTH the default output and the aggregate's sub-device fires both at
+        // once. Removing a listener waits for a callback already inside it, so a rebind that
+        // detaches the aggregate's listener while holding the binding lock waits for a handler
+        // that is itself waiting for that lock, and the tray never ends the meeting.
+        FakeCoreAudioHal hal = WithSpeakers();
+        // Deliberately not a `using`: Dispose takes the binding lock, so a wedged capture would
+        // wedge the test method too, and a hang is a worse failure report than a red assertion.
+        // The success path disposes at the end.
+        var capture = new MacOSSystemAudioCapture(hal);
+        capture.Start();
+        uint aggregate = capture.AggregateDeviceId;
+
+        using var rebindHoldsTheLock = new ManualResetEventSlim();
+        using var goneIsBlocked = new ManualResetEventSlim();
+        // ListDevices is the rebind's first call under the lock, so this runs with it held.
+        hal.BeforeListDevices = () =>
+        {
+            if (rebindHoldsTheLock.IsSet)
+                return;
+            rebindHoldsTheLock.Set();
+            goneIsBlocked.Wait(Wait);
+        };
+
+        Task rebind = Task.Run(() => hal.SetDefaultOutput(Devices.Output(71, "External Headphones")));
+        Assert.True(rebindHoldsTheLock.Wait(Wait), "the rebind never reached the lock");
+
+        Task gone = Task.Run(() => hal.FireProperty(aggregate, CoreAudioPropertyKind.DeviceIsAlive));
+        // The handler's first statement takes the binding lock the rebind is holding, so once it
+        // has been dispatched there is nothing else for it to be doing.
+        await Task.Delay(100);
+        goneIsBlocked.Set();
+
+        Task both = Task.WhenAll(rebind, gone);
+        Assert.True(
+            await Task.WhenAny(both, Task.Delay(Wait)) == both,
+            "the capture wedged: the rebind is waiting for a notification that is waiting for it");
+        capture.Dispose();
+    }
+
+    [Fact]
     public void SystemAudio_WhileStarted_HoldsOneTapOneAggregateAndOneRunningIoProc()
     {
         // The whole shape of the platform in one assertion: a tap is an object with no audio path, an
