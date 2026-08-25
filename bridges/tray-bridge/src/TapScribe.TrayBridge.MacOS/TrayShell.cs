@@ -286,8 +286,23 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     /// </summary>
     private void OnRuntime(Action<BridgeRuntime> command)
     {
-        if (_runtime is { } runtime)
+        if (_runtime is not { } runtime)
+            return;
+
+        try
+        {
             command(runtime);
+        }
+        catch (Exception ex)
+        {
+            // The boundary with the toolkit. A menu action's exception reaches the toolkit and
+            // ends the process, so nothing may escape here; Core narrowed its own catches on the
+            // strength of this, and a bug that used to arrive as a wrong notice must not become a
+            // tray that vanishes. Reported rather than swallowed, so it is still visible as
+            // something other than a click that did nothing. CodeQL flags the width
+            // (cs/catch-of-all-exceptions): this is the one place that width is the point.
+            ShowNotice("Something went wrong", ex.Message, NoticeKind.Warning);
+        }
     }
 
     private void ReleaseUi()

@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace TapScribe.Bridge.Core;
@@ -427,21 +428,20 @@ public sealed class BridgeRuntime
         {
             _deps.SettingsStore.Save(updated);
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
+        catch (Exception ex)
+            when (ex is IOException or UnauthorizedAccessException or CryptographicException)
         {
             // The settings could not be persisted: the directory would not take them
-            // (permissions, full disk, a file standing where the directory should be), or the
-            // platform refused the tap token at rest. Keep the new settings for this session
-            // and tell the operator they will not persist: throwing their edit away because
-            // the disk or the keychain is unavailable would be the worse failure.
+            // (permissions, full disk, a file standing where the directory should be), or DPAPI
+            // refused to protect the tap token. Keep the new settings for this session and tell
+            // the operator they will not persist: throwing their edit away because the disk or
+            // the keychain is unavailable would be the worse failure.
             //
-            // As wide as BridgeSettingsStore's own token READ, and for the same reason: a Save
-            // reaches a platform secret API (DPAPI raises CryptographicException, a Keychain
-            // binding raises whatever it chooses, the next platform raises something nobody has
-            // listed), and this runs from a menu click, where an escaping exception surfaces as
-            // an unhandled-exception dialog on Windows and takes the process on macOS.
-            // OutOfMemoryException is excluded because the process is doomed regardless and
-            // swallowing it would only hide that.
+            // These three and no more, because this message tells an operator to go and look at
+            // their disk. Anything else is this program being wrong, and CaptureSeam names the
+            // rule: a catch-all also swallows what no disk can produce, hiding a bug behind an
+            // operator-facing message. What catches those is the shell's menu-action boundary,
+            // where a throw would otherwise reach AppKit.
             _view.ShowNotice("Settings not saved", ex.Message, NoticeKind.Warning);
         }
 

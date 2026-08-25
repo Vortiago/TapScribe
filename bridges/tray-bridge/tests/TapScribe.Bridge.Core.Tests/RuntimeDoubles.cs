@@ -345,10 +345,13 @@ internal sealed class RuntimeHarness : IDisposable
         return Path.Join(file, "store");
     }
 
+    /// <summary>How the tap token is kept at rest. Overridden by the test that needs the SAVE to
+    /// fail with something no directory can produce.</summary>
+    public ITapTokenStore Tokens { get; init; } = new FakeTapTokenStore();
+
     public BridgeSettingsStore SettingsStore =>
         _settingsStore ??= new BridgeSettingsStore(
-            new FakeTapTokenStore(), SettingsStoreDirectory ?? _directory, "runtime-test.json",
-            "test-tray");
+            Tokens, SettingsStoreDirectory ?? _directory, "runtime-test.json", "test-tray");
 
     private BridgeSettingsStore? _settingsStore;
 

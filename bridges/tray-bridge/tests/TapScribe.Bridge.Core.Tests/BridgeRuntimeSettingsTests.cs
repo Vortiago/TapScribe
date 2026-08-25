@@ -88,4 +88,28 @@ public class BridgeRuntimeSettingsTests
         Assert.Equal("Settings not saved", title);
         Assert.Equal(NoticeKind.Warning, kind);
     }
+
+    [Fact]
+    public void ApplySettings_WhenTheSaveFailsWithABug_LetsItOutRatherThanBlamingTheDisk()
+    {
+        // The notice above is for what an operator can act on: a disk that will not take the file,
+        // or a secret store that refuses. Anything else is this program being wrong, and reporting
+        // a NullReferenceException as "Settings not saved" tells them to check their permissions
+        // over a bug in here. CaptureSeam states the same rule for the device seam.
+        using var harness = new RuntimeHarness { Tokens = new BuggyTapTokenStore() };
+        BridgeRuntime runtime = harness.Build();
+
+        Assert.Throws<InvalidOperationException>(
+            () => runtime.ApplySettings(new BridgeSettings { Host = "recorder.example", Devices = [] }));
+        Assert.Empty(harness.View.Notices);
+    }
+
+    /// <summary>A token store that fails the way a BUG does, which no temp directory can produce.
+    /// </summary>
+    private sealed class BuggyTapTokenStore : ITapTokenStore
+    {
+        public string? Write(string token) => throw new InvalidOperationException("a bug, not a disk");
+
+        public string Read(string? atRest) => "";
+    }
 }
