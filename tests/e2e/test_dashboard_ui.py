@@ -134,6 +134,30 @@ async def _shot(page, name: str) -> None:
     await page.screenshot(path=str(SHOTS_DIR / name), full_page=True)
 
 
+async def _shot_el(page, selector: str, name: str, *, max_height: float | None = None) -> None:
+    """One PANEL, cropped to itself — the same opt-in as `_shot`.
+
+    A full-page shot of a 1500x980 dashboard renders a side-panel control at a
+    size nobody can read, and the aside scrolls, so a panel low in it is clipped
+    at the fold. The docs that walk an operator through a control embed the
+    control, not the page around it.
+
+    `max_height` trims a fill-height pane (`.panel--fill` stretches to the
+    column) down to its content, since the rest is empty ground."""
+    if os.environ.get("TAPSCRIBE_REFRESH_SHOTS") != "1":
+        return
+    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    locator = page.locator(selector)
+    if max_height is None:
+        await locator.screenshot(path=str(SHOTS_DIR / name))
+        return
+    await locator.scroll_into_view_if_needed()
+    box = await locator.bounding_box()
+    assert box, f"{selector} has no box to crop"
+    clip = {**box, "height": min(box["height"], max_height)}
+    await page.screenshot(path=str(SHOTS_DIR / name), clip=clip)
+
+
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "audio"
 
 
@@ -7792,6 +7816,13 @@ class _HalvingDiarizer:
         return DiarizationResult(voices=voices, engine=self.engine)
 
 
+# The three regions the Voices walkthrough crops to. Addressed through the
+# `data-slot` seam the panel already binds, never a presentational class.
+TAP_MODE_PANEL = '#viewRoot .panel:has([data-slot="modeList"])'
+VOICES_PANEL = '#viewRoot .panel:has([data-slot="voiceList"])'
+MERGED_HOST = '#viewRoot [data-slot="mergedHost"]'
+
+
 async def test_diarized_voices_map_to_people_and_rename_the_transcript(
     running_recorder: RunningRecorder,
     monkeypatch: pytest.MonkeyPatch,
@@ -7854,6 +7885,7 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
                 timeout=15000,
             )
             await _shot(page, "voices-01-taps-mode.png")
+            await _shot_el(page, TAP_MODE_PANEL, "voices-01b-tap-model.png")
 
             mode_of = """(ident) => {
               const row = [...document.querySelectorAll('#viewRoot .moderow')]
@@ -7903,6 +7935,8 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             assert before.count("Them") >= 2, before
             assert "No voices yet" in (await page.inner_text('#viewRoot [data-slot="voiceEmpty"]'))
             await _shot(page, "voices-02-before-diarize.png")
+            await _shot_el(page, VOICES_PANEL, "voices-02b-panel-empty.png")
+            await _shot_el(page, MERGED_HOST, "voices-02c-lines-before.png", max_height=210)
 
             await page.click('#viewRoot [data-slot="dzBtn"]')
             rows = '#viewRoot [data-slot="voiceList"] .voicerow'
@@ -7918,6 +7952,8 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
                 timeout=20000,
             )
             await _shot(page, "voices-03-unmapped.png")
+            await _shot_el(page, VOICES_PANEL, "voices-03b-panel-unmapped.png")
+            await _shot_el(page, MERGED_HOST, "voices-03c-lines-unmapped.png", max_height=210)
 
             # ---- Map Voice A to a Person the operator names -------------------
             first_row = f'{rows}[data-key="sysaudio#A"]'
@@ -7941,6 +7977,8 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             after = await page.inner_text(lines)
             assert "Dana Holm" in after and "Speaker B" in after, after
             await _shot(page, "voices-04-mapped.png")
+            await _shot_el(page, VOICES_PANEL, "voices-04b-panel-mapped.png")
+            await _shot_el(page, MERGED_HOST, "voices-04c-lines-mapped.png", max_height=210)
 
             # The Person is real, and reachable from the People stage — with the
             # session counted through the voice pointer, not an Identity.

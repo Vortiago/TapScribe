@@ -19,7 +19,7 @@ through a Transcriber.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -306,6 +306,44 @@ class SessionTranscript:
 _LOW_CONFIDENCE_LOGPROB_THRESHOLD = -0.5
 
 
+def _clock(abs_start: Any) -> str:
+    """`HH:MM:SS` from either a datetime (mid-merge) or its ISO string (read
+    back off `session-transcript.json`)."""
+    dt = abs_start if isinstance(abs_start, datetime) else parse_iso(str(abs_start or ""))
+    return dt.strftime("%H:%M:%S") if dt else "??:??:??"
+
+
+def render_transcript_text(
+    segments: Iterable[Mapping[str, Any]],
+    *,
+    names: Mapping[str, str] | None = None,
+) -> str:
+    """The merged transcript as `[HH:MM:SS] Speaker: text` lines.
+
+    The ONE spelling of that format on this side of the wire: `merge_session`
+    builds `plain_text` through it, and `batch_summarize` re-renders the stored
+    body through it with `names` applied. Segments are the wire shape, whose
+    `abs_start` may be a datetime or its ISO string.
+
+    `names` is the live `speaker key -> display name` map (ADR-0009, ADR-0021).
+    Deliberately NOT baked into the stored body: resolution is a read-time
+    concern everywhere else — a Person rename has to reach a transcript merged
+    last week — so the file keeps raw keys and every reader resolves.
+    """
+    resolved = names or {}
+    lines: list[str] = []
+    for seg in segments:
+        text = seg.get("text") or ""
+        if not text:
+            continue
+        speaker = seg.get("speaker") or ""
+        line = f"[{_clock(seg.get('abs_start'))}] {resolved.get(speaker, speaker)}: {text}"
+        if seg.get("low_confidence"):
+            line += " [uncertain]"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def merge_session(selection: SessionSelection) -> SessionTranscript:
     """Read each WAV's cached sidecar from `selection.wavs` and build a
     merged session transcript. WAVs without a cached sidecar are recorded
@@ -412,15 +450,18 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             speaking_seconds[s.speaker] += max(0.0, (s.abs_end - s.abs_start).total_seconds())
     speaking_seconds = {k: round(v, 2) for k, v in speaking_seconds.items()}
 
-    plain_lines: list[str] = []
-    for s in segments:
-        if not s.text:
-            continue
-        line = f"[{s.abs_start.strftime('%H:%M:%S')}] {s.speaker}: {s.text}"
-        if s.low_confidence:
-            line += " [uncertain]"
-        plain_lines.append(line)
-    plain_text = "\n".join(plain_lines)
+    # Raw keys on purpose — see `render_transcript_text`. Datetimes are passed
+    # through rather than round-tripped via ISO, so nothing re-parses what this
+    # function already holds.
+    plain_text = render_transcript_text(
+        {
+            "abs_start": s.abs_start,
+            "speaker": s.speaker,
+            "text": s.text,
+            "low_confidence": s.low_confidence,
+        }
+        for s in segments
+    )
 
     finished = datetime.now(UTC)
     return SessionTranscript(

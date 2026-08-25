@@ -418,3 +418,67 @@ async def test_summarize_injects_a_voice_mapped_person(recorder_under_test):
 
     assert "Alice Andersen" in out["summary"]
     assert "Tail Person 079" not in out["summary"], "the registry tail really was trimmed"
+
+
+async def test_summarize_reads_the_transcript_under_its_mapped_voice_names(recorder_under_test):
+    """The TEXT the model reads carries display names, not raw Voice keys.
+
+    `session-transcript.json` keys every line on the WAV slug — `Them#A` once
+    the tap is diarized — and keeps it raw on purpose, since resolution is a
+    read-time concern. Summarizing that body unresolved ignores every
+    Voice→Person mapping the operator made and puts `Them#A` in the prose a
+    human reads (#78). `_CAT` echoes stdin, so the summary IS the text handed
+    to the summarizer.
+
+    Drives `summarize_session` end to end rather than the renderer directly: the
+    bug this pins is a WIRING bug — the renderer was always capable of applying
+    names, the summarize path just never asked it to."""
+    rec = recorder_under_test.recordings_dir
+    sd = seed_merged_transcript(rec, "s")
+    transcript = json.loads((sd / "session-transcript.json").read_text(encoding="utf-8"))
+    transcript["speakers"] = ["Alice", "Them#A", "Them#B"]
+    transcript["segments"] = [
+        {
+            "abs_start": "2026-01-01T09:00:00+00:00",
+            "abs_end": "2026-01-01T09:00:04+00:00",
+            "speaker": speaker,
+            "text": line,
+            "source_wav": "w.wav",
+            "low_confidence": False,
+        }
+        for speaker, line in (
+            ("Alice", "Where are we on the migration?"),
+            ("Them#A", "Two of the three services are cut over."),
+            ("Them#B", "The last one lands Thursday."),
+        )
+    ]
+    (sd / "session-transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+    (sd / "session-roster.json").write_text(
+        json.dumps({"tray-sys-1": {"name": "Them", "source": "recorded", "slug": "Them"}}),
+        encoding="utf-8",
+    )
+    (sd / "session-voices.json").write_text(
+        json.dumps({"tray-sys-1": {"run_id": "r1", "voices": {"A": {"spans": []}, "B": {"spans": []}}}}),
+        encoding="utf-8",
+    )
+    (sd / "session-meta.json").write_text(
+        json.dumps({"voices": {"tray-sys-1#A": {"person_id": "p1", "run_id": "r1"}}}), encoding="utf-8"
+    )
+    (rec / "people.json").write_text(
+        json.dumps({"people": [{"id": "p1", "name": "Dana Holm", "identities": []}]}), encoding="utf-8"
+    )
+
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt="Summarize"),
+    )
+
+    summary = out["summary"]
+    assert "Dana Holm: Two of the three services are cut over." in summary
+    assert "Them#A" not in summary, "the mapped Voice reached the model as a raw key"
+    # The UNMAPPED Voice reads the way the pane reads it, not as a raw key —
+    # whatever the operator sees is what the model is told.
+    assert "Speaker B: The last one lands Thursday." in summary
+    assert "Them#B" not in summary
+    # An undiarized tap is untouched by any of this.
+    assert "Alice: Where are we on the migration?" in summary

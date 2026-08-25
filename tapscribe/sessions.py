@@ -34,7 +34,7 @@ import tapscribe.voices as voices
 
 from . import config
 from .audio import wav_duration_s
-from .name_resolution import DEFAULT_KNOWN_NAMES_LIMIT, known_names
+from .name_resolution import DEFAULT_KNOWN_NAMES_LIMIT, known_names, resolve_session_names
 from .people import PeopleRegistry
 from .roster import coerce_roster, read_roster
 from .session_paths import (
@@ -210,6 +210,48 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     )
 
 
+def _resolution_inputs(session: str) -> dict[str, Any] | None:
+    """The reads both name-resolution wrappers below need, done once and in one
+    place so they cannot drift on WHICH inputs they pass (a wrapper that forgets
+    `voices` silently stops naming mapped Voices). `None` when the session dir
+    has vanished — a concurrent delete after the transcript read.
+
+    Named `voices`/`voice_runs` per ADR-0021: the operator's mapping off
+    session-meta, and each identity's current run from the sidecar. They must
+    agree or the mapping predates a re-diarize; `resolve_session_names` owns
+    that rule."""
+    try:
+        session_dir = resolve_session_dir(session)
+    except SessionPathError:
+        return None
+    meta = read_session_meta(session)
+    return {
+        "roster": read_roster(session_dir),
+        "aliases": meta.get("aliases") or {},
+        "registry": PeopleRegistry.load(),
+        "voices": meta.get("voices") or {},
+        "voice_runs": voices.run_ids(_read_json_or_none(session_dir / FILENAME_VOICES_JSON)),
+    }
+
+
+def speaker_names_for_session(session: str, *, speaker_keys: Iterable[str] = ()) -> dict[str, str]:
+    """`speaker key -> display name` for `session` — the SAME map `/api/state`
+    layers over the transcript pane, for a server-side reader that has no poll.
+
+    The summarize path is that reader: the stored `plain_text` carries raw keys
+    (`Them#A`) by design, so a summary generated from it would name nobody the
+    operator mapped. Resolving here is what makes a Voice→Person mapping reach
+    the summary, and it must be the same resolution the pane shows or the two
+    disagree about who spoke.
+
+    Best-effort like its sibling: a vanished session dir degrades to `{}` (the
+    raw keys), never a failed summarize."""
+    inputs = _resolution_inputs(session)
+    if inputs is None:
+        return {}
+    return resolve_session_names(**inputs, speaker_keys=speaker_keys)
+
+
 def known_names_for_session(
     session: str,
     *,
@@ -233,24 +275,15 @@ def known_names_for_session(
     to no hint — the pre-feature behaviour — rather than failing the summarize.
     The underlying reads already swallow torn/missing sidecars (`read_roster` /
     `read_session_meta` → `{}`, `PeopleRegistry.load` → empty)."""
-    try:
-        session_dir = resolve_session_dir(session)
-    except SessionPathError:
-        # The only raiser here: the session dir vanished between the merged-
-        # transcript read and now. No names to inject; the summarize proceeds
-        # unhinted rather than 404-ing on an optional enrichment.
+    inputs = _resolution_inputs(session)
+    if inputs is None:
+        # The session dir vanished between the merged-transcript read and now.
+        # No names to inject; the summarize proceeds unhinted rather than
+        # 404-ing on an optional enrichment.
         return []
-    meta = read_session_meta(session)
     return known_names(
-        roster=read_roster(session_dir),
-        aliases=meta.get("aliases") or {},
-        registry=PeopleRegistry.load(),
+        **inputs,
         limit=limit,
-        # The voice inputs too, or a Person present ONLY as a mapped Voice never
-        # reaches the participants-first half and can be trimmed off the registry
-        # tail — losing the spelling of someone who spoke half the meeting (#442).
-        voices=meta.get("voices") or {},
-        voice_runs=voices.run_ids(_read_json_or_none(session_dir / FILENAME_VOICES_JSON)),
         # Passed in, not re-read: the summarize path has the merged transcript
         # open already, and it is hundreds of KB on a long session.
         speaker_keys=speaker_keys,
