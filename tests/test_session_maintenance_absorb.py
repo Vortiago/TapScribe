@@ -106,6 +106,22 @@ def test_absorb_unions_wav_lists_for_an_identity_present_in_both_sessions(rec_ro
     assert result["roster_merged"] == 1
 
 
+def test_absorb_upgrades_the_target_to_multi_person_when_the_source_was(rec_root: Path):
+    """`mode` is the ONE scalar the target does not win on, matching
+    `record_occurrence`'s upgrade-only rule: the source's multi-person WAVs now
+    live in the target, and a `single` entry makes `batch_diarize._plan` skip the
+    identity — so the attribution `fold_voices` drops as "recoverable by
+    re-diarizing" would be unrecoverable."""
+    target = seed_session(rec_root, "tgt", [BOB_WAV])
+    source = seed_session(rec_root, "src", [BOB_WAV_2])
+    record_occurrence(target, identity=BOB_IDENTITY, name="Bob", recorded=True, wav=BOB_WAV, mode="single")
+    record_occurrence(source, identity=BOB_IDENTITY, name="Bob", recorded=True, wav=BOB_WAV_2, mode="multi")
+
+    session_maintenance.absorb_session("tgt", "src")
+
+    assert read_roster(target)[BOB_IDENTITY]["mode"] == "multi"
+
+
 def test_absorb_without_a_source_roster_leaves_the_target_roster_untouched(rec_root: Path):
     target = seed_session(rec_root, "tgt", [ALICE_WAV])
     seed_session(rec_root, "src", [BOB_WAV])

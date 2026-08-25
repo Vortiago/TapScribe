@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -22,25 +22,13 @@ from ..vad import speech_timestamps
 from .base import AudioClip, DiarizationResult, voice_label
 from .cluster import cluster_voices
 from .fbank import FRAME_SHIFT, SUPPORTED_RATE, fbank
-from .knobs import (
-    DEFAULT_MAX_SPEAKERS,
-    DEFAULT_THRESHOLD,
-    ENV_MAX_SPEAKERS,
-    ENV_THRESHOLD,
-    resolve_max_speakers,
-    resolve_threshold,
-)
+from .knobs import resolve_max_speakers, resolve_threshold
 
-__all__ = [
-    "DEFAULT_MAX_SPEAKERS",
-    "DEFAULT_THRESHOLD",
-    "ENV_MAX_SPEAKERS",
-    "ENV_THRESHOLD",
-    "StandaloneDiarizer",
-    "resolve_max_speakers",
-    "resolve_threshold",
-    "speech_windows",
-]
+# `knobs.py` is where a knob READER (`/api/state`) reaches them, because this
+# module pulls numpy, the fbank frontend and — through the VAD — onnxruntime,
+# and a broken diarization install must not take the ~2 Hz poll down with it.
+# The names are not listed in an `__all__` here, which makes reading them off
+# this module unidiomatic rather than impossible — the rule lives in prose.
 
 #: Seconds per fbank frame — the resolution every span below is quantised to.
 FRAME_SHIFT_S = FRAME_SHIFT / SUPPORTED_RATE
@@ -64,6 +52,11 @@ def speech_windows(samples: np.ndarray, *, vad) -> list[list[tuple[int, int]]]:
     Grouped by region rather than flat because a span may not cross a silence —
     the pause belongs to neither speaker (#441). Windows overlap by a hop, and a
     region's last window is anchored to its end rather than overhanging it.
+
+    That anchor is unconditional: `_spans_for_region` tiles only the frames the
+    windows span, so any tail the strided windows miss owns no Voice, and a word
+    landing in it breaks a homogeneous run into `slug#A` / bare-`slug` pieces —
+    a speaker change the audio never had.
     """
     regions: list[list[tuple[int, int]]] = []
     for region in speech_timestamps(samples, vad, threshold=VAD_THRESHOLD):
@@ -75,7 +68,7 @@ def speech_windows(samples: np.ndarray, *, vad) -> list[list[tuple[int, int]]]:
             regions.append([(lo, hi)])
             continue
         windows = [(s, s + WINDOW_FRAMES) for s in range(lo, hi - WINDOW_FRAMES + 1, HOP_FRAMES)]
-        if windows[-1][1] < hi - HOP_FRAMES // 2:
+        if windows[-1][1] < hi:
             windows.append((hi - WINDOW_FRAMES, hi))
         regions.append(windows)
     return regions
@@ -128,7 +121,11 @@ class StandaloneDiarizer:
     def diarize(self, clips: Iterable[AudioClip]) -> DiarizationResult:
         started = time.perf_counter()
         vectors: list[np.ndarray] = []
-        placed: list[tuple[AudioClip, list[tuple[int, int]]]] = []
+        # The clip's START, never the clip: that is the only field the second
+        # pass reads, and holding the AudioClip would pin every clip's decoded
+        # PCM for the whole run — defeating the generator the caller hands over
+        # precisely so one clip is resident at a time (an hour is 230 MB).
+        placed: list[tuple[datetime, list[tuple[int, int]]]] = []
 
         # Embed clip by clip: the fbank of a whole clip is transient, the vectors
         # it reduces to are 2 KB a window.
@@ -139,7 +136,7 @@ class StandaloneDiarizer:
             feats = fbank(clip.samples)
             windows = [w for region in regions for w in region]
             vectors.append(self._embedder.embed([feats[lo:hi] for lo, hi in windows]))
-            placed.extend((clip, region) for region in regions)
+            placed.extend((clip.start, region) for region in regions)
 
         if not vectors:
             return DiarizationResult(engine=self.engine, took_ms=_ms_since(started))
@@ -149,14 +146,14 @@ class StandaloneDiarizer:
         )
         voices: dict[str, list] = {}
         at = 0
-        for clip, region in placed:
+        for clip_start, region in placed:
             window_labels = labels[at : at + len(region)]
             at += len(region)
             for label, lo, hi in _spans_for_region(region, window_labels):
                 voices.setdefault(voice_label(label), []).append(
                     (
-                        clip.start + timedelta(seconds=lo * FRAME_SHIFT_S),
-                        clip.start + timedelta(seconds=hi * FRAME_SHIFT_S),
+                        clip_start + timedelta(seconds=lo * FRAME_SHIFT_S),
+                        clip_start + timedelta(seconds=hi * FRAME_SHIFT_S),
                     )
                 )
         return DiarizationResult(

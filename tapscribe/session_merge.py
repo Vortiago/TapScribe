@@ -308,8 +308,18 @@ _LOW_CONFIDENCE_LOGPROB_THRESHOLD = -0.5
 
 def _clock(abs_start: Any) -> str:
     """`HH:MM:SS` from either a datetime (mid-merge) or its ISO string (read
-    back off `session-transcript.json`)."""
-    dt = abs_start if isinstance(abs_start, datetime) else parse_iso(str(abs_start or ""))
+    back off `session-transcript.json`).
+
+    An unreadable stamp renders `??:??:??` rather than raising: `parse_iso`
+    raises on malformed input, and this runs over a file on disk, so one bad
+    segment would fail a whole summarize instead of costing one line its clock.
+    """
+    if isinstance(abs_start, datetime):
+        return abs_start.strftime("%H:%M:%S")
+    try:
+        dt = parse_iso(str(abs_start or ""))
+    except ValueError:
+        return "??:??:??"
     return dt.strftime("%H:%M:%S") if dt else "??:??:??"
 
 
@@ -412,9 +422,9 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
         for seg in cached.result.segments:
             low_conf = seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONFIDENCE_LOGPROB_THRESHOLD
             # Counted per DECODED segment, not per piece: one uncertain segment
-            # crossing three Voices is one uncertain decode, and counting pieces
-            # made the dashboard's quality badge grow with how well diarization
-            # worked, and move on a re-diarize that changed no audio (#441).
+            # crossing three Voices is ONE uncertain decode. Per piece, the
+            # dashboard's quality badge would grow with how well diarization
+            # worked and move on a re-diarize that changed no audio (#441).
             low_confidence_count += low_conf
             for piece in attribute_segment(seg, wav_start=wav_start, slug=speaker, spans=spans):
                 segments.append(
@@ -546,6 +556,13 @@ def remerge_with_stored_selection(session_dir: Path, previous: Mapping[str, Any]
     keyed on it, so preserving it would leave the old keys on screen. False when
     the stored transcript names a range that no longer parses — re-selecting
     would merge a different set of WAVs than it claims to.
+
+    False, too, when the re-merge comes back EMPTY where the stored one had
+    segments. Re-attribution never removes speech, so an empty result means the
+    audio the stored selection names is gone — `source="stripped"` after the
+    stripped dir was reclaimed, or a re-strip that renamed every clip out from
+    under the per-WAV caches. Writing it would destroy the meeting's transcript
+    to record that its WAVs moved.
     """
     try:
         selection = select_session_wavs(
@@ -556,5 +573,8 @@ def remerge_with_stored_selection(session_dir: Path, previous: Mapping[str, Any]
         )
     except ValueError:
         return False
-    write_merged_transcript(session_dir, merge_session(selection), model=previous.get("model") or "")
+    transcript = merge_session(selection)
+    if not transcript.segments and previous.get("segments"):
+        return False
+    write_merged_transcript(session_dir, transcript, model=previous.get("model") or "")
     return True

@@ -51,7 +51,7 @@ from wav_builders import seed_wav  # type: ignore[import-not-found]  # tests/ on
 
 from tapscribe import config
 from tapscribe.config_store import read_config, write_config
-from tapscribe.diarizers.standalone import resolve_max_speakers, resolve_threshold
+from tapscribe.diarizers.knobs import resolve_max_speakers, resolve_threshold
 from tapscribe.summarizers.catalog import default_gguf_ctx
 from tapscribe.summarizers.command import _default_timeout_s
 from tapscribe.transcribers._chunked import ChunkedTranscriber

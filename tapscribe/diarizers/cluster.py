@@ -108,5 +108,10 @@ def cluster_voices(
     sample = vectors[idx]
     sample_labels = _agglomerate(1.0 - sample @ sample.T, threshold=threshold, max_speakers=max_speakers)
     centroids = np.stack([sample[sample_labels == lab].mean(axis=0) for lab in np.unique(sample_labels)])
-    centroids /= np.linalg.norm(centroids, axis=1, keepdims=True)
+    # Guarded like `embed.embed`'s: a low `max_speakers` forces merges past the
+    # threshold, so a cluster can hold near-antipodal vectors whose mean is ~0.
+    # An unguarded divide makes that centroid NaN, and `argmax` returns the NaN's
+    # index for EVERY row — the whole tap collapses to one Voice, on a warning.
+    norms = np.linalg.norm(centroids, axis=1, keepdims=True)
+    centroids /= np.where(norms > 0, norms, 1.0)
     return _by_first_appearance(np.argmax(vectors @ centroids.T, axis=1))

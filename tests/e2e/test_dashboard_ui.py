@@ -3325,13 +3325,13 @@ async def test_next_voices_sig_flip_does_not_blank_the_other_taps_rows(running_r
             )
             await _focus_session_view(page, sid, "transcript")
 
-            rows = '#viewRoot [data-slot="voiceList"] .voicerow'
+            rows = '#viewRoot [data-slot="voiceList"] [data-key]'
             await page.wait_for_function(
                 f"""() => document.querySelectorAll({rows!r}).length === 2""", timeout=15000
             )
             stamped = await page.evaluate(
                 """() => {
-                    const row = document.querySelector('#viewRoot .voicerow[data-key="room#A"]');
+                    const row = document.querySelector('#viewRoot [data-slot="voiceList"] [data-key="room#A"]');
                     if (!row) return false;
                     row.__guardMark = 1;
                     return true;
@@ -3356,7 +3356,7 @@ async def test_next_voices_sig_flip_does_not_blank_the_other_taps_rows(running_r
             )
             survived = await page.evaluate(
                 """() => {
-                    const row = document.querySelector('#viewRoot .voicerow[data-key="room#A"]');
+                    const row = document.querySelector('#viewRoot [data-slot="voiceList"] [data-key="room#A"]');
                     return !!(row && row.__guardMark === 1);
                 }"""
             )
@@ -7881,16 +7881,16 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
                 tap("sysaudio", "Them", far1, "utt-t0", TAP_MODE_MULTI, paced=True)
             )
             await page.wait_for_function(
-                """() => document.querySelectorAll('#viewRoot [data-slot="modeList"] .moderow').length >= 2""",
+                """() => document.querySelectorAll('#viewRoot [data-slot="modeList"] [data-identity]').length >= 2""",
                 timeout=15000,
             )
             await _shot(page, "voices-01-taps-mode.png")
             await _shot_el(page, TAP_MODE_PANEL, "voices-01b-tap-model.png")
 
             mode_of = """(ident) => {
-              const row = [...document.querySelectorAll('#viewRoot .moderow')]
+              const row = [...document.querySelectorAll('#viewRoot [data-slot="modeList"] [data-identity]')]
                 .find((r) => r.dataset.identity === ident);
-              return row?.querySelector('.tap-mode.is-on')?.dataset.mode || '';
+              return row?.querySelector('[data-mode][aria-pressed="true"]')?.dataset.mode || '';
             }"""
             assert await page.evaluate(mode_of, "sysaudio") == "multi", "the wire declaration did not land"
             assert await page.evaluate(mode_of, "mic-alice") == "single"
@@ -7899,7 +7899,9 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             # setting, which is what an NDI bridge (#54) would need. It does not
             # retro-fit the OPEN tap: the Roster stamped its mode at open, and
             # diarization is a property of the recording.
-            await page.click('#viewRoot .moderow[data-identity="mic-alice"] .tap-mode[data-mode="multi"]')
+            await page.click(
+                '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="multi"]'
+            )
             await page.wait_for_function(
                 """async () => {
                   const j = await (await fetch('/api/state')).json();
@@ -7907,7 +7909,9 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
                 }""",
                 timeout=8000,
             )
-            await page.click('#viewRoot .moderow[data-identity="mic-alice"] .tap-mode[data-mode="single"]')
+            await page.click(
+                '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="single"]'
+            )
             await page.wait_for_function(f"""() => ({mode_of})('mic-alice') === 'single'""", timeout=8000)
 
             await asyncio.gather(mic_task, far_task)
@@ -7939,7 +7943,7 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             await _shot_el(page, MERGED_HOST, "voices-02c-lines-before.png", max_height=210)
 
             await page.click('#viewRoot [data-slot="dzBtn"]')
-            rows = '#viewRoot [data-slot="voiceList"] .voicerow'
+            rows = '#viewRoot [data-slot="voiceList"] [data-key]'
             await page.wait_for_function(
                 f"""() => document.querySelectorAll({rows!r}).length === 2""",
                 timeout=30000,

@@ -27,7 +27,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-import tapscribe.voices as voices
+# Aliased: `voices` is ALSO the name of the operator's Voice->Person mapping,
+# which two functions below take as a parameter. Reaching the module by
+# attribute is what makes a test monkeypatch propagate; the alias is only
+# there so a future edit inside those functions cannot silently bind the
+# parameter instead.
+import tapscribe.voices as voice_store
 
 from .people import PeopleRegistry
 from .roster import slug_owners
@@ -94,8 +99,7 @@ def resolve_session_names(
     transcript's own speaker list rather than the roster.
     """
     # An ambiguous slug resolves to NO identity, so it can't be named through a
-    # Person: `setdefault` used to hand it silently to whichever identity came
-    # first (#440). Its roster display name still applies — that is what the two
+    # Person (#440). Its roster display name still applies — that is what the two
     # taps share, and it is why the slug collides in the first place.
     owners = slug_owners(roster)
     slug_to_identity = {slug: next(iter(ids)) for slug, ids in owners.items() if len(ids) == 1}
@@ -126,18 +130,46 @@ def resolve_session_names(
     # transcript's own speaker keys.
     voices = voices or {}
     voice_runs = voice_runs or {}
+    roster_names = {identity: entry.get("name") or "" for identity, entry in roster.items()}
     for key in speaker_keys:
         if key in names or not is_voice_key(key):
             continue
         slug, label = split_voice_key(key)
         identity = slug_to_identity.get(slug)
-        mapping = voices.get(voice_key(identity, label)) or {} if identity else {}
-        current = voice_runs.get(identity or "")
-        if current and mapping.get("run_id") != current:
-            mapping = {}  # stamped against a superseded run
-        person = registry.get(mapping.get("person_id", "")) if mapping else None
-        names[key] = (person or {}).get("name") or f"Speaker {label}"
+        mapping = voices.get(voice_key(identity, label)) if identity else None
+        person = None
+        if _mapping_applies(mapping, voice_runs.get(identity or "")):
+            person = registry.get(mapping["person_id"])
+        # The Person's DISPLAY name — what the operator picked from. Every
+        # auto-bound Person carries a blank `name` and the People view shows its
+        # roster name instead, so reading the raw field here would leave
+        # `Speaker A` on a Voice that view counts against that Person.
+        names[key] = _person_display(person, roster_names) or unmapped_voice_name(label)
     return names
+
+
+def unmapped_voice_name(label: str | None) -> str:
+    """What a Voice nobody has mapped reads as. A placeholder the operator has to
+    recognise to map — never a human, so `known_names` keeps it out of the
+    summarizer's known-people hint."""
+    return f"Speaker {label}"
+
+
+def _person_display(person: dict[str, Any] | None, roster_names: dict[str, str]) -> str:
+    """A Person's display name, or "" when this session cannot supply one.
+
+    The first two rungs of `_default_name`, never its third: that one falls back
+    to the raw Identity token, and `roster_names` here is THIS session's roster
+    where `build_people_view` pools every session's. A Person auto-bound in an
+    earlier meeting is therefore routinely absent, and returning the token would
+    put `tray-macbook-a1b2…:` on the transcript line — and into the summarizer's
+    known-people hint, which only filters the `Speaker <label>` placeholder.
+    """
+    if not person:
+        return ""
+    if person["name"]:
+        return person["name"]
+    return next((roster_names[i] for i in person["identities"] if roster_names.get(i)), "")
 
 
 def known_names(
@@ -185,7 +217,16 @@ def known_names(
         voice_runs=voice_runs,
         speaker_keys=speaker_keys,
     )
-    for name in sorted(resolved.values()):
+    # An unmapped Voice resolves to `Speaker A` so the operator can recognise the
+    # row and map it. That is a placeholder, not a human: the hint exists to give
+    # the model canonical spellings for names it mis-heard, and participants are
+    # never trimmed, so letting them in would both invite `Speaker A` into the
+    # prose and eat the budget the registry tail is supposed to fill.
+    for name in sorted(
+        name
+        for key, name in resolved.items()
+        if not (is_voice_key(key) and name == unmapped_voice_name(split_voice_key(key)[1]))
+    ):
         _add(name)
     # Fill the remaining budget with the registry tail; the cap trims only here.
     for person in registry.as_list():
@@ -210,9 +251,13 @@ def _mapping_applies(mapped: Any, current_run: str | None) -> bool:
     its stamp matches the identity's CURRENT diarization run.
 
     A sidecar that names NO run for the identity (deleted, torn, or never
-    diarized) leaves its mappings applied — nothing has superseded them. Both
-    readers below decide this, off different key spaces; a drift means the
-    People view counts a Person in a meeting whose transcript never names them.
+    diarized) leaves its mappings applied — nothing has superseded them.
+
+    Both readers cross it — `resolve_session_names` off the transcript's
+    `slug#<voice>` keys, `_sessions_by_voice_pointer` off the meta's
+    `identity#<voice>` ones — because a drift between those two key spaces means
+    the People view counts a Person in a meeting whose transcript never names
+    them.
     """
     if not isinstance(mapped, dict) or not mapped.get("person_id"):
         return False
@@ -334,7 +379,7 @@ def attach_people_view(
         # put the whole roster and every run stamp in each poll body. The runs
         # leave one projection behind — the stamp the Transcript stage keys its
         # lazy Voices body on, which is the only way it learns a diarize landed.
-        s["voices_sig"] = voices.voices_sig(s.get("voice_runs") or {})
+        s["voices_sig"] = voice_store.voices_sig(s.get("voice_runs") or {})
         s.pop("roster", None)
         s.pop("voice_runs", None)
     return people

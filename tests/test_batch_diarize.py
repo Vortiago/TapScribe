@@ -25,6 +25,8 @@ from tapscribe.diarizers.base import DiarizationResult, DiarizerUnavailable
 from tapscribe.recorder import JobState, SessionBusy
 from tapscribe.session_paths import FILENAME_ROSTER_JSON, FILENAME_TRANSCRIPT_JSON
 from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
+from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+from tapscribe.wav_cache import cached_transcribe
 
 T0 = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
 
@@ -66,6 +68,35 @@ def _seed(recorder, session: str, roster: dict, *, wavs: list[str]) -> Path:
     session_dir = seed_session(recorder.recordings_dir, session, wavs)
     (session_dir / FILENAME_ROSTER_JSON).write_text(json.dumps(roster), encoding="utf-8")
     return session_dir
+
+
+class _OneSegment:
+    """One 0–1 s segment, so a re-merge has something to attribute — and it sits
+    squarely inside `StubDiarizer`'s Voice A rather than straddling A and B."""
+
+    name = backend = device = model_name = "fake"
+
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
+        return TranscriptionResult(
+            transcriber=self.name,
+            backend=self.backend,
+            device=self.device,
+            model=self.model_name,
+            language="en",
+            language_probability=1.0,
+            duration=1.0,
+            text="hi",
+            segments=(TranscriptionSegment(start=0.0, end=1.0, text="hi"),),
+            initial_prompt_used="",
+            hotwords_used="",
+            quality_settings={},
+        )
+
+
+def _cache_transcript(wav: Path) -> None:
+    """The per-WAV sidecar a re-merge reads. Without one the merge finds no
+    segments, which is the state the empty-re-merge guard refuses to write."""
+    cached_transcribe(wav, _OneSegment(), initial_prompt=None, hotwords=None, hallucination_rules=[])
 
 
 def _no_engine():
@@ -218,18 +249,36 @@ async def test_a_standalone_run_rekeys_an_existing_merged_transcript(recorder_un
     """Speaker keys are baked into `session-transcript.json` at merge time, so
     without this the operator diarizes, maps the Voices, and the transcript
     keeps saying `them:` until someone re-transcribes."""
-    session_dir = _seed(
-        recorder_under_test, "s", {"sysaudio": _multi("them")}, wavs=[_wav("them", "sysaudio", T0)]
-    )
+    name = _wav("them", "sysaudio", T0)
+    session_dir = _seed(recorder_under_test, "s", {"sysaudio": _multi("them")}, wavs=[name])
+    _cache_transcript(session_dir / name)
     (session_dir / FILENAME_TRANSCRIPT_JSON).write_text(
         json.dumps({"segments": [{"speaker": "them", "text": "hi"}]}), encoding="utf-8"
     )
-    before = (session_dir / FILENAME_TRANSCRIPT_JSON).read_text(encoding="utf-8")
 
     await diarize_session(recorder_under_test, DiarizeSessionRequest(session="s"))
 
-    after = (session_dir / FILENAME_TRANSCRIPT_JSON).read_text(encoding="utf-8")
-    assert after != before, "the merged transcript still carries the pre-diarization keys"
+    after = json.loads((session_dir / FILENAME_TRANSCRIPT_JSON).read_text(encoding="utf-8"))
+    assert [s["speaker"] for s in after["segments"]] == ["them#A"]
+
+
+async def test_a_re_merge_that_finds_nothing_leaves_the_transcript_alone(recorder_under_test, stub) -> None:
+    """Re-attribution never removes speech, so an empty re-merge means the audio
+    the stored selection names is gone — the stripped dir reclaimed, or a
+    re-strip that renamed every clip out from under the per-WAV caches. Writing
+    it would destroy the meeting's transcript to record that its WAVs moved."""
+    session_dir = _seed(
+        recorder_under_test, "s", {"sysaudio": _multi("them")}, wavs=[_wav("them", "sysaudio", T0)]
+    )
+    # `source: stripped` with no `stripped/` on disk: `select_session_wavs`
+    # returns an EMPTY selection rather than raising.
+    before = json.dumps({"source": "stripped", "segments": [{"speaker": "them", "text": "hi"}]})
+    (session_dir / FILENAME_TRANSCRIPT_JSON).write_text(before, encoding="utf-8")
+
+    out = await diarize_session(recorder_under_test, DiarizeSessionRequest(session="s"))
+
+    assert out["ok"] is True
+    assert (session_dir / FILENAME_TRANSCRIPT_JSON).read_text(encoding="utf-8") == before
 
 
 async def test_no_merged_transcript_is_not_an_error(recorder_under_test, stub) -> None:

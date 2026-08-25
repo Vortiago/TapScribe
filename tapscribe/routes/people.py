@@ -69,6 +69,16 @@ async def api_people_rename(person_id: str, req: Request, recorder: Recorder = D
     body = await require_json_object_body(req, allow_empty=False)
     name = require_str(body.get("name"), "name")
     registry = PeopleRegistry.load()
+    person = registry.get(person_id)
+    # A Person owning no Identity is reachable only BY name: `_coerce_people`
+    # drops an unnamed one as torn-file junk, so clearing the name here deletes
+    # the Person on the next load and orphans every `session_meta.voices` pointer
+    # at it. There is nothing to fall back to either — `_default_name` derives
+    # from Identities, and this Person has none.
+    if person is not None and not name.strip() and not person["identities"]:
+        raise HTTPException(
+            400, "this Person owns no Identity — its name is how it is found, so it cannot be cleared"
+        )
     registry.rename(person_id, name.strip())
     registry.save()
     return {"ok": True, "people": await _people_view(recorder)}
@@ -126,9 +136,10 @@ async def api_session_voice_mapping(session: str, req: Request, recorder: Record
     person_id = body.get("person_id")
     name = body.get("name")
     registry = PeopleRegistry.load()
+    created = None
     if isinstance(name, str) and name.strip():
-        person_id = registry.create(name.strip())["id"]
-        registry.save()
+        created = registry.create(name.strip())
+        person_id = created["id"]
     elif isinstance(person_id, str) and person_id:
         if registry.get(person_id) is None:
             raise HTTPException(404, f"no Person {person_id!r}")
@@ -140,5 +151,12 @@ async def api_session_voice_mapping(session: str, req: Request, recorder: Record
         mapping[key] = {"person_id": person_id, "run_id": entry["run_id"]}
     else:
         mapping.pop(key, None)
+    # The mapping lands FIRST, and only then does the new Person become durable:
+    # a Person the meta write never referenced is unreachable — no Identity, no
+    # pointer, no delete verb — so committing it ahead of the write leaves one
+    # behind on every failed attempt. Still no `await` between load and save, so
+    # the "people.json has two serialised writers" invariant holds.
     write_session_meta(session, {"voices": mapping})
+    if created is not None:
+        registry.save()
     return {"ok": True, "voices": mapping, "people": await _people_view(recorder)}

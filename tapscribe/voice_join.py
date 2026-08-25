@@ -57,9 +57,9 @@ def spans_by_slug(
     needs an identity-discriminating transcript key — #440.
     """
     # Over the ROSTER, not `voices`: an ambiguous slug is one two taps RECORDED
-    # under, whether or not both were diarized. Deriving it from `voices` missed
-    # the likelier case — one tray box diarized, a second one not — where the
-    # diarized identity's spans then split the other's segments.
+    # under, whether or not both were diarized — one tray box diarized and a
+    # second one not is the likelier shape, and there the diarized identity's
+    # spans would split the other's segments.
     ambiguous = {slug for slug, ids in slug_owners(roster).items() if len(ids) > 1}
 
     out: dict[str, list[VoiceSpan]] = {}
@@ -91,7 +91,13 @@ def _dominant(start: datetime, end: datetime, spans: Sequence[VoiceSpan]) -> str
 
     A zero-width window falls back to containment: `Word` timestamps are rounded
     to 2 dp, so a short token can collapse to `start == end`, which overlaps
-    nothing by measure and would otherwise break a homogeneous run in three.
+    nothing by measure and would otherwise break a homogeneous run in three. The
+    containing span is the one whose CENTRE is nearest — spans tile a region
+    end-to-end, so an instant at a turn boundary is contained by both the
+    outgoing and the incoming one, and any label-ordered tie-break would hand
+    every such word to whichever Voice happens to sort later. Same nearest-centre
+    rule `diarizers.standalone._spans_for_region` assigns frames by; label breaks
+    an exact tie so the same input always attributes the same way.
     """
     totals: dict[str, float] = {}
     for span in spans:
@@ -101,7 +107,14 @@ def _dominant(start: datetime, end: datetime, spans: Sequence[VoiceSpan]) -> str
     if totals:
         return max(totals, key=lambda label: (totals[label], label))
     if end <= start:
-        return max((s.label for s in spans if s.start <= start <= s.end), default=None)
+        nearest = sorted(
+            (
+                (abs((s.start + (s.end - s.start) / 2) - start), s.label)
+                for s in spans
+                if s.start <= start <= s.end
+            ),
+        )
+        return nearest[0][1] if nearest else None
     return None
 
 
@@ -145,19 +158,24 @@ def attribute_segment(
     # segment's own bounds and text rather than a rejoin of the words. Without
     # words this is the only option — Voxtral emits none — so a crossing segment
     # goes to the dominant Voice rather than losing its text.
-    label = runs[0][0] if runs else _dominant(abs_start, abs_end, spans)
+    #
+    # A single run that found NO Voice falls through to the segment's own bounds
+    # too: word timestamps drift (a chunked backend shifts them per window), so
+    # every word missing the spans is not evidence the SEGMENT does — and it sits
+    # squarely inside one turn far more often than it straddles a silence.
+    label = (runs[0][0] if runs else None) or _dominant(abs_start, abs_end, spans)
     return [Piece(abs_start=abs_start, abs_end=abs_end, speaker=_key(slug, label), text=seg.text)]
 
 
 def _tile(runs, *, wav_start: datetime, slug: str, start: datetime, end: datetime) -> list[Piece]:
     """One Piece per run, together tiling `[start, end]` with no gaps.
 
-    Word-run bounds alone would leave the pause where the speaker changed
-    unowned, so a split segment contributed LESS than its own duration to
-    `speaking_seconds` — systematically understating diarized speakers against
-    undiarized ones in the same session (#441). Neither speaker owns that pause,
-    so the boundary is its midpoint; the outer edges take the segment's own
-    bounds so the whole segment is accounted for exactly once.
+    The tiling is the point: word-run bounds alone leave the pause where the
+    speaker changed unowned, and a split segment then contributes less than its
+    own duration to `speaking_seconds`, understating every diarized speaker
+    against the undiarized ones beside them (#441). Neither speaker owns that
+    pause, so the boundary is its midpoint; the outer edges take the segment's
+    own bounds, so the whole segment is accounted for exactly once.
     """
     edges = [start]
     for (_, words), (_, nxt) in zip(runs, runs[1:], strict=False):

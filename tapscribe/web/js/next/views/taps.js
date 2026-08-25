@@ -93,11 +93,25 @@ export function build(ctx) {
     );
     const intent = modeIntent(btn);
     if (!btn || !intent) return;
-    paintMode(/** @type {HTMLElement} */ (btn.parentElement), intent.mode);
-    mutateButton(btn, () => putJson("/api/tap-mode", intent), {
-      afterMutate,
-      failMessage: (e) => `Tap mode change failed: ${e}`,
-    });
+    const seg = /** @type {HTMLElement} */ (btn.parentElement);
+    const was = modeOf(seg);
+    paintMode(seg, intent.mode);
+    mutateButton(
+      btn,
+      () =>
+        putJson("/api/tap-mode", intent).catch((e) => {
+          // Put the rejected paint back. Unlike `active-taps.js`' toggle — an
+          // in-place per-tick updater that self-heals — these rows go through
+          // `renderList`, and a rejected PUT moves no server value, so neither
+          // the list `sig` nor the row's `itemSig` changes and `paintMode` is
+          // never re-run from /api/state. The row would claim a mode the server
+          // refused, and `modeIntent` then refuses the retry click because the
+          // button already reads as pressed.
+          paintMode(seg, was);
+          throw e;
+        }),
+      { afterMutate, failMessage: (e) => `Tap mode change failed: ${e}` },
+    );
   });
   wireRecPill(recPill, () => latest, { afterMutate });
 
@@ -138,7 +152,10 @@ export function build(ctx) {
 
     // A keyed list: rows are mounted once per identity and mutated in place, so
     // a tap connecting does not churn every other row's buttons.
-    modeEmpty.textContent = active.length ? "" : "No taps connected.";
+    // Write-only-when-changed: this is a per-tick in-place updater, and assigning
+    // `textContent` replaces the node's children whether or not anything moved.
+    const emptyText = active.length ? "" : "No taps connected.";
+    if (modeEmpty.textContent !== emptyText) modeEmpty.textContent = emptyText;
     modeEmpty.hidden = active.length > 0;
     renderList(modeList, active, {
       key: (a) => a.identity,
@@ -156,6 +173,15 @@ export function build(ctx) {
   };
 
   return { node: frag, update };
+}
+
+/** The mode a `.segctl` currently reads as — off `aria-pressed`, the state the
+ * control actually exposes, not the class that styles it.
+ * @param {Element} seg
+ * @returns {"single" | "multi"} */
+function modeOf(seg) {
+  const on = /** @type {HTMLElement | null} */ (seg.querySelector('.tap-mode[aria-pressed="true"]'));
+  return on?.dataset.mode === "multi" ? "multi" : "single";
 }
 
 /** Mark one mode as effective on a `.segctl`, in place.

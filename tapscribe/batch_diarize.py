@@ -13,8 +13,8 @@ session means.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,7 +22,7 @@ from uuid import uuid4
 import tapscribe.voices as voices
 
 from .diarizers import load_diarizer
-from .diarizers.base import AudioClip, DiarizationResult
+from .diarizers.base import AudioClip, DiarizationResult, DiarizerError, DiarizerFailed
 from .recorder import Recorder
 from .roster import read_roster, slug_owners
 from .session_merge import remerge_with_stored_selection, select_session_wavs
@@ -58,7 +58,9 @@ class _Plan:
 
     targets: list[_Target]
     skipped: list[dict[str, str]]
-    started: datetime
+    #: `time.perf_counter()`, not the wall clock: the run spans minutes, and an
+    #: NTP step mid-run would report a negative or zero `took_ms`.
+    started: float
 
 
 async def diarize_session(recorder: Recorder, req: DiarizeSessionRequest) -> dict[str, Any]:
@@ -121,8 +123,23 @@ async def diarize_session_locked(
             for wav in target.wavs
             if (start := parse_wav_start(wav.name)) is not None
         )
-        result: DiarizationResult = diarizer.diarize(clips)
-        voices.record_voices(session_dir, identity=target.identity, run_id=run_id, spans=result.voices)
+        try:
+            result: DiarizationResult = diarizer.diarize(clips)
+            # An empty run does NOT supersede: writing it would drop the previous
+            # run's Voices AND every mapping stamped against it, so a re-diarize
+            # of audio the VAD now finds no speech in un-names the meeting.
+            if result.voices:
+                voices.record_voices(
+                    session_dir, identity=target.identity, run_id=run_id, spans=result.voices
+                )
+        except DiarizerError:
+            raise
+        except Exception as exc:
+            # The stage boundary is where an engine-run failure becomes the
+            # domain error routes map to 502 — an unreadable WAV, a model that
+            # loaded but cannot run, a sidecar that would not open. Without this
+            # the operator gets a bare 500.
+            raise DiarizerFailed(f"diarizing {target.identity!r} failed: {exc}") from exc
         return {
             "identity": target.identity,
             "wavs": len(target.wavs),
@@ -148,7 +165,7 @@ def _plan(session_dir: Path, source: str) -> _Plan:
     Pure disk reads (the Roster plus one selection pass), so `diarize_session`
     can decide "nothing to do" without claiming a slot or loading a model.
     """
-    started = datetime.now(UTC)
+    started = time.perf_counter()
     roster = read_roster(session_dir)
     # Two taps under one display name mint the same WAV slug, so neither
     # identity's Voices could be joined back to it (#440). `slug_owners` is the
@@ -201,5 +218,5 @@ def _result(
         "run_id": run_id,
         "identities": rows,
         "skipped": plan.skipped,
-        "took_ms": int((datetime.now(UTC) - plan.started).total_seconds() * 1000),
+        "took_ms": int((time.perf_counter() - plan.started) * 1000),
     }

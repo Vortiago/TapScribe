@@ -235,14 +235,21 @@ def _resolution_inputs(session: str) -> dict[str, Any] | None:
 
 
 def speaker_names_for_session(session: str, *, speaker_keys: Iterable[str] = ()) -> dict[str, str]:
-    """`speaker key -> display name` for `session` — the SAME map `/api/state`
-    layers over the transcript pane, for a server-side reader that has no poll.
+    """`speaker key -> display name` for `session` — `resolve_session_names` off
+    disk, for a server-side reader that has no poll.
 
     The summarize path is that reader: the stored `plain_text` carries raw keys
     (`Them#A`) by design, so a summary generated from it would name nobody the
     operator mapped. Resolving here is what makes a Voice→Person mapping reach
-    the summary, and it must be the same resolution the pane shows or the two
-    disagree about who spoke.
+    the summary.
+
+    One rung short of the poll's map, and deliberately so: `/api/state` resolves
+    against `session_occurrences`, whose ADR-0009 F1 backfill mints an occurrence
+    for a recorded slug no roster entry covers. It is not applied here because it
+    feeds `known_names_for_session` too, where a slug-derived name is not a
+    canonical spelling the summarizer should be hinted with. A ROSTERLESS session
+    therefore reads `Alice_Smith` in the summary input where the pane says
+    `Alice Smith`; every rostered one — every recording since ADR-0009 — agrees.
 
     Best-effort like its sibling: a vanished session dir degrades to `{}` (the
     raw keys), never a failed summarize."""

@@ -1044,11 +1044,10 @@ button.wavrow {
 .segctl__opt.is-on { background: color-mix(in srgb, var(--next-accent) 16%, transparent); color: var(--next-accent); opacity: 1; }
 .segctl__opt--multi.is-on { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
 
-/* diarized voice → Person rows (mock) */
 /* One diarized Voice -> Person row (Transcript · Voices). The last grid cell
    holds the Person picker, the new-name input it reveals, the stale cue and the
    save status. Four columns: the aside is ~300px wide, so a decorative arrow
-   between the share and the picker cost exactly a truncated Person name. */
+   between the share and the picker costs exactly a truncated Person name. */
 .voicemap { display: flex; flex-direction: column; gap: 6px; }
 .voicerow { display: grid; grid-template-columns: auto minmax(36px, 1fr) 34px minmax(0, auto); gap: 6px; align-items: center; }
 .voicerow__v { font-size: 10px; color: var(--fg-1); }

@@ -54,7 +54,17 @@ class CampPlusEmbedder:
             raise DiarizerUnavailable(
                 "onnxruntime is a core dependency but isn't importable — reinstall TapScribe."
             ) from exc
-        return cls(ort.InferenceSession(str(path), providers=["CPUExecutionProvider"]))
+        try:
+            return cls(ort.InferenceSession(str(path), providers=["CPUExecutionProvider"]))
+        except Exception as exc:
+            # A file that exists but is not this graph: a truncated download the
+            # digest probe would have caught, or an operator `TAPSCRIBE_DIARIZE_
+            # MODEL` the digest deliberately does not apply to. Still an install
+            # problem, so it takes the same 400 and names the same repair.
+            raise DiarizerUnavailable(
+                f"the speaker-embedding model at {path} could not be opened ({exc}) — delete it and "
+                "run `python -m tapscribe.diarizers.model` to re-fetch."
+            ) from exc
 
     def embed(self, windows: Sequence[np.ndarray]) -> np.ndarray:
         """`(n, 512)` unit vectors for `(frames, 80)` fbank windows, in order."""

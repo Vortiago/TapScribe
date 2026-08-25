@@ -281,9 +281,47 @@ def test_mapped_voice_resolves_to_its_person() -> None:
     assert names["sysaudio#A"] == "Alice Andersen"
 
 
+def test_a_voice_mapped_to_an_auto_bound_person_takes_that_person_s_roster_name() -> None:
+    """Every auto-bound Person carries a BLANK `name`, and the People view — which
+    is what fills the operator's picker — shows its roster name instead. Reading
+    the raw field would put `Speaker A` on a Voice that view counts as named."""
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p9", "run_id": "r1"}},
+        people=[{"id": "p9", "name": "", "identities": [_SYS]}],
+    )
+
+    assert names["sysaudio#A"] == "System audio"
+
+
+def test_a_mapped_person_this_session_cannot_name_still_reads_as_the_placeholder() -> None:
+    """The floor is `Speaker A`, never the raw Identity token: a Person auto-bound
+    in an EARLIER meeting has no entry in this session's roster, and a
+    `tray-macbook-a1b2…:` transcript line would also reach the summarizer's hint,
+    which only filters the placeholder."""
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p9", "run_id": "r1"}},
+        people=[{"id": "p9", "name": "", "identities": ["tray-other-box-999"]}],
+    )
+
+    assert names["sysaudio#A"] == "Speaker A"
+
+
 def test_unmapped_voice_renders_a_readable_speaker_label() -> None:
     """Not the raw `sysaudio#A` — the operator has to recognise the row to map it."""
     assert _resolve()["sysaudio#B"] == "Speaker B"
+
+
+def test_an_unmapped_voice_is_not_a_known_name_for_the_summarizer() -> None:
+    """`Speaker A` is a placeholder for the operator to click, not a spelling the
+    model should correct a transcribed name toward."""
+    hint = known_names(
+        roster=_ROSTER,
+        aliases={},
+        registry=_reg([{"id": "p1", "name": "Alice Andersen", "identities": []}]),
+        speaker_keys=_KEYS,
+    )
+
+    assert not [n for n in hint if n.startswith("Speaker ")]
 
 
 def test_override_on_a_voice_key_beats_the_person() -> None:

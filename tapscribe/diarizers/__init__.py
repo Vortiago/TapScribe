@@ -23,8 +23,14 @@ def load_diarizer(**overrides):
     from .standalone import StandaloneDiarizer
 
     embedder = CampPlusEmbedder.load()
+    # The CALL is inside the guard, not just the import: `load_model` opens the
+    # vendored silero graph, so a wheel whose package data lost
+    # `vad/silero_vad.onnx` fails here, not at the import — and this runs BEFORE
+    # the job claim precisely so an install problem lands as an actionable 400.
     try:
         from ..vad import load_model
-    except ImportError as exc:  # pragma: no cover - core dep, broken venv only
-        raise DiarizerUnavailable("the VAD backend failed to import — reinstall TapScribe.") from exc
-    return StandaloneDiarizer(embedder, vad=load_model(), **overrides)
+
+        vad = load_model()
+    except Exception as exc:  # pragma: no cover - core dep, broken venv only
+        raise DiarizerUnavailable("the VAD backend is unavailable — reinstall TapScribe.") from exc
+    return StandaloneDiarizer(embedder, vad=vad, **overrides)

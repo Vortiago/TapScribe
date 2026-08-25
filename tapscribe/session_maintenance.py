@@ -44,6 +44,7 @@ from .session_paths import (
     stripped_dir,
 )
 from .sessions import read_session_meta, write_session_meta
+from .tap_mode import TAP_MODE_MULTI
 
 # Re-exported from tap_registry (the canonical home, #405). These names must
 # resolve here so #257's leak detector and the destructive-route contract keep
@@ -425,6 +426,13 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
                 tgt_entry["wavs"] = tgt_entry["wavs"] + [
                     w for w in src_entry["wavs"] if w not in tgt_entry["wavs"]
                 ]
+                # `mode` upgrades like it does in `record_occurrence`, not
+                # target-wins: the source's multi-person WAVs now live in the
+                # target, and a `single` entry makes `batch_diarize._plan` skip
+                # the identity, so the attribution `fold_voices` just dropped as
+                # "recoverable by re-diarizing" would be unrecoverable.
+                if src_entry.get("mode") == TAP_MODE_MULTI:
+                    tgt_entry["mode"] = TAP_MODE_MULTI
             roster_merged += 1
         atomic_write_text(
             target_dir / FILENAME_ROSTER_JSON,

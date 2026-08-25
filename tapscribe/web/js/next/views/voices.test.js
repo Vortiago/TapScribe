@@ -40,6 +40,18 @@ test("a mapping from an earlier run is stale — the server stops applying it", 
   assert.equal(rows[0].stale, true);
 });
 
+test("a tap naming no run supersedes nothing, so its mappings still apply", () => {
+  // The server's rule (`name_resolution._mapping_applies`): a sidecar that names
+  // no run for the identity leaves its mappings applied. Spelling it differently
+  // here would tell the operator to re-map one the transcript is honouring.
+  const rows = join([tap("sysaudio", "Them", "", [voice("sysaudio#A", "A", 30)])], {
+    "sysaudio#A": { person_id: "p1", run_id: "r1" },
+  });
+
+  assert.equal(rows[0].stale, false);
+  assert.equal(rows[0].personId, "p1");
+});
+
 test("the tap name rides the label only when a session has more than one", () => {
   const one = join([tap("sysaudio", "Them", "r1", [voice("sysaudio#A", "A", 1)])]);
   const two = join([

@@ -1,6 +1,6 @@
 """The two operator-tunable diarization knobs, resolved env > file > default.
 
-Split out of `standalone.py` — which owns the engine that USES them — so
+Here rather than beside the engine that USES them (`standalone.py`) so
 `/api/state` can report the values in force without importing it. That module
 pulls numpy, the VAD and the fbank frontend at import time, and the VAD reaches
 onnxruntime; dragging any of it onto the ~2 Hz poll path would make a broken

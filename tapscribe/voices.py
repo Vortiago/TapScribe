@@ -170,8 +170,19 @@ def record_voices(
     Read-modify-write with no `await` between, like `roster.record_occurrence`.
     Scoped to one identity so a sibling's `run_id` — and every mapping made
     against it — survives.
+
+    Not through `read_voices`: that degrades an unreadable file to `{}`, which is
+    right for a reader and destructive as the base of a whole-file write — a
+    transient `OSError` (a Windows sharing violation against the poll's
+    concurrent read) would delete every sibling identity's Voices. Only "no file
+    yet" starts from empty; a torn file still does, since nothing in it is
+    recoverable.
     """
-    current = read_voices(session_dir)
+    path = session_dir / FILENAME_VOICES_JSON
+    try:
+        current = coerce_voices(json.loads(path.read_text(encoding="utf-8")))
+    except (FileNotFoundError, ValueError):
+        current = {}
     voices = {
         label: {"spans": [{"start": s.isoformat(), "end": e.isoformat()} for s, e in windows]}
         for label, windows in spans.items()

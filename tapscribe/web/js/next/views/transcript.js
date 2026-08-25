@@ -340,6 +340,11 @@ export function build(ctx) {
    * `session_meta.voices` below. */
   const voicesBody = sessionVoices.watch(() => { markListStale(voiceList); afterMutate(); });
 
+  /** True from the click until the diarize POST settles — the window before the
+   * job appears on the poll. Past that `sess.progress` carries it: the session
+   * holds ONE job slot, so anything in flight would 409 a second diarize. */
+  let diarizing = false;
+
   /**
    * PUT one Voice's mapping and narrate it into that row's status cell.
    * The cell is re-resolved from the LIST by key on every write, never captured:
@@ -386,6 +391,16 @@ export function build(ctx) {
       const name = nameInput.value.trim();
       nameInput.hidden = true;
       if (name) saveMapping(keyOf(), { name });
+    });
+    // Abandoning the box PUTs nothing, so no row value moves and the row's
+    // `itemSig` never does either — `paintVoiceRow`, the only thing that would
+    // put the picker back, is skipped forever. The picker then reads
+    // `+ new person…` for an unmapped Voice, and re-choosing that option fires
+    // no `change`, so the operator cannot even reopen it.
+    nameInput.addEventListener("blur", () => {
+      if (nameInput.value.trim()) return;
+      nameInput.hidden = true;
+      sel.value = /** @type {HTMLElement} */ (node).dataset.personId || "";
     });
     return node;
   };
@@ -552,8 +567,9 @@ export function build(ctx) {
   dzBtn.addEventListener("click", () => {
     if (!session) return;
     const sid = session.session;
+    diarizing = true;
     mutateButton(dzBtn, () => postJson(`/api/sessions/${encodeURIComponent(sid)}/diarize`, {}), {
-      afterMutate,
+      afterMutate: () => { diarizing = false; afterMutate(); },
       failMessage: (e) => `Diarize failed: ${e}`,
     });
   });
@@ -987,7 +1003,11 @@ export function build(ctx) {
    * @param {string} sid
    */
   function renderVoices(j, sess, sid) {
-    dzBtn.disabled = !sid;
+    // The in-flight term is not optional: this runs every tick and would
+    // otherwise re-enable the button half a second into `mutateButton`'s
+    // disable, and a second POST 409s on the session's job slot. Same shape as
+    // summary.js' `genBtn` and recordings.js' `stripBtn`.
+    dzBtn.disabled = !sid || diarizing || !!sess?.progress;
     const voicesSig = sess?.voices_sig || "";
     const answer = sid ? voicesBody.resolve([sid, voicesSig]) : null;
     const taps = answer?.value?.identities || [];
@@ -1005,8 +1025,7 @@ export function build(ctx) {
     for (const tap of taps) {
       for (const v of tap.voices) {
         count += 1;
-        const mapped = mapping[v.key];
-        if (mapped && mapped.run_id !== tap.run_id) staleCount += 1;
+        if (isStaleMapping(mapping[v.key], tap)) staleCount += 1;
       }
     }
     const state = listState({ hasSession: !!sess, loading: !!answer?.loading, count });
@@ -1061,14 +1080,29 @@ export function voiceRows(taps, { mapping }) {
         label: taps.length > 1 ? `${tap.name} · Speaker ${v.label}` : `Speaker ${v.label}`,
         pct: total > 0 ? Math.round((100 * v.seconds) / total) : 0,
         personId: mapped?.person_id || "",
-        // A mapping stamped with a superseded run is NOT applied server-side, so
-        // the row has to say so — otherwise `Speaker A` comes back with no
-        // explanation and no reason to re-map.
-        stale: !!mapped && mapped.run_id !== tap.run_id,
+        stale: isStaleMapping(mapped, tap),
       });
     }
   }
   return rows;
+}
+
+/**
+ * Whether a mapping is stamped against a run the sidecar has superseded — so
+ * the server is NOT applying it and the row has to say so, or `Speaker A` comes
+ * back with no explanation and no reason to re-map.
+ *
+ * The tap naming NO run (a torn or hand-edited sidecar) leaves its mappings
+ * applied — nothing superseded them. That half is not decoration: it is the
+ * server's rule (`name_resolution._mapping_applies`), and spelling it
+ * differently here tells the operator to re-map a mapping the transcript is
+ * honouring. One predicate, so the panel's badge and the row's chip cannot
+ * disagree either.
+ * @param {import('../../types.js').VoiceMapping | undefined} mapped
+ * @param {import('../../types.js').VoiceIdentity} tap
+ */
+function isStaleMapping(mapped, tap) {
+  return !!mapped && !!tap.run_id && mapped.run_id !== tap.run_id;
 }
 
 /** The picker option that reveals the name input. A typed name always CREATES a
@@ -1093,6 +1127,9 @@ function setText(el, text) {
 function paintVoiceRow(node, r, people, peopleSig) {
   const row = /** @type {HTMLElement} */ (node);
   row.dataset.key = r.key;
+  // What the picker returns to when a `+ new person…` box is abandoned — the
+  // row's own listener reads it, since it has no view of the row model.
+  row.dataset.personId = r.personId;
   pick(row, "vLabel").textContent = r.label;
   /** @type {HTMLElement} */ (pick(row, "vFill")).style.width = `${r.pct}%`;
   pick(row, "vPct").textContent = `${r.pct}%`;
