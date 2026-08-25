@@ -58,8 +58,10 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         // submenu with no items, so an empty one never fires the delegate that would populate it.
         // The placeholder is also what an empty history shows.
         _pastMeetingsMenu.AddItem(NoPastMeetings());
-        var settings = new NSMenuItem("Settings…", (_, _) => OpenSettings());
-        var quit = new NSMenuItem("Quit", "q", (_, _) => _ = QuitAsync());
+        // Guarded, not OnRuntime: both are live before the runtime exists. Quit must still shut
+        // the app down then, and OpenSettings decides for itself that there is nothing to edit.
+        var settings = new NSMenuItem("Settings…", (_, _) => Guarded(OpenSettings));
+        var quit = new NSMenuItem("Quit", "q", (_, _) => Guarded(() => _ = QuitAsync()));
 
         // AppKit's automatic enablement asks each item's target whether it is live and overrides
         // Enabled every time the menu opens, which would undo every SetMenuState the runtime makes.
@@ -244,8 +246,16 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _settingsWindow = null;
         stale?.Dispose();
 
+        // Applied through the same boundary the menu items use. Save is an NSButton on a window
+        // of its own, so nothing else stands between ApplySettings and AppKit, and Core narrowed
+        // that method's catches to the three a disk can produce on the strength of a shell that
+        // contains the rest.
         var window = new SettingsWindow(
-            runtime.Settings, ListDevices, _deps.OpenEnumerator, runtime.ApplySettings, _dispatcher);
+            runtime.Settings,
+            ListDevices,
+            _deps.OpenEnumerator,
+            edited => OnRuntime(r => r.ApplySettings(edited)),
+            _dispatcher);
         _settingsWindow = window;
         window.Show();
     }
@@ -289,18 +299,29 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         if (_runtime is not { } runtime)
             return;
 
+        Guarded(() => command(runtime));
+    }
+
+    /// <summary>
+    /// The boundary with the toolkit, around one operator action.
+    ///
+    /// An exception from an AppKit handler unwinds into AppKit and ends the process, so nothing
+    /// may escape here; Core narrowed its own catches on the strength of this
+    /// (<see cref="BridgeRuntime.ApplySettings"/>), and a bug that used to arrive as a wrong
+    /// notice must not become a tray that vanishes. Every path an operator can reach goes
+    /// through it: the menu items, and the Settings window's Save, which calls the runtime from
+    /// an NSButton of its own rather than from the menu. Reported rather than swallowed, so it
+    /// is still visible as something other than a click that did nothing. CodeQL flags the
+    /// width (cs/catch-of-all-exceptions): this is the one place that width is the point.
+    /// </summary>
+    private void Guarded(Action action)
+    {
         try
         {
-            command(runtime);
+            action();
         }
         catch (Exception ex)
         {
-            // The boundary with the toolkit. A menu action's exception reaches the toolkit and
-            // ends the process, so nothing may escape here; Core narrowed its own catches on the
-            // strength of this, and a bug that used to arrive as a wrong notice must not become a
-            // tray that vanishes. Reported rather than swallowed, so it is still visible as
-            // something other than a click that did nothing. CodeQL flags the width
-            // (cs/catch-of-all-exceptions): this is the one place that width is the point.
             ShowNotice("Something went wrong", ex.Message, NoticeKind.Warning);
         }
     }

@@ -168,7 +168,7 @@ public class RealRecorderMeetingE2ETests
     public async Task Runtime_AMeetingAgainstTheRealRecorder_PublishesItsSummaryAndReturnsToIdle()
     {
         string repoRoot = FindRepoRoot();
-        (string audio, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        (_, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
         await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
 
         // The gate the test above argues for, as the operator's own setting. Spelled out rather

@@ -50,9 +50,10 @@ fires `.github/workflows/release.yml`, which builds and publishes everything.
   OIDC exchange.
 - **`ghcr.io/vortiago/tapscribe`** — Docker image tagged `:vX.Y.Z` and `:latest`.
 
-Release notes are drafted from PR labels by release-drafter. Every artifact is
-unsigned: Windows SmartScreen may warn, and macOS refuses a quarantined `.app`
-until the attribute is cleared. The bridge zips and the Bundle carry
-**stable, unversioned filenames** so
+Release notes are drafted from PR labels by release-drafter. Nothing carries a
+Developer ID: Windows SmartScreen may warn, and the Mac bundle's ad-hoc
+signature makes a quarantined `.app` read as damaged until the attribute is
+cleared, which is why the card offers the `.pkg` (ADR-0012). The bridge zips
+and the Bundle carry **stable, unversioned filenames** so
 `https://github.com/Vortiago/TapScribe/releases/latest/download/<asset>` is a
 permanent URL — the dashboard's Settings "Get a bridge" card links there.

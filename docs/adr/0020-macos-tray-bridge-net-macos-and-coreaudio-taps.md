@@ -36,10 +36,11 @@ on the first-party `net10.0-macos` AppKit workload, one process
   Ad-hoc signatures change per build, so every update re-prompts TCC, and the
   Keychain treats each build as a different app: its item ACLs trust a code
   identity, so an update asks for the login password before it can read the tap
-  token. Both are documented on the card, both go away with a Developer ID, and
-  neither is fixable below one. Tap token in the Keychain; other state as JSON
-  under `~/Library/Application Support/TapScribe/`. Scope: full functional
-  parity with the Windows shell.
+  token. Both are documented in `bridges/tray-bridge/README.md`, both go away
+  with a Developer ID, and neither is fixable below one. Tap token in the
+  Keychain; other state as JSON under
+  `~/Library/Application Support/TapScribe/`. Scope: full functional parity
+  with the Windows shell.
 
 Rejected: **Avalonia** (a large external UI dependency against the
 repo's minimal-dependency ethos), **Swift shell + C# daemon** (two

@@ -6,7 +6,8 @@
        and per-meeting windows, the bundle with its Info.plist, and the version floor.
 
        An Exe on this TFM is an app bundle. osx-arm64 and self-contained are ADR-0020's
-       packaging decision (arm64-only, a zipped .app that needs no installed runtime).
+       packaging decision (arm64-only, and a bundle that needs no installed runtime; the
+       .pkg the card offers and the zip beside it are both built from it).
 
        Building this project needs the Xcode whose SDK matches the installed macos workload;
        ../../README.md has the requirement and why SupportedOSPlatformVersion below makes it
