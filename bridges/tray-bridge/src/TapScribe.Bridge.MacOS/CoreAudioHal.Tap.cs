@@ -183,11 +183,14 @@ public sealed unsafe partial class CoreAudioHal
     // plays, in stereo, excluding nothing, left audible (the initialiser's own default, which is
     // why nothing here sets one).
     //
-    // Loaded once: the ObjC runtime only knows CATapDescription after its framework is mapped, and
-    // reloading per tap took the dyld loader lock again and leaked a refcount nothing balances.
-    private static readonly IntPtr CoreAudioImage = NativeLibrary.Load(CoreAudioFramework);
+    // Loaded once, and not before the first tap: the ObjC runtime only knows CATapDescription after
+    // its framework is mapped, and reloading per tap took the dyld loader lock again and leaked a
+    // refcount nothing balances. Behind a Lazy rather than a bare field initialiser, which would run
+    // at TYPE initialisation - so the first read of ANY static member of this class, on any host,
+    // would dlopen a Mac framework and answer a TypeInitializationException off a Mac.
+    private static readonly Lazy<IntPtr> CoreAudioImage = new(() => NativeLibrary.Load(CoreAudioFramework));
 
-    private static void EnsureCoreAudioLoaded() => _ = CoreAudioImage;
+    private static void EnsureCoreAudioLoaded() => _ = CoreAudioImage.Value;
 
     private static IntPtr NewGlobalStereoTapDescription()
     {

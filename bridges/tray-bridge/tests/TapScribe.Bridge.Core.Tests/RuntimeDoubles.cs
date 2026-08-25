@@ -283,8 +283,8 @@ internal sealed class RuntimeHarness : IDisposable
     /// </summary>
     public bool RealMint { get; init; }
 
-    /// <summary>The settings that reach <see cref="Recorder"/>: its port and the token it was
-    /// started with.</summary>
+    /// <summary>The settings that reach the recorder <see cref="RealMint"/> mints against: its
+    /// port and the token it was started with.</summary>
     public static BridgeSettings RecorderSettings(FakeRecorder recorder)
     {
         ArgumentNullException.ThrowIfNull(recorder);

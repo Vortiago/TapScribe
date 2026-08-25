@@ -4,7 +4,6 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
-/// <summary>
 /// The Mac shell's <see cref="IDispatcher"/>: the main dispatch queue, the thread AppKit may be
 /// touched from. There is no <c>SynchronizationContext</c> to wrap here, which is the whole reason
 /// the seam is <see cref="IDispatcher"/> rather than a context.

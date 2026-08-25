@@ -131,7 +131,9 @@ public class CoreAudioUpstreamContractTests
         using var hal = new CoreAudioHal();
         IReadOnlyList<CoreAudioDevice> devices = hal.ListDevices();
 
-        Assert.All(devices, device =>
+        // A foreach rather than Assert.All: CA1416's platform-guard analysis does not follow the
+        // guard above into a lambda, so the two HAL calls below would each warn there.
+        foreach (CoreAudioDevice device in devices)
         {
             Assert.False(string.IsNullOrWhiteSpace(device.Uid), "a device came back with no UID");
             Assert.NotEqual(0u, device.ObjectId);
@@ -147,7 +149,7 @@ public class CoreAudioUpstreamContractTests
             // Tri-state on purpose: null is "the device has no mute property", which is a
             // normal answer and the reason the seam returns bool? at all.
             hal.TryReadMute(device.ObjectId);
-        });
+        }
     }
 
     [RequiresMacOS("register a real Core Audio property listener")]

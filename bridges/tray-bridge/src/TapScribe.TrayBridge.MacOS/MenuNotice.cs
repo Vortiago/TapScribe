@@ -33,5 +33,5 @@ internal static class MenuNotice
     // arrives with, in particular) becomes a single space rather than a break the menu would
     // swallow or truncate at.
     private static string Flatten(string message) =>
-        string.Join(' ', (message ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        string.Join(' ', message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 }

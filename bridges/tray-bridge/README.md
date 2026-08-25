@@ -270,7 +270,7 @@ source of truth thereafter.
 On **macOS** the same fields live behind the menu-bar icon → **Settings…**,
 saved to `~/Library/Application Support/TapScribe/macos-tray-bridge.json` (its
 own on-disk contract, `TrayStores.SettingsFileName` again) with the tap token in
-the **login Keychain** rather than in the file at all. Two differences worth
+the **login Keychain** rather than in the file at all. Four differences worth
 knowing before you reach for one:
 
 - **`TAPSCRIBE_*` seeding does not reach a Finder-launched `.app`.** A bundle

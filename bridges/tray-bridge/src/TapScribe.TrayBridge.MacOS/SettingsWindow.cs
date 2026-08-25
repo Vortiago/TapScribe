@@ -20,7 +20,6 @@ namespace TapScribe.TrayBridge.MacOS;
 /// Disposable for the reason <see cref="MeetingWindow"/> is: ReleaseWhenClosed is off, so without
 /// a release each Settings… leaves the whole control graph behind, on a tray that runs for days.
 /// </summary>
-/// </summary>
 internal sealed class SettingsWindow : IDisposable
 {
     private const int Width = 480;

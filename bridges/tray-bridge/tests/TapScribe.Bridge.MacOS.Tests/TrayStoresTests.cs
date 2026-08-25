@@ -64,7 +64,11 @@ public class TrayStoresTests
         {
             var stores = new TrayStores(directory, new RecordingTapTokenStore());
             BridgeSettings loaded = stores.Settings.Load();
+            // Both blanked, not just the Speaker ID: with no file on disk this load seeds from the
+            // environment, so a TAPSCRIBE_NAME exported on the developer's box would otherwise be
+            // the label the assertion below reads and the fallback would never be reached.
             loaded.Identity = "";
+            loaded.Name = "";
 
             Assert.Equal("mac-tray", loaded.FallbackIdentity);
             Assert.DoesNotContain(
