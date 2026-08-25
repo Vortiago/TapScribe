@@ -167,9 +167,7 @@ def _person_display(person: dict[str, Any] | None, roster_names: dict[str, str])
     """
     if not person:
         return ""
-    if person["name"]:
-        return person["name"]
-    return next((roster_names[i] for i in person["identities"] if roster_names.get(i)), "")
+    return person["name"] or _roster_name(person["identities"], roster_names)
 
 
 def known_names(
@@ -197,7 +195,33 @@ def known_names(
     Pure: the caller supplies the session's roster + aliases + the loaded
     registry — the same inputs `resolve_session_names` takes — so this is unit-
     testable without disk. `known_names_for_session` in `sessions` is the I/O
-    wrapper that reads those inputs for a session id."""
+    wrapper that reads those inputs for a session id.
+
+    A caller that ALSO needs the resolved map itself resolves once and calls
+    `known_names_from` — the summarize path does, since resolving twice over one
+    session's files can hand the hint and the rendered transcript two different
+    snapshots."""
+    return known_names_from(
+        resolve_session_names(
+            roster=roster,
+            aliases=aliases,
+            registry=registry,
+            voices=voices,
+            voice_runs=voice_runs,
+            speaker_keys=speaker_keys,
+        ),
+        registry=registry,
+        limit=limit,
+    )
+
+
+def known_names_from(
+    resolved: Mapping[str, str],
+    *,
+    registry: PeopleRegistry,
+    limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
+) -> list[str]:
+    """`known_names` over an ALREADY-resolved `speaker key -> display name` map."""
     out: list[str] = []
     seen: set[str] = set()
 
@@ -208,15 +232,6 @@ def known_names(
             seen.add(key)
             out.append(name)
 
-    # Participants first, always included, deterministically ordered.
-    resolved = resolve_session_names(
-        roster=roster,
-        aliases=aliases,
-        registry=registry,
-        voices=voices,
-        voice_runs=voice_runs,
-        speaker_keys=speaker_keys,
-    )
     # An unmapped Voice resolves to `Speaker A` so the operator can recognise the
     # row and map it. That is a placeholder, not a human: the hint exists to give
     # the model canonical spellings for names it mis-heard, and participants are
@@ -237,13 +252,17 @@ def known_names(
     return out
 
 
+def _roster_name(identities: list[str], roster_names: dict[str, str]) -> str:
+    """The first non-empty bridge name across `identities`, else "". The rung
+    `_default_name` and `_person_display` share; they differ only in their
+    floor, so the rung itself has one spelling."""
+    return next((roster_names[i] for i in identities if roster_names.get(i)), "")
+
+
 def _default_name(identities: list[str], roster_names: dict[str, str]) -> str:
     """The fallback display for an unnamed Person: the first non-empty bridge
     name across its Identities, else the (first) Identity token itself."""
-    for identity in identities:
-        if roster_names.get(identity):
-            return roster_names[identity]
-    return identities[0] if identities else ""
+    return _roster_name(identities, roster_names) or (identities[0] if identities else "")
 
 
 def _mapping_applies(mapped: Any, current_run: str | None) -> bool:

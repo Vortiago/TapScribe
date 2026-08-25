@@ -74,6 +74,19 @@ def _agglomerate(dist: np.ndarray, *, threshold: float, max_speakers: int) -> np
     return label
 
 
+def l2_normalise(vectors: np.ndarray) -> np.ndarray:
+    """Rows scaled to unit length, leaving a zero row zero.
+
+    The guard is load-bearing in both callers. A low `max_speakers` forces merges
+    past the threshold, so a cluster can hold near-antipodal vectors whose mean
+    is ~0; an unguarded divide makes that centroid NaN, and `argmax` then returns
+    the NaN's index for EVERY row — the whole tap collapses to one Voice, on
+    nothing but a suppressed warning.
+    """
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    return vectors / np.where(norms > 0, norms, 1.0)
+
+
 def _by_first_appearance(label: np.ndarray) -> np.ndarray:
     """Renumber to 0, 1, 2 … in the order each cluster first speaks, so Voice A
     is whoever spoke first rather than whichever row the merge loop kept."""
@@ -108,10 +121,4 @@ def cluster_voices(
     sample = vectors[idx]
     sample_labels = _agglomerate(1.0 - sample @ sample.T, threshold=threshold, max_speakers=max_speakers)
     centroids = np.stack([sample[sample_labels == lab].mean(axis=0) for lab in np.unique(sample_labels)])
-    # Guarded like `embed.embed`'s: a low `max_speakers` forces merges past the
-    # threshold, so a cluster can hold near-antipodal vectors whose mean is ~0.
-    # An unguarded divide makes that centroid NaN, and `argmax` returns the NaN's
-    # index for EVERY row — the whole tap collapses to one Voice, on a warning.
-    norms = np.linalg.norm(centroids, axis=1, keepdims=True)
-    centroids /= np.where(norms > 0, norms, 1.0)
-    return _by_first_appearance(np.argmax(vectors @ centroids.T, axis=1))
+    return _by_first_appearance(np.argmax(vectors @ l2_normalise(centroids).T, axis=1))

@@ -34,7 +34,7 @@ import tapscribe.voices as voices
 
 from . import config
 from .audio import wav_duration_s
-from .name_resolution import DEFAULT_KNOWN_NAMES_LIMIT, known_names, resolve_session_names
+from .name_resolution import DEFAULT_KNOWN_NAMES_LIMIT, known_names_from, resolve_session_names
 from .people import PeopleRegistry
 from .roster import coerce_roster, read_roster
 from .session_paths import (
@@ -234,29 +234,41 @@ def _resolution_inputs(session: str) -> dict[str, Any] | None:
     }
 
 
-def speaker_names_for_session(session: str, *, speaker_keys: Iterable[str] = ()) -> dict[str, str]:
-    """`speaker key -> display name` for `session` — `resolve_session_names` off
-    disk, for a server-side reader that has no poll.
+def summarize_names_for_session(
+    session: str,
+    *,
+    speaker_keys: Iterable[str] = (),
+    limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
+) -> tuple[dict[str, str], list[str]]:
+    """Both answers the summarize path needs, off ONE snapshot of the session's
+    files: `(speaker key -> display name, known-people hint)`.
 
-    The summarize path is that reader: the stored `plain_text` carries raw keys
-    (`Them#A`) by design, so a summary generated from it would name nobody the
-    operator mapped. Resolving here is what makes a Voice→Person mapping reach
-    the summary.
+    Together rather than as two calls because they are two products of one
+    resolution — `known_names` is a projection of the same map. Resolving twice
+    reads roster / meta / people / voices twice and can straddle a rename, so the
+    hint and the rendered transcript would disagree inside one summarize.
 
-    One rung short of the poll's map, and deliberately so: `/api/state` resolves
-    against `session_occurrences`, whose ADR-0009 F1 backfill mints an occurrence
-    for a recorded slug no roster entry covers. It is not applied here because it
-    feeds `known_names_for_session` too, where a slug-derived name is not a
-    canonical spelling the summarizer should be hinted with. A ROSTERLESS session
-    therefore reads `Alice_Smith` in the summary input where the pane says
-    `Alice Smith`; every rostered one — every recording since ADR-0009 — agrees.
+    The map is what makes a Voice→Person mapping reach the summary: the stored
+    `plain_text` carries raw keys (`Them#A`) by design, so summarizing it
+    unresolved names nobody the operator mapped. The hint is the canonical
+    spellings the model should prefer for names it mis-heard.
 
-    Best-effort like its sibling: a vanished session dir degrades to `{}` (the
-    raw keys), never a failed summarize."""
+    One rung short of the poll's map, deliberately: `/api/state` resolves against
+    `session_occurrences`, whose ADR-0009 F1 backfill mints an occurrence for a
+    recorded slug no roster entry covers. Not applied here because it also feeds
+    the hint, where a slug-derived name is not a canonical spelling. A ROSTERLESS
+    session therefore reads `Alice_Smith` in the summary input where the pane
+    says `Alice Smith`; every rostered one — every recording since ADR-0009 —
+    agrees.
+
+    Best-effort: a vanished session dir (a concurrent delete after the merged-
+    transcript read) degrades to raw keys and no hint, never a failed summarize.
+    """
     inputs = _resolution_inputs(session)
     if inputs is None:
-        return {}
-    return resolve_session_names(**inputs, speaker_keys=speaker_keys)
+        return {}, []
+    resolved = resolve_session_names(**inputs, speaker_keys=speaker_keys)
+    return resolved, known_names_from(resolved, registry=inputs["registry"], limit=limit)
 
 
 def known_names_for_session(
@@ -265,36 +277,9 @@ def known_names_for_session(
     speaker_keys: Iterable[str] = (),
     limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
 ) -> list[str]:
-    """The known-people display names to hint a summarize of `session` (the
-    `tapscribe.summarizers.build_names_hint` input): this session's participants
-    first, then people the People Registry has learned across previous meetings.
-
-    The I/O wrapper around the pure `name_resolution.known_names` — reads the
-    session's roster + alias overrides + the registry, the same roster→Person
-    join `resolve_session_names` runs at `/api/state` build time. (It does not
-    replay the dashboard's ADR-0009 F1 slug backfill for old rosterless
-    recordings — that needs the WAV-derived speaker list `attach_people` has on
-    hand and this cold path does not; a named Person still surfaces via the
-    registry tail, only its participants-first priority is lost.)
-
-    Best-effort: names are a quality boost, not a correctness requirement, so a
-    missing session dir (a concurrent delete after the transcript read) degrades
-    to no hint — the pre-feature behaviour — rather than failing the summarize.
-    The underlying reads already swallow torn/missing sidecars (`read_roster` /
-    `read_session_meta` → `{}`, `PeopleRegistry.load` → empty)."""
-    inputs = _resolution_inputs(session)
-    if inputs is None:
-        # The session dir vanished between the merged-transcript read and now.
-        # No names to inject; the summarize proceeds unhinted rather than
-        # 404-ing on an optional enrichment.
-        return []
-    return known_names(
-        **inputs,
-        limit=limit,
-        # Passed in, not re-read: the summarize path has the merged transcript
-        # open already, and it is hundreds of KB on a long session.
-        speaker_keys=speaker_keys,
-    )
+    """The known-people display names alone — `summarize_names_for_session`'s
+    second product, for a caller that does not need the map."""
+    return summarize_names_for_session(session, speaker_keys=speaker_keys, limit=limit)[1]
 
 
 # ---------------------------------------------------------------------------

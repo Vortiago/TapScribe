@@ -15,6 +15,7 @@ import numpy as np
 
 from . import model as diarize_model
 from .base import DiarizerUnavailable
+from .cluster import l2_normalise
 
 #: Longest window handed to the model in one call. Speaker embedding is a
 #: short-window operation — the engine uses 1.5 s — and a long call is where
@@ -77,8 +78,7 @@ class CampPlusEmbedder:
                 batch = np.stack([windows[i] for i in at]).astype(np.float32)
                 batch -= batch.mean(axis=1, keepdims=True)  # global-mean CMN, per window
                 vectors[at] = self._session.run(["embedding"], {"x": batch})[0]
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        return vectors / np.where(norms > 0, norms, 1.0)
+        return l2_normalise(vectors)
 
 
 def _by_length(windows: Sequence[np.ndarray]) -> list[tuple[int, list[int]]]:

@@ -129,3 +129,23 @@ def test_bootstrap_modules_are_stdlib_only(name):
         f"tapscribe/{name}.py runs before TapScribe's dependencies exist "
         f"(a venv with only pip in it) — it cannot import: {sorted(third_party)}"
     )
+
+
+def test_the_state_view_imports_no_model_runtime():
+    """`/api/state` is built ~2 Hz per connected client, and it reads the diarize
+    knobs. Those resolvers live in `diarizers/knobs.py` rather than beside the
+    engine in `standalone.py` precisely so the poll never imports numpy or
+    onnxruntime — a broken diarization install must leave a multi-person tap
+    undiarized, not take the dashboard down with it.
+
+    Pins the general invariant, not that one knob: any heavy import added to the
+    poll path fails here."""
+    probe = (
+        "import sys, tapscribe.state_view; "
+        "print(sorted(m for m in ('numpy', 'onnxruntime', 'torch') if m in sys.modules))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert out.stdout.strip() == "[]", (
+        f"importing tapscribe.state_view pulled {out.stdout.strip()} onto the poll path"
+    )

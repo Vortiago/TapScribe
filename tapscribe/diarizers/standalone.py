@@ -24,12 +24,6 @@ from .cluster import cluster_voices
 from .fbank import FRAME_SHIFT, SUPPORTED_RATE, fbank
 from .knobs import resolve_max_speakers, resolve_threshold
 
-# `knobs.py` is where a knob READER (`/api/state`) reaches them, because this
-# module pulls numpy, the fbank frontend and — through the VAD — onnxruntime,
-# and a broken diarization install must not take the ~2 Hz poll down with it.
-# The names are not listed in an `__all__` here, which makes reading them off
-# this module unidiomatic rather than impossible — the rule lives in prose.
-
 #: Seconds per fbank frame — the resolution every span below is quantised to.
 FRAME_SHIFT_S = FRAME_SHIFT / SUPPORTED_RATE
 

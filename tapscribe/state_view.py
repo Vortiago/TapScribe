@@ -119,9 +119,6 @@ def _knob_values() -> dict[str, float | int]:
         "parakeet_overlap_s": current_parakeet_overlap_s(),
         "summarize_timeout_s": current_summarize_timeout_s(),
         "summarize_gguf_ctx": default_gguf_ctx(),
-        # Read from `diarizers.knobs`, never `diarizers.standalone`: that module
-        # pulls numpy + the VAD (and so onnxruntime) at import, and a broken
-        # diarization install must not take the poll down with it.
         "diarize_threshold": resolve_threshold(),
         "diarize_max_speakers": resolve_max_speakers(),
     }

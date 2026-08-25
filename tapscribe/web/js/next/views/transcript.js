@@ -33,7 +33,7 @@ import { wireSave, runSaveWithStatus, statusTarget } from "../../save-status.js"
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, setSourcePick, sessionLabel } from "../shell.js";
-import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile, setText, showTextForManualCopy } from "../ui.js";
 import { toSRT, toVTT } from "../subtitles.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
@@ -1110,14 +1110,6 @@ function isStaleMapping(mapped, tap) {
  * often than one is typed twice, and folding a Voice into a namesake puts their
  * words under a stranger. */
 const NEW_PERSON = "__new__";
-
-/** Write `text` only when it differs — these run every tick, and assigning
- * `textContent` replaces the node's children whether or not anything changed.
- * @param {Element} el
- * @param {string} text */
-function setText(el, text) {
-  if (el.textContent !== text) el.textContent = text;
-}
 
 /** Paint one Voice row in place.
  * @param {Element} node

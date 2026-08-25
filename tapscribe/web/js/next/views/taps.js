@@ -26,6 +26,7 @@ import { header, strong, inline, wireRecPill, paintRecPill } from "../shell.js";
 import { mutateButton, putJson } from "../../api.js";
 import * as activeTaps from "../../components/active-taps.js";
 import * as liveChannel from "../../components/live-channel.js";
+import { setText } from "../ui.js";
 
 /** Everything a mode row displays, in one spelling: the list gate and the row
  * gate are the same tuple, and hand-maintaining two of them is how a list goes
@@ -93,21 +94,23 @@ export function build(ctx) {
     );
     const intent = modeIntent(btn);
     if (!btn || !intent) return;
-    const seg = /** @type {HTMLElement} */ (btn.parentElement);
-    const was = modeOf(seg);
-    paintMode(seg, intent.mode);
+    // `modeIntent` refuses a click on the already-pressed button and the control
+    // holds exactly two, so the mode being replaced is the other one.
+    const was = intent.mode === "multi" ? "single" : "multi";
+    paintMode(/** @type {HTMLElement} */ (btn.parentElement), intent.mode);
     mutateButton(
       btn,
       () =>
         putJson("/api/tap-mode", intent).catch((e) => {
-          // Put the rejected paint back. Unlike `active-taps.js`' toggle — an
-          // in-place per-tick updater that self-heals — these rows go through
-          // `renderList`, and a rejected PUT moves no server value, so neither
-          // the list `sig` nor the row's `itemSig` changes and `paintMode` is
-          // never re-run from /api/state. The row would claim a mode the server
-          // refused, and `modeIntent` then refuses the retry click because the
-          // button already reads as pressed.
-          paintMode(seg, was);
+          // Put the rejected paint back: a rejected PUT moves no server value,
+          // so no sig changes and `paintMode` never re-runs from /api/state —
+          // the row would keep claiming a mode the server refused. Re-resolved
+          // from the list by key rather than captured, since `renderList` may
+          // have replaced the row during the await (save-status.js' rule).
+          const seg = modeList.querySelector(
+            `.moderow[data-identity="${CSS.escape(intent.identity)}"] .segctl`,
+          );
+          if (seg) paintMode(seg, was);
           throw e;
         }),
       { afterMutate, failMessage: (e) => `Tap mode change failed: ${e}` },
@@ -152,10 +155,7 @@ export function build(ctx) {
 
     // A keyed list: rows are mounted once per identity and mutated in place, so
     // a tap connecting does not churn every other row's buttons.
-    // Write-only-when-changed: this is a per-tick in-place updater, and assigning
-    // `textContent` replaces the node's children whether or not anything moved.
-    const emptyText = active.length ? "" : "No taps connected.";
-    if (modeEmpty.textContent !== emptyText) modeEmpty.textContent = emptyText;
+    setText(modeEmpty, active.length ? "" : "No taps connected.");
     modeEmpty.hidden = active.length > 0;
     renderList(modeList, active, {
       key: (a) => a.identity,
@@ -173,15 +173,6 @@ export function build(ctx) {
   };
 
   return { node: frag, update };
-}
-
-/** The mode a `.segctl` currently reads as — off `aria-pressed`, the state the
- * control actually exposes, not the class that styles it.
- * @param {Element} seg
- * @returns {"single" | "multi"} */
-function modeOf(seg) {
-  const on = /** @type {HTMLElement | null} */ (seg.querySelector('.tap-mode[aria-pressed="true"]'));
-  return on?.dataset.mode === "multi" ? "multi" : "single";
 }
 
 /** Mark one mode as effective on a `.segctl`, in place.
