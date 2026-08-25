@@ -25,7 +25,7 @@ the audio out internally to live captioning AND per-utterance WAV
 recording — bridges don't talk to WhisperLiveKit themselves and don't
 POST settled lines back (ADR-0002).
 
-**Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>`
+**Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>&tap_mode=<single|multi>`
 (or `wss://...` when the recorder was started with `--tls`).
 
 **Audio format:** PCM signed 16-bit little-endian, 16 kHz mono, raw

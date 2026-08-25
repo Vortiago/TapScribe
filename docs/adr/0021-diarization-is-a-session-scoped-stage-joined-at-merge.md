@@ -27,6 +27,20 @@ its absolute start in its filename (`build_recorder_wav_name`,
 `parse_wav_start`), and `merge_session` already computes `abs_start`/`abs_end`
 per segment.
 
+### When a Voice is invalidated
+
+Spans are absolute instants, not file references. Deleting a WAV or discarding a
+strip removes the segments a span would have attributed and leaves the span
+inert — nothing to invalidate.
+
+**Absorb** is the one operation that invalidates, because it is the one that ADDS
+audio to a session's time range. An identity present on BOTH sides is a
+**collision**: each session's Voice `A` is a different human, so merging the
+labels would silently mis-attribute. `voices.fold_voices` drops that identity
+from both sides, `absorb_session` prunes the `voices` pointers in
+`session-meta.json` that named them, and the fold reports `voices_collided` — the
+operator re-diarizes rather than the system guessing.
+
 ## The mapping is a pointer — amending ADR-0009 §4
 
 The registry's membership atom is the plain **Identity**. A Voice is never one:
@@ -56,8 +70,8 @@ Resolution: `slug#<voice>` → identity (the Roster's slug join) → the meta ma
 Mapping a Voice by typing a name creates one. Two consequences in `people.py`:
 
 - `_coerce_people` keeps an identity-less row that carries a NAME: a session's
-  `voices` map reaches a Person by `person_id`, so identities are no longer the
-  only reachability. A row the one-Identity-one-Person dedup EMPTIED is still
+  `voices` map reaches a Person by `person_id`, so an Identity is one route to a
+  Person and not the only one. A row the one-Identity-one-Person dedup EMPTIED is
   dropped — that is a torn-file repair, not a Voice mapping.
 - There is no bare **create** verb on the route surface. The voice-mapping PUT
   accepts a name and creates the Person as part of the mapping, so a Person is
@@ -81,10 +95,22 @@ multi-person by construction, a SpatialChat per-participant tap is single. The
 operator overrides it, durably per identity — an NDI bridge (#54) cannot tell a
 room mic from a per-participant feed, so a declaration is only ever a default.
 Precedence follows ADR-0009's name ladder: **operator override › bridge
-declaration › default single**.
+declaration › default single** (`tap_mode.resolve`). The override store is
+`tapscribe/tap_mode.py` — `tap-modes.json` at the recordings root, written by
+`PUT /api/tap-mode`.
 
 The reserved value spellings are stamped like `probe_identity` — one `Site` row
 per bridge (ADR-0019), never a hand edit in `bridges/`.
+
+The resolved mode is stamped into the session's **Roster** at tap open: a `mode`
+field on the entry (`tapscribe/roster.py`, `_coerce_entry` /
+`record_occurrence`), upgrade-only toward `multi` so a late reconnect or a
+live-only WS cannot mark already-recorded audio single. Diarization reads it
+there, never the live setting. Whether a recording holds several humans is a
+property of **that recording**; the per-identity override is live and mutable,
+and a diarize run happens after the meeting — days later, across a restart — so
+reading the setting would make a re-diarize next week silently no-op because
+someone flipped the tap to single.
 
 It gates diarization: a single-person tap is not diarized and keeps a plain
 `identity` speaker key. Beyond cost, a diarizer splits one human across a
@@ -133,11 +159,3 @@ boot. Provenance and the measurements that picked it: `tests/fixtures/diarize/`.
 - Pipeline order is strip → **diarize** → transcribe → summarize, a no-op
   without a multi-person tap.
 - Live captions stay undiarized (ADR-0010's live exclusion).
-
-## Left to implementation
-
-The **engine package** (wheel matrix; vendorable models or fetched — wants a
-spike) and the diarize stage that runs it, the **voice-mapping PUT** with its
-Person prune, and the two **surfaces** above — the Transcript stage's mapping
-control and the Taps single/multi control. The durable override store is
-`tapscribe/tap_mode.py` (`tap-modes.json`, `PUT /api/tap-mode`).

@@ -29,8 +29,8 @@ asked for.
 - **Generalist-only single-WAV re-transcribe** — the two buttons would route
   differently, re-introducing the ambiguity.
 - **A meeting-vs-per-person language mode toggle** — per-speaker pins are
-  deferred to compose with diarization (#78); language is a per-meeting
-  property, never a persistent property of a Person.
+  deferred to compose with a diarized tap's Voices (ADR-0021); language is
+  a per-meeting property, never a persistent property of a Person.
 - **One-shot per-transcribe language choice** — forks the data model
   (`session-meta` is already what `transcribe_session` reads) and loses the
   per-meeting declaration.

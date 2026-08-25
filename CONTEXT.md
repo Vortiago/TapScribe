@@ -473,7 +473,7 @@ for the platform it taps (`spacialchat-bridge/`); the tray family shares
 one platform-neutral `tray-bridge/` home for its per-OS shells
 (ADR-0020).
 
-Wire contract: one WebSocket per utterance to `ws://<recorder-host>/tap?identity=…&name=…`,
+Wire contract: one WebSocket per utterance to `ws://<recorder-host>/tap?identity=…&name=…&tap_mode=…`,
 streaming raw 16 kHz mono int16 PCM frames (20 ms / 640 bytes per frame).
 That's the entire contract — the Recorder fans the audio out internally
 to a per-WS WhisperLiveKit relay for live captioning *and* to a WAV on
@@ -656,10 +656,11 @@ sees a platform audio API — WASAPI is one implementation behind the seam.
 A Bridge that taps several devices at once runs **one independent pipeline
 per device**, each opening its own `/tap` WS under its own stable
 `identity`/`name`, so recordings stay attributable per source instead of
-mixed into one stream — the coarse "me vs. them" split ahead of real
-diarization (#78). Defaults: the microphone streams under the operator's
-identity, the system **loopback** under the shell's system-audio
-identity (default "System audio", operator-editable). The bridge core's
+mixed into one stream — the coarse "me vs. them" split, which diarization
+then refines into Voices inside a multi-person tap (ADR-0021). Defaults:
+the microphone streams under the operator's identity, the system
+**loopback** under the shell's system-audio identity (default
+"System audio", operator-editable). The bridge core's
 **CaptureOrchestrator** owns the set of pipelines: it starts one per
 selected device (best-effort — a device that fails to open is surfaced and
 skipped while the rest still run), rejects duplicate identities up front

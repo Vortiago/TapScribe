@@ -75,5 +75,7 @@ references are scarce (Common Voice per-language configs aren't
 parquet-exported, NPSC/older Common Voice ship deprecated loading scripts,
 VoxPopuli has no da/no), so the harder-audio story is the noise sweep plus the
 `NOISE_WAV` hook for any real recording. Mixed languages *within one WAV* (no
-silence gap) is uncovered; the honest fix is segmentation/diarization (#78),
-not the transcribe or summary layer.
+silence gap) is uncovered. TapScribe diarizes a multi-person tap into Voices
+(ADR-0021), joined at merge — so the *speaker* boundary inside such a WAV is
+recovered, but the cover still picks one winning model per WAV, and a language
+switch inside it is still one model's call.

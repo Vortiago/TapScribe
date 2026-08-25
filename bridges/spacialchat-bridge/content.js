@@ -31,7 +31,7 @@
 //     "streaming", yellow "reconnecting", red "refresh needed", etc.
 //
 // Wire contract (see bridges/README.md):
-//   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>
+//   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>&tap_mode=<single|multi>
 //   Binary frames, 20 ms each (320 samples = 640 bytes), int16 LE mono.
 //   No JSON, no HTTP, no WhisperLiveKit awareness — the Recorder fans
 //   audio out internally to its supervised WlK child and to disk.
