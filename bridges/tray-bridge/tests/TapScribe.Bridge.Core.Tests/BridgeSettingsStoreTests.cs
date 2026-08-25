@@ -203,6 +203,65 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal(Fallback, loaded.DefaultDevices()[0].Identity);
     }
 
+    [Fact]
+    public void Save_AfterAReadThePlatformRefused_LeavesTheStoredSecretAlone()
+    {
+        // A Keychain that refuses reads as "", the same value as "the operator cleared the
+        // field", and Write("") is how a platform is told to DELETE an out-of-band secret. So
+        // saving ANYTHING after a refused read revoked a working token: an ad-hoc rebuild
+        // re-prompts for the login password, a dismissed prompt reads "", and the next slider
+        // nudge deleted the item. Loading "" and saving "" is not an instruction to delete.
+        var keychain = new RefusingKeychain { Secret = "tok-abc", Refuse = false };
+        Store(keychain).Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        // The next launch: same file, same Keychain, but this build's signature is one its ACL
+        // does not trust, and the operator dismissed the password prompt.
+        keychain.Refuse = true;
+        BridgeSettingsStore store = Store(keychain);
+        BridgeSettings loaded = store.Load();
+        Assert.Equal("", loaded.Token); // the refusal, as the operator's dialog sees it
+
+        store.Save(loaded);
+
+        Assert.Equal("tok-abc", keychain.Secret);
+    }
+
+    [Fact]
+    public void Save_AfterTheOperatorClearsARealToken_DeletesTheStoredSecret()
+    {
+        // The other half, so the rule above cannot be "never delete": a token that WAS read and
+        // is then blanked is the operator revoking it, and the item has to go.
+        var keychain = new RefusingKeychain { Refuse = false };
+        BridgeSettingsStore store = Store(keychain);
+        store.Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        BridgeSettings loaded = store.Load();
+        Assert.Equal("tok-abc", loaded.Token);
+
+        loaded.Token = "";
+        store.Save(loaded);
+
+        Assert.Null(keychain.Secret);
+    }
+
+    /// <summary>An out-of-band secret store that can refuse a read the way a locked Keychain
+    /// does: "" rather than a throw. <see cref="Secret"/> is the item itself, so a test can ask
+    /// whether a Save destroyed it.</summary>
+    private sealed class RefusingKeychain : ITapTokenStore
+    {
+        internal string? Secret { get; set; }
+
+        internal bool Refuse { get; set; } = true;
+
+        public string? Write(string token)
+        {
+            Secret = string.IsNullOrEmpty(token) ? null : token;
+            return null;
+        }
+
+        public string Read(string? atRest) => Refuse ? "" : Secret ?? "";
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir))

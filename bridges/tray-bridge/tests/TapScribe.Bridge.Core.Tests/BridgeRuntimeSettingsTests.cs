@@ -99,8 +99,11 @@ public class BridgeRuntimeSettingsTests
         using var harness = new RuntimeHarness { Tokens = new BuggyTapTokenStore() };
         BridgeRuntime runtime = harness.Build();
 
+        // Carries a token, so the save reaches the token store: an empty one that was already
+        // empty is deliberately skipped (BridgeSettingsStore.Save).
         Assert.Throws<InvalidOperationException>(
-            () => runtime.ApplySettings(new BridgeSettings { Host = "recorder.example", Devices = [] }));
+            () => runtime.ApplySettings(
+                new BridgeSettings { Host = "recorder.example", Token = "tok-1", Devices = [] }));
         Assert.Empty(harness.View.Notices);
     }
 

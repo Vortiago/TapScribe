@@ -38,6 +38,10 @@ public sealed class BridgeSettingsStore(
     /// Load the settings. A missing, corrupt, or unreadable file falls back to
     /// environment-seeded defaults rather than throwing, so the app always launches.
     /// </summary>
+    // The token the last Load found at rest, so Save can tell "the operator cleared it" from
+    // "this platform would not tell us what it was".
+    private string _loadedToken = "";
+
     public BridgeSettings Load()
     {
         try
@@ -49,6 +53,7 @@ public sealed class BridgeSettingsStore(
                 if (loaded is not null)
                 {
                     loaded.Token = ReadToken(loaded.ProtectedToken);
+                    _loadedToken = loaded.Token;
                     // The file has no such key and never will: it is the shell's, not the
                     // operator's. Stamped on the way out so nothing downstream can meet a
                     // settings object carrying another platform's name.
@@ -71,10 +76,18 @@ public sealed class BridgeSettingsStore(
     public void Save(BridgeSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        // Unconditional, empty token included: Write("") is how a platform is told to
-        // DELETE an out-of-band secret. Guarding this on a non-empty token would leave a
-        // Keychain entry alive after the operator blanked the field.
-        settings.ProtectedToken = tokens.Write(settings.Token);
+        // Write("") is how a platform is told to DELETE an out-of-band secret, so an empty
+        // token is passed through: blanking the field in the dialog has to reach the Keychain,
+        // or an entry outlives the settings that referenced it.
+        //
+        // Unless it was ALREADY empty when this store loaded, which is not the operator saying
+        // anything. A platform that REFUSES a read answers "" as well (a locked Keychain, a
+        // prompt the operator dismissed, an ACL that no longer trusts this build's ad-hoc
+        // signature), and saving anything at all afterwards would then destroy a working token
+        // nobody asked to revoke. Skipping also leaves ProtectedToken as loaded, so the Windows
+        // blob in the file survives the same way.
+        if (!string.IsNullOrEmpty(settings.Token) || !string.IsNullOrEmpty(_loadedToken))
+            settings.ProtectedToken = tokens.Write(settings.Token);
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         using FileStream stream = File.Create(FilePath);
         JsonSerializer.Serialize(stream, settings, new JsonSerializerOptions { WriteIndented = true });
