@@ -40,6 +40,12 @@ from fastapi.encoders import jsonable_encoder
 from . import config, tap_mode
 from . import hallucinations as hallucinations_mod
 from .batch_transcribe import resolve_batch_model
+from .diarizers.knobs import (
+    ENV_MAX_SPEAKERS,
+    ENV_THRESHOLD,
+    resolve_max_speakers,
+    resolve_threshold,
+)
 from .live import LiveSnapshot
 from .name_resolution import attach_people_view
 from .people import PeopleRegistry
@@ -81,6 +87,8 @@ _KNOB_SOURCES: tuple[tuple[str, str], ...] = (
     ("PARAKEET_OVERLAP_S_FILE", ENV_OVERLAP_S),
     ("SUMMARIZE_TIMEOUT_S_FILE", ENV_TIMEOUT_S),
     ("SUMMARIZE_GGUF_CTX_FILE", ENV_GGUF_CTX),
+    ("DIARIZE_THRESHOLD_FILE", ENV_THRESHOLD),
+    ("DIARIZE_MAX_SPEAKERS_FILE", ENV_MAX_SPEAKERS),
 )
 # Same single-(key, value)-slot shape as hallucinations._RULES_CACHE /
 # people._PEOPLE_CACHE / config_store._CONFIG_TEXT_CACHE: a mutated dict rather
@@ -111,6 +119,11 @@ def _knob_values() -> dict[str, float | int]:
         "parakeet_overlap_s": current_parakeet_overlap_s(),
         "summarize_timeout_s": current_summarize_timeout_s(),
         "summarize_gguf_ctx": default_gguf_ctx(),
+        # Read from `diarizers.knobs`, never `diarizers.standalone`: that module
+        # pulls numpy + the VAD (and so onnxruntime) at import, and a broken
+        # diarization install must not take the poll down with it.
+        "diarize_threshold": resolve_threshold(),
+        "diarize_max_speakers": resolve_max_speakers(),
     }
     _KNOB_CACHE["_slot"] = (key, values)
     return values

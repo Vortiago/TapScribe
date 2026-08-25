@@ -66,6 +66,8 @@ export interface AppState {
   parakeet_overlap_s: number;
   summarize_timeout_s: number;
   summarize_gguf_ctx: number;
+  diarize_threshold: number; // cosine cut; lower splits more
+  diarize_max_speakers: number;
   // Specialist language→model map (read-only, launch-time) — surfaced on /api/state.
   specialists: SpecialistMap;
   // The cross-session People Registry view (ADR-0009): one row per canonical

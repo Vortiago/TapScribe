@@ -18,11 +18,29 @@ from datetime import timedelta
 
 import numpy as np
 
-from .. import config
 from ..vad import speech_timestamps
 from .base import AudioClip, DiarizationResult, voice_label
 from .cluster import cluster_voices
 from .fbank import FRAME_SHIFT, SUPPORTED_RATE, fbank
+from .knobs import (
+    DEFAULT_MAX_SPEAKERS,
+    DEFAULT_THRESHOLD,
+    ENV_MAX_SPEAKERS,
+    ENV_THRESHOLD,
+    resolve_max_speakers,
+    resolve_threshold,
+)
+
+__all__ = [
+    "DEFAULT_MAX_SPEAKERS",
+    "DEFAULT_THRESHOLD",
+    "ENV_MAX_SPEAKERS",
+    "ENV_THRESHOLD",
+    "StandaloneDiarizer",
+    "resolve_max_speakers",
+    "resolve_threshold",
+    "speech_windows",
+]
 
 #: Seconds per fbank frame — the resolution every span below is quantised to.
 FRAME_SHIFT_S = FRAME_SHIFT / SUPPORTED_RATE
@@ -38,32 +56,6 @@ MIN_WINDOW_FRAMES = WINDOW_FRAMES // 2
 #: the opposite of strip-silence's: a false negative here leaves audio
 #: unattributed, while a false positive costs one window that clusters away.
 VAD_THRESHOLD = 0.3
-
-DEFAULT_THRESHOLD = 0.7
-DEFAULT_MAX_SPEAKERS = 8
-
-#: Dashboard-tunable (Settings -> Advanced), resolved env > config file >
-#: default at use-time like every other operator knob.
-ENV_THRESHOLD = "TAPSCRIBE_DIARIZE_THRESHOLD"
-ENV_MAX_SPEAKERS = "TAPSCRIBE_DIARIZE_MAX_SPEAKERS"
-
-
-def resolve_threshold() -> float:
-    return config.resolve_knob(
-        ENV_THRESHOLD,
-        config.DIARIZE_THRESHOLD_FILE,
-        config._parse_diarize_threshold,
-        DEFAULT_THRESHOLD,
-    )
-
-
-def resolve_max_speakers() -> int:
-    return config.resolve_knob(
-        ENV_MAX_SPEAKERS,
-        config.DIARIZE_MAX_SPEAKERS_FILE,
-        config._parse_diarize_max_speakers,
-        DEFAULT_MAX_SPEAKERS,
-    )
 
 
 def speech_windows(samples: np.ndarray, *, vad) -> list[list[tuple[int, int]]]:

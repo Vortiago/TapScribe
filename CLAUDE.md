@@ -335,7 +335,13 @@ operator-tunable setting belongs in the dashboard; the pattern for a new
 one is a `_ConfigSpec` entry in `config_store.CONFIG_KEYS` (write-time
 bounds check), a `config_store.resolve_knob` resolver at the use site, the
 resolved value on `/api/state`, and a field in the Advanced card
-(`web/components/next/views.html` + `next/views/settings.js`). Per-session
+(`web/components/next/views.html` + `next/views/settings.js`). The resolver
+must live somewhere `/api/state` can import CHEAPLY: the diarize pair sits in
+`diarizers/knobs.py` (stdlib + `config` only) rather than `standalone.py`,
+which pulls numpy and the VAD — and so onnxruntime — at import, and a broken
+diarization install must not take the ~2 Hz poll down with it.
+`tests/test_operator_knobs_state.py`'s `KNOB_ROUTES` sweep is what fails when
+a knob is wired only half-way. Per-session
 ACTIONS — the strip-silence knobs in `web/components/next/recordings.html`
 — are a different shape: a POST, not a persisted knob.
 
