@@ -26,8 +26,8 @@
   `app.py` registers a route itself, if a route module imports a
   sibling route module (shared helpers live in `deps`/`body`/`errors`/
   `guards`), or if the registered surface changes without its golden
-  table changing too. ADR-0018 has the why. Note `app.routes` no longer
-  enumerates routes (FastAPI keeps an included router as one lazy
+  table changing too. ADR-0018 has the why. `app.routes` does not
+  enumerate routes (FastAPI keeps an included router as one lazy
   entry, and the effective path of a websocket or mount lives on the
   context's `starlette_route`): a test that sweeps the surface goes
   through `tests/route_inventory.py`, which owns that traversal (and
@@ -89,23 +89,20 @@
   the `markDeferredRender`/`consumeDeferredRender` tick-retry — those BESPOKE
   gates, every `renderList` deferral, and every `renderRegion` deferral alike.
   One mechanism, no exceptions to remember; ADR-0016 has the why, including why
-  a listener-based instant flush (which canon `lib/render.js` still implements
-  and this seam no longer reaches) fits only one of the four render shapes.
+  a listener-based instant flush — which canon `lib/render.js` implements and
+  this seam does not use — fits only one of the four render shapes.
   Corollary worth internalising before touching the seam: `renderRegion` checks
   its `sig` BEFORE the holds, so an idle focused control marks no retry — invert
   that order and every 304 tick re-runs `renderAll` for as long as a caret sits
-  in a region (#245). `live-channel.js` and `config-card.js`
-  render through it too, with NO bespoke guard of their own: a focused
-  `[data-cfg-key]` save button mid-`putJson` counts as an interactive
-  control in the seam's `_isInteractive`, so `renderRegion` holds the
-  swap (and `interactionHeld()` reports it to the poll pacer) without
-  the call site remembering anything. Both used to carry a hand-rolled
-  2-line guard that returned WITHOUT marking the deferred render, which
-  stranded the held-back render forever once the poll started 304ing —
-  the argument for folding it into the seam rather than repeating it.
-  The People editor (`people.js`) renders its list through
-  `renderRegion` too — `renderRegion` is the pattern for every region,
-  new or existing. The
+  in a region (#245). `live-channel.js`, `config-card.js` and the People
+  editor (`people.js`) render through it too, with NO bespoke guard of
+  their own: a focused `[data-cfg-key]` save button mid-`putJson` counts
+  as an interactive control in the seam's `_isInteractive`, so
+  `renderRegion` holds the swap (and `interactionHeld()` reports it to
+  the poll pacer) without the call site remembering anything. A
+  hand-rolled guard that returns WITHOUT marking the deferred render
+  strands it forever once the poll starts 304ing — which is why the hold
+  belongs in the seam. `renderRegion` is the pattern for every region. The
   `test_next_poll_render_does_not_clobber_open_controls` sweep in
   `tests/e2e/test_dashboard_ui.py` enforces this — it focuses every
   control in each view, crosses a poll, and fails if a node is rebuilt
@@ -114,12 +111,12 @@
   every second (job progress, byte counters, live captions) must update
   its DOM in place or carry its OWN small signature — never share a render
   signature with an O(content) region. A 3000-segment merged transcript is
-  a 100–200 ms synchronous rebuild; sharing its sig with job progress was
-  the "/next locks up while transcribing" bug (one stall per job tick).
+  a 100–200 ms synchronous rebuild, so sharing its sig with job progress
+  costs one stall per job tick — "/next locks up while transcribing".
   Two identity-stamp guards in `tests/e2e/test_dashboard_ui.py`
   (`test_next_job_ticks_do_not_rebuild_merged_transcript`,
-  `test_next_caption_churn_appends_feed_lines_without_rebuilds`) pin the
-  fixes structurally — no timing thresholds, so they hold on slow CI.
+  `test_next_caption_churn_appends_feed_lines_without_rebuilds`) pin this
+  structurally — no timing thresholds, so they hold on slow CI.
   To MEASURE render-path changes, run the opt-in CDP soak harness:
   `TAPSCRIBE_PERF_SOAK=1 pytest tests/e2e/test_next_perf_soak.py -s`
   (multi-pass scenarios; reports long tasks, poll health, post-GC
@@ -168,10 +165,9 @@
   the same reason `createFieldSaver` takes `afterSave` at construction: waiting
   callbacks are deduped by identity, so a fresh closure per tick would repaint
   once per missed tick — binding makes that unwritable instead of merely
-  documented. #222 was five copies of this machine with three
-  divergent, unchosen failure policies; add a sixth lazy body by declaring a
-  resource, never by re-rolling the ceremony. The mechanism is DOM-free and
-  fetch-free (injected `load`), unit-tested under `node --test` in
+  documented. Add a lazy body by declaring a resource, never by re-rolling
+  the ceremony — hand-rolled copies diverge on failure policy (#222). The
+  mechanism is DOM-free and fetch-free (injected `load`), unit-tested in
   `lazy-resource.test.js`; `api.test.js` is the integration half over the real
   exported resources.
   Two things a resource DECLARES, both decisions rather than fallout:
@@ -186,7 +182,7 @@
     (re-)transcribed / stripped / added). Without the hold, the refetch reports a
     cold load, the view renders that exactly like a first load and
     `replaceChildren`-blanks the whole multi-item region to "loading…" once per
-    sibling change — the "multi-track pages blink while transcribing" bug (#266).
+    sibling change: multi-track pages blink while transcribing (#266).
     `holdKeyOf` names the thing the body belongs to (the session); `keyOf` names
     one VERSION of it. Omit it only when a stale body would be WRONG rather than
     merely old (peaks belong to one (WAV, byte size)). The four held bodies are
@@ -226,9 +222,9 @@
   (a captured node is detached by then, making a `failed: …` invisible); the
   save BUTTONS (`wireSave` / `wireConfigSave`, which live there too — api.js
   stays the fetch layer) and `next/ui.js`'s `makeStatusFlasher` are all
-  specialisations of it. #355 was four hand-rolled copies of this, already
-  drifted on badge duration and guardedness; add a fifth trigger by writing a
-  wrapper over `runSaveWithStatus`, never a new lifecycle.
+  specialisations of it. Add a trigger by writing a wrapper over
+  `runSaveWithStatus`, never a new lifecycle — hand-rolled copies drift on
+  badge duration and guardedness (#355).
 - **Optimistic inline editing** on `/next` is `web/js/next/field-saver.js`'s
   two halves: `createOverlay({idOf, baselineFor})` holds the pending edits and
   owns the per-tick **catch-up sweep** (retire an entry once the server agrees
@@ -264,8 +260,8 @@ picker:
   reinstall step is a repair for an incomplete venv; on a healthy
   install it's already satisfied and no step is planned.
 
-  **The `silero-vad` package and `torch` are NOT dependencies** — #374
-  dropped both (773 MB) in favour of the vendored model. A probe here
+  **The `silero-vad` package and `torch` are NOT dependencies** — the
+  vendored model replaces both, and 773 MB with them (#374). A probe here
   must name a module some core dependency actually provides, or the
   reinstall it plans can never satisfy it and preflight re-runs pip on
   every launch; `test_every_core_repair_probes_a_module_a_core_dependency_provides`
@@ -390,7 +386,7 @@ a strict two-layer path sanitiser (`_safe_part`, then
 PR authors are expected to land clean. That exclusion is what makes
 `session_paths.py` a review-gate module: a new user-input-to-path helper
 there is covered by neither CodeQL nor any other automated check.
-Common trip-wires Claude has introduced and how to avoid them:
+Common trip-wires and how to avoid them:
 
 - **Path components from parsed filenames must round-trip through
   `safe_name`** before being interpolated into a new path. Even when
@@ -505,9 +501,9 @@ Browser tests open Playwright through `playwright_session()`
 Playwright's test-id attribute at `data-slot` — the native `data-*` marker the
 dashboard templates already bind through (`slot()`/`pick()` in
 `web/js/templates.js`), so `page.get_by_test_id("waveName")` resolves
-`[data-slot="waveName"]` with auto-waiting. Existing `[data-slot=…]` CSS
-locators still work; `get_by_test_id` is the additive entry point. There is no
-native HTML `testid` — `data-*` is the platform's scriptable-handle mechanism,
+`[data-slot="waveName"]` with auto-waiting; `[data-slot=…]` CSS locators
+resolve too. There is no native HTML `testid` — `data-*` is the platform's
+scriptable-handle mechanism,
 so this is the native convention, not a borrowed framework idiom. New e2e files
 import `playwright_session` from `.harness` rather than reintroducing
 `async_playwright()`. Prefer accessible selectors (`get_by_role` /
