@@ -63,8 +63,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         // own window; the submenu never touches the live status line or Start/End controls.
         _pastMeetingsItem = new ToolStripMenuItem("Past meetings");
         _pastMeetingsItem.DropDownOpening += (_, _) => RebuildPastMeetingsMenu();
-        var settingsItem = new ToolStripMenuItem("Settings…", null, (_, _) => OpenSettings());
-        var quitItem = new ToolStripMenuItem("Quit", null, (_, _) => _ = QuitAsync());
+        // Guarded, not OnRuntime: both are live before the runtime exists. Quit must still shut
+        // the app down then, and OpenSettings decides for itself that there is nothing to edit.
+        var settingsItem = new ToolStripMenuItem("Settings…", null, (_, _) => Guarded(OpenSettings));
+        var quitItem = new ToolStripMenuItem("Quit", null, (_, _) => Guarded(() => _ = QuitAsync()));
 
         _menu = new ContextMenuStrip();
         _menu.Items.Add(_statusItem);
@@ -118,18 +120,32 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         if (_runtime is not { } runtime)
             return;
 
+        Guarded(() => command(runtime));
+    }
+
+    /// <summary>
+    /// The boundary with the toolkit, around one operator action. The AppKit shell's
+    /// <c>Guarded</c>, and deliberately the same shape: this is a shared product, and a rule
+    /// that holds on one platform and not the other is the drift the tray family exists to
+    /// avoid.
+    ///
+    /// Core narrowed its own catches on the strength of this
+    /// (<see cref="BridgeRuntime.ApplySettings"/>), and a bug that used to arrive as a wrong
+    /// notice must not become a tray that vanishes. Every path an operator can reach goes
+    /// through it: the menu items, and the settings dialog's Save. WinForms answers an escaping
+    /// handler with a dialog rather than by ending the process, which is milder than AppKit but
+    /// is still the operator meeting a stack trace. Reported rather than swallowed, so it is
+    /// visible as something other than a click that did nothing. CodeQL flags the width
+    /// (cs/catch-of-all-exceptions): this is the one place that width is the point.
+    /// </summary>
+    private void Guarded(Action action)
+    {
         try
         {
-            command(runtime);
+            action();
         }
         catch (Exception ex)
         {
-            // The boundary with the toolkit. A menu action's exception reaches the toolkit and
-            // ends the process, so nothing may escape here; Core narrowed its own catches on the
-            // strength of this, and a bug that used to arrive as a wrong notice must not become a
-            // tray that vanishes. Reported rather than swallowed, so it is still visible as
-            // something other than a click that did nothing. CodeQL flags the width
-            // (cs/catch-of-all-exceptions): this is the one place that width is the point.
             ShowNotice("Something went wrong", ex.Message, NoticeKind.Warning);
         }
     }
