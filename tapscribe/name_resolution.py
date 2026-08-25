@@ -205,6 +205,20 @@ def _default_name(identities: list[str], roster_names: dict[str, str]) -> str:
     return identities[0] if identities else ""
 
 
+def _mapping_applies(mapped: Any, current_run: str | None) -> bool:
+    """ADR-0021's rule, in one place: a Voice→Person mapping counts only while
+    its stamp matches the identity's CURRENT diarization run.
+
+    A sidecar that names NO run for the identity (deleted, torn, or never
+    diarized) leaves its mappings applied — nothing has superseded them. Both
+    readers below decide this, off different key spaces; a drift means the
+    People view counts a Person in a meeting whose transcript never names them.
+    """
+    if not isinstance(mapped, dict) or not mapped.get("person_id"):
+        return False
+    return not current_run or mapped.get("run_id") == current_run
+
+
 def _sessions_by_voice_pointer(sessions: list[dict[str, Any]]) -> dict[str, set[str]]:
     """`person_id → sessions reached through a Voice mapping`.
 
@@ -218,13 +232,8 @@ def _sessions_by_voice_pointer(sessions: list[dict[str, Any]]) -> dict[str, set[
         runs = s.get("voice_runs") or {}
         for key, mapped in ((s.get("session_meta") or {}).get("voices") or {}).items():
             identity, label = split_voice_key(key)
-            person_id = mapped.get("person_id") if isinstance(mapped, dict) else None
-            if not label or not person_id:
-                continue
-            current = runs.get(identity)
-            if current and mapped.get("run_id") != current:
-                continue
-            out.setdefault(person_id, set()).add(sid)
+            if label and _mapping_applies(mapped, runs.get(identity)):
+                out.setdefault(mapped["person_id"], set()).add(sid)
     return out
 
 

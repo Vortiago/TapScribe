@@ -20,7 +20,7 @@ import numpy as np
 
 from .. import config
 from ..vad import speech_timestamps
-from .base import AudioClip, DiarizationResult, Diarizer, voice_label
+from .base import AudioClip, DiarizationResult, voice_label
 from .cluster import cluster_voices
 from .fbank import FRAME_SHIFT, SUPPORTED_RATE, fbank
 
@@ -66,9 +66,7 @@ def resolve_max_speakers() -> int:
     )
 
 
-def speech_windows(
-    samples: np.ndarray, *, vad, vad_threshold: float = VAD_THRESHOLD
-) -> list[list[tuple[int, int]]]:
+def speech_windows(samples: np.ndarray, *, vad) -> list[list[tuple[int, int]]]:
     """One `[(first_frame, last_frame)]` list per speech region, in fbank frames.
 
     Grouped by region rather than flat because a span may not cross a silence —
@@ -76,7 +74,7 @@ def speech_windows(
     region's last window is anchored to its end rather than overhanging it.
     """
     regions: list[list[tuple[int, int]]] = []
-    for region in speech_timestamps(samples, vad, threshold=vad_threshold):
+    for region in speech_timestamps(samples, vad, threshold=VAD_THRESHOLD):
         lo = -(-region["start"] // FRAME_SHIFT)  # ceil: never claim a frame before speech
         hi = region["end"] // FRAME_SHIFT
         if hi - lo < MIN_WINDOW_FRAMES:
@@ -102,7 +100,11 @@ def _spans_for_region(region: Sequence[tuple[int, int]], labels: Sequence[int]) 
     lo, hi = region[0][0], region[-1][1]
     centres = np.array([(s + e) / 2 for s, e in region])
     frames = np.arange(lo, hi)
-    owner = np.abs(frames[:, None] - centres[None, :]).argmin(axis=1)
+    # Centres are sorted, so the nearest one is a binary search against their
+    # midpoints. The obvious `abs(frames[:, None] - centres).argmin(1)` builds a
+    # frames x windows matrix — 1.1 GB on a 12-minute speech region, which one
+    # unbroken stretch of a meeting easily is.
+    owner = np.searchsorted((centres[:-1] + centres[1:]) / 2, frames, side="left")
     per_frame = np.asarray(labels)[owner]
 
     spans: list[tuple[int, int, int]] = []
@@ -134,21 +136,18 @@ class StandaloneDiarizer:
     def diarize(self, clips: Iterable[AudioClip]) -> DiarizationResult:
         started = time.perf_counter()
         vectors: list[np.ndarray] = []
-        placed: list[tuple[AudioClip, list[tuple[int, int]], int]] = []
-        at = 0
+        placed: list[tuple[AudioClip, list[tuple[int, int]]]] = []
 
-        # Embed clip by clip: the fbank of an hour of audio is 230 MB, the
-        # vectors it reduces to are 10 MB.
+        # Embed clip by clip: the fbank of a whole clip is transient, the vectors
+        # it reduces to are 2 KB a window.
         for clip in clips:
-            regions = speech_windows(clip.samples, vad=self._vad, vad_threshold=VAD_THRESHOLD)
+            regions = speech_windows(clip.samples, vad=self._vad)
             if not regions:
                 continue
             feats = fbank(clip.samples)
             windows = [w for region in regions for w in region]
             vectors.append(self._embedder.embed([feats[lo:hi] for lo, hi in windows]))
-            for region in regions:
-                placed.append((clip, region, at))
-                at += len(region)
+            placed.extend((clip, region) for region in regions)
 
         if not vectors:
             return DiarizationResult(engine=self.engine, took_ms=_ms_since(started))
@@ -157,8 +156,11 @@ class StandaloneDiarizer:
             np.concatenate(vectors), threshold=self._threshold, max_speakers=self._max_speakers
         )
         voices: dict[str, list] = {}
-        for clip, region, offset in placed:
-            for label, lo, hi in _spans_for_region(region, labels[offset : offset + len(region)]):
+        at = 0
+        for clip, region in placed:
+            window_labels = labels[at : at + len(region)]
+            at += len(region)
+            for label, lo, hi in _spans_for_region(region, window_labels):
                 voices.setdefault(voice_label(label), []).append(
                     (
                         clip.start + timedelta(seconds=lo * FRAME_SHIFT_S),
@@ -174,6 +176,3 @@ class StandaloneDiarizer:
 
 def _ms_since(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
-
-
-_: type[Diarizer] = StandaloneDiarizer

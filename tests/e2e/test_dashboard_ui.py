@@ -56,8 +56,9 @@ import pytest
 
 from tapscribe import batch_diarize as _batch_diarize
 from tapscribe import transcribers as _transcribers
+from tapscribe import voices
 from tapscribe.recorder import JobState
-from tapscribe.session_paths import FILENAME_META_JSON
+from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_ROSTER_JSON
 from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
 from tapscribe.text import parse_wav_speaker_slug
 
@@ -3250,6 +3251,95 @@ async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
             )
             assert len(rows) >= 3, f"expected all three tracks, got {rows}"
             await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_voices_sig_flip_does_not_blank_the_other_taps_rows(running_recorder: RunningRecorder):
+    """`voices_sig` is a SESSION-level aggregate: re-diarizing one tap flips it
+    for every tap in the session. Without the resource's `holdKeyOf`, the refetch
+    reports a cold load, the panel renders that exactly like a first load, and
+    the other tap's rows blank to "loading voices…" for a round trip — #266's
+    shape on a third surface. Stamps an unrelated row, flips the sig via a
+    sibling, asserts the stamped node survives."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-03T09-00-00Z"
+    session_dir = rec.recordings_dir / sid
+    session_dir.mkdir(parents=True)
+    (session_dir / FILENAME_ROSTER_JSON).write_text(
+        json.dumps(
+            {
+                ident: {"name": name, "source": "recorded", "slug": name, "wavs": [], "mode": TAP_MODE_MULTI}
+                for ident, name in (("sysaudio", "Them"), ("room", "Room"))
+            }
+        ),
+        encoding="utf-8",
+    )
+    start = datetime(2025, 3, 3, 9, 0, 0, tzinfo=UTC)
+    for ident in ("sysaudio", "room"):
+        voices.record_voices(
+            session_dir,
+            identity=ident,
+            run_id="run-1",
+            spans={"A": [(start, start + timedelta(seconds=20))]},
+        )
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "transcript")
+
+            rows = '#viewRoot [data-slot="voiceList"] .voicerow'
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll({rows!r}).length === 2""", timeout=15000
+            )
+            stamped = await page.evaluate(
+                """() => {
+                    const row = document.querySelector('#viewRoot .voicerow[data-key="room#A"]');
+                    if (!row) return false;
+                    row.__guardMark = 1;
+                    return true;
+                }"""
+            )
+            assert stamped, "could not find the unrelated Voice row to stamp"
+
+            # Re-diarize the OTHER tap: one identity's run_id moves, the
+            # session-level sig moves with it.
+            voices.record_voices(
+                session_dir,
+                identity="sysaudio",
+                run_id="run-2",
+                spans={
+                    "A": [(start, start + timedelta(seconds=10))],
+                    "B": [(start + timedelta(seconds=10), start + timedelta(seconds=20))],
+                },
+            )
+
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll({rows!r}).length === 3""", timeout=15000
+            )
+            survived = await page.evaluate(
+                """() => {
+                    const row = document.querySelector('#viewRoot .voicerow[data-key="room#A"]');
+                    return !!(row && row.__guardMark === 1);
+                }"""
+            )
+            assert survived, (
+                "the untouched tap's Voice row was rebuilt when a sibling re-diarized — "
+                "the sessionVoices hold (holdKeyOf) is not doing its job"
+            )
         finally:
             await browser.close()
 

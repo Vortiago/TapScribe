@@ -12,28 +12,48 @@ from __future__ import annotations
 
 import numpy as np
 
-#: Windows clustered directly. The merge loop scans an n×n matrix once per
-#: merge: 3000 windows (~40 min of speech) is 12 s, 8000 would be ~4 min and
-#: 256 MB. Above this the run clusters an evenly-spaced sample and assigns the
-#: rest to the nearest centroid — speaker blobs are hugely over-sampled at 1.3
-#: windows a second, so the sample carries the same clusters.
+#: Windows clustered directly. MEMORY is what binds this: the distance matrix is
+#: n² float64, so 4000 windows (~50 min of speech at 1.3 a second) is 128 MB and
+#: 8000 would be 512 MB. Time is not the constraint — the nearest-neighbour cache
+#: below runs 4000 windows in half a second. Above the cap the run clusters an
+#: evenly-spaced sample and assigns the rest to the nearest centroid; speaker
+#: blobs are hugely over-sampled at that rate, so the sample carries the same
+#: clusters.
 MAX_SAMPLED_WINDOWS = 4000
 
 
 def _agglomerate(dist: np.ndarray, *, threshold: float, max_speakers: int) -> np.ndarray:
     """Merge the closest pair until every pair is past `threshold`, or
     `max_speakers` clusters remain — whichever binds later. Returns one
-    arbitrary integer per row."""
+    arbitrary integer per row. **`dist` is consumed in place.**
+
+    Each row caches its own nearest neighbour, so a merge picks the global
+    closest pair in O(alive) instead of re-scanning the whole n×n matrix. That
+    is exact rather than approximate because average linkage is REDUCIBLE: the
+    merged cluster's distance to a third is a size-weighted mean of its halves',
+    so it can never fall below either. A row whose nearest neighbour was neither
+    half therefore keeps it, and only the rows that pointed at the two merged
+    ones need recomputing. Measured 64x faster at the 4000-window cap, with a
+    bit-identical partition.
+    """
     n = len(dist)
-    d = np.array(dist, dtype=np.float64)
+    d = np.asarray(dist, dtype=np.float64)
     np.fill_diagonal(d, np.inf)
     size = np.ones(n)
     label = np.arange(n)
+    live = np.ones(n, dtype=bool)
+    nn = np.argmin(d, axis=1)
+    nnd = d[np.arange(n), nn]
     alive = n
 
     while alive > 1:
-        i, j = divmod(int(np.argmin(d)), n)
-        if not np.isfinite(d[i, j]) or (d[i, j] > threshold and alive <= max_speakers):
+        # The smallest live row achieving the global minimum, and its first
+        # column — the same pair a row-major `argmin` over the whole matrix
+        # picks, ties included, which is what keeps the partition identical.
+        rows = np.flatnonzero(live)
+        i = int(rows[np.argmin(nnd[rows])])
+        j = int(nn[i])
+        if not np.isfinite(nnd[i]) or (nnd[i] > threshold and alive <= max_speakers):
             break
         # Lance-Williams for average linkage: the merged cluster's distance to
         # every other is the size-weighted mean of its two halves'.
@@ -43,7 +63,13 @@ def _agglomerate(dist: np.ndarray, *, threshold: float, max_speakers: int) -> np
         d[j, :] = d[:, j] = np.inf  # retire j
         size[i] += size[j]
         label[label == j] = i
+        live[j] = False
         alive -= 1
+
+        # Row i moved; every other row that pointed at i or j has to look again.
+        for r in (i, *np.flatnonzero(live & ((nn == i) | (nn == j))).tolist()):
+            nn[r] = int(np.argmin(d[r]))
+            nnd[r] = d[r, nn[r]]
 
     return label
 

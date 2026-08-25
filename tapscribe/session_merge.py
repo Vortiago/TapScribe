@@ -19,6 +19,7 @@ through a Transcriber.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -488,3 +489,31 @@ def write_merged_transcript(
     )
     atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
     return merged
+
+
+def remerge_with_stored_selection(session_dir: Path, previous: Mapping[str, Any]) -> bool:
+    """Rebuild the merged transcript over the same WAVs the stored one names.
+
+    Costs no transcription — `merge_session` re-reads the per-WAV caches — so
+    this is how a stage that changed only ATTRIBUTION (a diarize run) gets its
+    new speaker keys onto disk. The selection comes off `previous` because the
+    fields that describe it (`from_iso` / `to_iso` / `source`) are this module's
+    own wire shape; a caller reconstructing them would be the fourth place that
+    knows them.
+
+    `transcribed_at` deliberately advances: the dashboard caches the merged body
+    keyed on it, so preserving it would leave the old keys on screen. False when
+    the stored transcript names a range that no longer parses — re-selecting
+    would merge a different set of WAVs than it claims to.
+    """
+    try:
+        selection = select_session_wavs(
+            session_dir,
+            from_iso=previous.get("from_iso"),
+            to_iso=previous.get("to_iso"),
+            source=previous.get("source") or "original",
+        )
+    except ValueError:
+        return False
+    write_merged_transcript(session_dir, merge_session(selection), model=previous.get("model") or "")
+    return True

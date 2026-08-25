@@ -179,7 +179,7 @@ async def run_diarize_stage(req: PipelineRequest, *, job) -> dict[str, Any]:
         )
     except Exception as e:
         print(f"[tapscribe] pipeline {req.session}: diarize failed, continuing: {e}", flush=True)
-        return {"ok": False, "session": req.session, "error": str(e), "error_kind": type(e).__name__}
+        return {}
 
 
 async def run_transcribe_stage(req: PipelineRequest, *, job, model: str, backend: str) -> dict[str, Any]:

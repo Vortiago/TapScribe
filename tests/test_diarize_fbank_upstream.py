@@ -19,7 +19,14 @@ from tapscribe.diarizers import model as diarize_model
 from tapscribe.diarizers.fbank import fbank
 from tests.fixtures.diarize import load_reference, read_fixture_wav
 
-knf = pytest.importorskip("kaldi_native_fbank", reason="upstream kaldi-native-fbank not installed")
+pytest.importorskip("kaldi_native_fbank", reason="upstream kaldi-native-fbank not installed")
+
+# The oracle GENERATOR's own frontend, not a second copy of its option block:
+# this file exists so `reference.npz` cannot rot, and two spellings of
+# `FbankOptions` would let the lane compare against settings the archive was
+# never built with. `pythonpath = ["tools"]` in pyproject makes it importable;
+# `test_tap_wire_contract.py` imports `stamp_tap_wire` the same way.
+from gen_diarize_reference import fbank_reference as _upstream_fbank  # noqa: E402
 
 FIXTURES = ["armstrong-en", "marlene-nb", "solen-da"]
 
@@ -29,20 +36,6 @@ needs_model = pytest.mark.skipif(
     not diarize_model.model_present(),
     reason="run `python -m tapscribe.diarizers.model` to fetch the embedding model",
 )
-
-
-def _upstream_fbank(samples: np.ndarray) -> np.ndarray:
-    opts = knf.FbankOptions()
-    opts.frame_opts.dither = 0.0
-    opts.frame_opts.samp_freq = 16000
-    opts.frame_opts.snip_edges = False
-    opts.mel_opts.num_bins = 80
-    f = knf.OnlineFbank(opts)
-    f.accept_waveform(16000, samples.tolist())
-    f.input_finished()
-    if f.num_frames_ready == 0:
-        return np.zeros((0, 80), dtype=np.float32)
-    return np.stack([f.get_frame(i) for i in range(f.num_frames_ready)]).astype(np.float32)
 
 
 @pytest.mark.parametrize("name", FIXTURES)

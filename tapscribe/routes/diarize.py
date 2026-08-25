@@ -21,7 +21,7 @@ from ..recorder import Recorder
 from ..roster import read_roster
 from ..session_paths import resolve_session_dir
 from ..text import parse_iso, voice_key
-from ..voices import read_voices, voices_sig
+from ..voices import read_voices
 from .body import json_body
 from .deps import get_recorder
 
@@ -89,11 +89,7 @@ def _voices_view(session: str) -> dict[str, Any]:
                 "voices": rows,
             }
         )
-    return {
-        "session": session,
-        "voices_sig": voices_sig({i: e["run_id"] for i, e in sidecar.items()}),
-        "identities": identities,
-    }
+    return {"session": session, "identities": identities}
 
 
 def _speaking_seconds(spans: list[dict[str, str]]) -> float:

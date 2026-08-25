@@ -10,8 +10,7 @@ import { modeIntent } from "./taps.js";
 
 const tap = (identity, name, run_id, voices) => ({ identity, name, run_id, voices });
 const voice = (key, label, seconds, spans = 1) => ({ key, label, seconds, spans });
-const join = (taps, mapping = {}, people = []) =>
-  voiceRows(taps, { mapping, nameById: new Map(people.map((p) => [p.id, p.name])) });
+const join = (taps, mapping = {}) => voiceRows(taps, { mapping });
 
 test("an unmapped voice reads as Speaker <label> with its share of the tap", () => {
   const rows = join([tap("sysaudio", "Them", "r1", [voice("sysaudio#A", "A", 30), voice("sysaudio#B", "B", 10)])]);
@@ -22,26 +21,21 @@ test("an unmapped voice reads as Speaker <label> with its share of the tap", () 
   );
 });
 
-test("a mapped voice carries its Person", () => {
-  const rows = join(
-    [tap("sysaudio", "Them", "r1", [voice("sysaudio#A", "A", 30)])],
-    { "sysaudio#A": { person_id: "p1", run_id: "r1" } },
-    [{ id: "p1", name: "Dana" }],
-  );
+test("a mapped voice carries its Person id", () => {
+  const rows = join([tap("sysaudio", "Them", "r1", [voice("sysaudio#A", "A", 30)])], {
+    "sysaudio#A": { person_id: "p1", run_id: "r1" },
+  });
 
   assert.equal(rows[0].personId, "p1");
-  assert.equal(rows[0].personName, "Dana");
   assert.equal(rows[0].stale, false);
 });
 
 test("a mapping from an earlier run is stale — the server stops applying it", () => {
   // The dangerous silence: without this the operator sees `Speaker A` come back
   // with no explanation and no reason to re-map.
-  const rows = join(
-    [tap("sysaudio", "Them", "r2", [voice("sysaudio#A", "A", 30)])],
-    { "sysaudio#A": { person_id: "p1", run_id: "r1" } },
-    [{ id: "p1", name: "Dana" }],
-  );
+  const rows = join([tap("sysaudio", "Them", "r2", [voice("sysaudio#A", "A", 30)])], {
+    "sysaudio#A": { person_id: "p1", run_id: "r1" },
+  });
 
   assert.equal(rows[0].stale, true);
 });

@@ -250,7 +250,6 @@ export interface VoiceMapping {
 // thousands of them and the panel draws one row per Voice.
 export interface SessionVoices {
   session: string;
-  voices_sig: string;
   identities: VoiceIdentity[];
 }
 

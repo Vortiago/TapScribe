@@ -70,9 +70,10 @@
   lazy-body load WITHOUT bypassing the guards. There is no force flag.
   A **keyed list** (rows keyed and updated in place, never swapped) is the
   other shape, and it has its own primitive: `renderList(host, items, {key,
-  create, update, itemSig, sig})` plus `markListStale(host)`, which the three
-  keyed lists (`recordings.js`' WAV list, `transcript.js`' per-WAV picker,
-  `sessions.js`' rows) all render through. Canon `reconcileList` is NOT
+  create, update, itemSig, sig})` plus `markListStale(host)`, which the five
+  keyed lists (`recordings.js`' WAV list, `transcript.js`' per-WAV picker and its
+  Voices rows, `sessions.js`' rows, `taps.js`' per-identity tap-mode rows) all
+  render through. Canon `reconcileList` is NOT
   re-exported from `templates.js` — `renderList` is the only door, so a keyed
   list cannot be added un-held. It owns two rules a region has no equivalent
   for (the removal hold and the per-row hold) — see CONTEXT.md → Region ·
@@ -188,13 +189,14 @@
     sibling change — the "multi-track pages blink while transcribing" bug (#266).
     `holdKeyOf` names the thing the body belongs to (the session); `keyOf` names
     one VERSION of it. Omit it only when a stale body would be WRONG rather than
-    merely old (peaks belong to one (WAV, byte size)). The three held bodies are
-    `sessionFiles`, `sessionTranscript` and `sessionSummary`; a new lazy pane
-    keyed on a content stamp inherits the requirement. Pin it with an
+    merely old (peaks belong to one (WAV, byte size)). The four held bodies are
+    `sessionFiles`, `sessionTranscript`, `sessionSummary` and `sessionVoices`; a
+    new lazy pane keyed on a content stamp inherits the requirement. Pin it with an
     identity-stamp e2e that stamps an UNRELATED row, flips the sig via a sibling,
     and asserts the stamped node survives the poll
     (`test_next_files_sig_flip_does_not_blank_wav_list`,
-    `…_does_not_blank_transcript_picker`).
+    `…_does_not_blank_transcript_picker`,
+    `test_next_voices_sig_flip_does_not_blank_the_other_taps_rows`).
   `knownValue` is the third hook: an answer available from the args alone (an
   empty `files_sig` means no folder on disk, so fetching would 404), recorded as
   the last-good body like a fetched one — otherwise a later non-empty flip
@@ -210,11 +212,12 @@
   region gated on such an aggregate is a **keyed list** and must render through
   `renderList` (keyed, in-place) — a full `replaceChildren` rebuild on the sig,
   even WITHOUT a placeholder blank, still churns O(content) nodes + row
-  listeners on every sibling/tick change. All three keyed lists are the pattern
-  to copy: the two WAV lists pass a list-level `sig` (they have `files_sig`),
-  `sessions.js` passes a per-row `itemSig` instead (chrome mounted once, rows
-  keyed by id + structural bits, cells mutated per row — #312) because it has no
-  cheap aggregate stamp to gate on.
+  listeners on every sibling/tick change. The keyed lists are the pattern to
+  copy: the two WAV lists pass a list-level `sig` (they have `files_sig`) and the
+  Voices rows do the same off `voices_sig`, while `sessions.js` passes a per-row
+  `itemSig` instead (chrome mounted once, rows keyed by id + structural bits,
+  cells mutated per row — #312) because it has no cheap aggregate stamp to gate
+  on.
 - **Every save that shows a status** goes through `web/js/save-status.js`
   (`runSaveWithStatus`): `saving…` → a GUARDED promotion to `saved` (so a save
   settling late can't stomp a newer message) → auto-clear, or a `failed: …`

@@ -27,6 +27,12 @@ import { mutateButton, putJson } from "../../api.js";
 import * as activeTaps from "../../components/active-taps.js";
 import * as liveChannel from "../../components/live-channel.js";
 
+/** Everything a mode row displays, in one spelling: the list gate and the row
+ * gate are the same tuple, and hand-maintaining two of them is how a list goes
+ * silently stale when a field is added to one.
+ * @param {import('../../types.js').ActiveStream} a */
+const modeSig = (a) => `${a.identity}§${a.name}§${a.mode || "single"}`;
+
 /**
  * What a click on a mode button means, or null when it means nothing (the mode
  * it names is already the effective one). Exported and DOM-only so the node test
@@ -144,8 +150,8 @@ export function build(ctx) {
         pick(row, "mSrc").textContent = a.mode === "multi" ? "diarized" : "one voice";
         paintMode(pick(row, "mSeg"), a.mode === "multi" ? "multi" : "single");
       },
-      itemSig: (a) => `${a.identity}§${a.name}§${a.mode || "single"}`,
-      sig: active.map((a) => `${a.identity}:${a.mode || "single"}:${a.name}`).join("|"),
+      itemSig: modeSig,
+      sig: active.map(modeSig).join("|"),
     });
   };
 

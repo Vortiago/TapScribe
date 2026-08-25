@@ -1024,22 +1024,10 @@ button.wavrow {
 
 /* ====================================================================== */
 /* PHASE 2 · TAPS — the connected taps reuse the .taps block (already       */
-/* styled above); below is the MOCK Tap-model strip, clearly tagged.        */
+/* styled above); below is the per-identity single/multi control.           */
 /* ====================================================================== */
-.mocktag {
-  font-size: 8.5px; font-family: var(--mono); letter-spacing: .06em;
-  color: var(--info);
-  border: 1px dashed color-mix(in srgb, var(--info) 40%, transparent);
-  border-radius: var(--next-r-sm); padding: 2px 7px;
-}
-.mockblk {
-  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
-  padding: 9px 0; border-top: 1px solid var(--hairline-2);
-}
-.mockblk--col { flex-direction: column; align-items: stretch; gap: 7px; }
-.cfgblk__k { font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-3); font-weight: 600; font-family: var(--mono); flex: none; }
 
-/* single / multi segmented control (mock, disabled). Named .segctl — NOT
+/* single / multi segmented control. Named .segctl — NOT
    .seg — because merged-transcript.html uses .seg for transcript segments
    (.seg.lowconf / .seg.suppressed, styled by dashboard.css); when this rule
    was called .seg it silently boxed every low-confidence segment in the
@@ -1057,33 +1045,16 @@ button.wavrow {
 .segctl__opt--multi.is-on { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
 
 /* diarized voice → Person rows (mock) */
+/* One diarized Voice -> Person row (Transcript · Voices). The last grid cell
+   holds the Person picker, the new-name input it reveals, the stale cue and the
+   save status. Four columns: the aside is ~300px wide, so a decorative arrow
+   between the share and the picker cost exactly a truncated Person name. */
 .voicemap { display: flex; flex-direction: column; gap: 6px; }
-.voicerow { display: grid; grid-template-columns: 70px 1fr 36px 14px auto; gap: 8px; align-items: center; }
+.voicerow { display: grid; grid-template-columns: auto minmax(36px, 1fr) 34px minmax(0, auto); gap: 6px; align-items: center; }
 .voicerow__v { font-size: 10px; color: var(--fg-1); }
 .voicerow__bar { height: 4px; background: var(--bg-elev-2); border-radius: var(--next-r-sm); overflow: hidden; }
 .voicerow__fill { height: 100%; background: var(--info); display: block; }
 .voicerow__pct { font-size: 9px; color: var(--fg-3); text-align: right; }
-.voicerow__arrow { color: var(--fg-3); font-size: 10px; }
-.pick {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 10.5px; color: var(--fg-1); font-family: var(--mono);
-  border: 1px solid var(--hairline); border-radius: var(--next-r); padding: 3px 8px; background: var(--bg-elev-2);
-}
-.pick--unid { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 38%, transparent); border-style: dashed; }
-.pick__av {
-  width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center;
-  font-size: 7.5px; font-weight: 650; background: var(--info); color: var(--bg); flex: none;
-}
-.pick__av--unid { background: var(--warn); }
-.pick__chev { color: var(--fg-3); font-size: 9px; }
-
-/* The real (wired) voice row: the last grid cell holds the Person picker, the
-   new-name input it reveals, the stale cue and the save status. Column 1 is
-   `auto` rather than the mock's fixed 70px because the label carries the tap
-   name too once a session has more than one diarized tap. */
-/* Four columns, not the mock's five: the aside is ~300px, and every pixel the
-   decorative arrow took was a truncated Person name. */
-.voicerow { grid-template-columns: auto minmax(36px, 1fr) 34px minmax(0, auto); gap: 6px; }
 .voicerow__pick { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .voicerow__new { width: 11ch; }
 .voicerow__status { font-size: 9px; }

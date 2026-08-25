@@ -31,8 +31,10 @@ import { sessionFiles } from "../api.js";
  */
 
 /**
- * Which of the four states a listing region is in. Pure, and the ONE place the
- * precedence lives: no-session beats loading, loading beats emptiness. Both
+ * Which of the four states a listing region is in. Pure, view-neutral, and the
+ * ONE place the precedence lives — the two WAV listings cross it, and so does
+ * the Transcript stage's Voices panel, which has no files in it at all.
+ * Precedence: no-session beats loading, loading beats emptiness. Both
  * views used to inline this ternary, and a view that gets the order wrong shows
  * "no recordings yet" during a cold load — a wrong answer, not a slow one.
  * @param {{ hasSession: boolean, loading: boolean, count: number }} p

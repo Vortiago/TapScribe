@@ -25,7 +25,7 @@
 import { tpl, pick, renderRegion, markRegionStale, renderList, markListStale, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import {
-  postJson, putJson, sessionTranscript, sessionVoices, errText,
+  mutateButton, postJson, putJson, sessionTranscript, sessionVoices, errText,
 } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
 import { resolveSeekTarget } from "../seek-target.js";
@@ -340,11 +340,6 @@ export function build(ctx) {
    * `session_meta.voices` below. */
   const voicesBody = sessionVoices.watch(() => { markListStale(voiceList); afterMutate(); });
 
-  /** The `__new__` option: reveals the name input beside the picker. A typed
-   * name always CREATES a Person, even when one already has it (ADR-0021) —
-   * two people share a name more often than one is typed twice. */
-  const NEW_PERSON = "__new__";
-
   /**
    * PUT one Voice's mapping and narrate it into that row's status cell.
    * The cell is re-resolved from the LIST by key on every write, never captured:
@@ -353,16 +348,17 @@ export function build(ctx) {
    * @param {string} key
    * @param {Record<string, string>} body
    */
-  const saveMapping = (key, body) =>
-    runSaveWithStatus(
+  const saveMapping = async (key, body) => {
+    // Read at WRITE time, like every other handler here: a row built for one
+    // session must never PUT against another.
+    const sid = session?.session;
+    if (!sid) return;
+    await runSaveWithStatus(
       statusTarget(() => voiceList.querySelectorAll(`[data-key="${CSS.escape(key)}"] [data-slot="vStatus"]`)),
-      () => putJson(`/api/sessions/${encodeURIComponent(currentSid)}/voices`, { key, ...body }),
+      () => putJson(`/api/sessions/${encodeURIComponent(sid)}/voices`, { key, ...body }),
       { onSuccess: afterMutate },
     );
-
-  /** The open session id, read by the row handlers at CLICK time — a row built
-   * for one session must never PUT against another. */
-  let currentSid = "";
+  };
 
   /** Build one Voice row's shell. `create` runs once per row in a keyed list,
    * so the two listeners here are bound once per row lifetime and die with its
@@ -553,17 +549,13 @@ export function build(ctx) {
     if (sel) transcribeWav(sel.name, effectiveSource(session));
   });
 
-  dzBtn.addEventListener("click", async () => {
-    if (!currentSid) return;
-    dzBtn.disabled = true;
-    try {
-      await postJson(`/api/sessions/${encodeURIComponent(currentSid)}/diarize`, {});
-    } catch (e) {
-      alert(`Diarize failed: ${errText(e)}`);
-    } finally {
-      dzBtn.disabled = false;
-      afterMutate();
-    }
+  dzBtn.addEventListener("click", () => {
+    if (!session) return;
+    const sid = session.session;
+    mutateButton(dzBtn, () => postJson(`/api/sessions/${encodeURIComponent(sid)}/diarize`, {}), {
+      afterMutate,
+      failMessage: (e) => `Diarize failed: ${e}`,
+    });
   });
 
   txRangeBtn.addEventListener("click", async () => {
@@ -995,28 +987,32 @@ export function build(ctx) {
    * @param {string} sid
    */
   function renderVoices(j, sess, sid) {
-    currentSid = sid;
     dzBtn.disabled = !sid;
     const voicesSig = sess?.voices_sig || "";
     const answer = sid ? voicesBody.resolve([sid, voicesSig]) : null;
-    const doc = answer?.value || null;
-    const taps = doc?.identities || [];
+    const taps = answer?.value?.identities || [];
     const mapping = sess?.session_meta?.voices || {};
     const people = j.people || [];
-    const nameById = new Map(people.map((pp) => [pp.id, pp.name || pp.id]));
     // Every value a row DISPLAYS that does not come from the body: the picker's
     // option set mirrors every Person's name, so a rename must reflow the rows.
     const peopleSig = people.map((pp) => `${pp.id}:${pp.name}`).join(",");
     const mapSig = Object.entries(mapping).map(([k, m]) => `${k}=${m.person_id}@${m.run_id}`).sort().join(",");
 
-    const rows = voiceRows(taps, { mapping, nameById });
-    const state = listState({ hasSession: !!sess, loading: !!answer?.loading, count: rows.length });
+    // Counted, not materialised: the row models are O(voices) allocations and
+    // this runs every 500 ms tick, almost always to be thrown away at the gate.
+    let count = 0;
+    let staleCount = 0;
+    for (const tap of taps) {
+      for (const v of tap.voices) {
+        count += 1;
+        const mapped = mapping[v.key];
+        if (mapped && mapped.run_id !== tap.run_id) staleCount += 1;
+      }
+    }
+    const state = listState({ hasSession: !!sess, loading: !!answer?.loading, count });
 
-    dzHint.textContent = rows.length
-      ? `${rows.length} voice${rows.length === 1 ? "" : "s"} · ${taps.length} tap${taps.length === 1 ? "" : "s"}`
-      : "";
-
-    const rendered = renderList(voiceList, rows, {
+    // A THUNK — rule 1 skips before it is called, so a quiet tick costs nothing.
+    const rendered = renderList(voiceList, () => voiceRows(taps, { mapping }), {
       key: (r) => r.key,
       create: buildVoiceRow,
       update: (node, r) => paintVoiceRow(node, r, people, peopleSig),
@@ -1033,12 +1029,15 @@ export function build(ctx) {
             : "Pick a session from the spine.";
       }
     }
-    // A DERIVED, non-interactive cue, updated in place rather than inside the
-    // sig-gated list — the sig-drift dual of CLAUDE.md's render hygiene.
-    const staleCount = rows.filter((r) => r.stale).length;
-    dzNote.textContent = staleCount
-      ? `${staleCount} mapping${staleCount === 1 ? "" : "s"} predate the current run and are not applied — re-map them.`
-      : "";
+    // DERIVED, non-interactive cues, written in place rather than from inside
+    // the sig-gated list — the sig-drift dual of CLAUDE.md's render hygiene.
+    setText(dzHint, count ? `${count} voice${count === 1 ? "" : "s"} · ${taps.length} tap${taps.length === 1 ? "" : "s"}` : "");
+    setText(
+      dzNote,
+      staleCount
+        ? `${staleCount} mapping${staleCount === 1 ? "" : "s"} predate the current run and are not applied — re-map them.`
+        : "",
+    );
   }
 
   return { node: frag, update };
@@ -1049,9 +1048,9 @@ export function build(ctx) {
  * unit-testable without a DOM. The tap NAME rides the label only when a session
  * has more than one diarized tap; with one it is noise on every row.
  * @param {import('../../types.js').VoiceIdentity[]} taps
- * @param {{ mapping: Record<string, import('../../types.js').VoiceMapping>, nameById: Map<string, string> }} ctx
+ * @param {{ mapping: Record<string, import('../../types.js').VoiceMapping> }} ctx
  */
-export function voiceRows(taps, { mapping, nameById }) {
+export function voiceRows(taps, { mapping }) {
   const rows = [];
   for (const tap of taps) {
     const total = tap.voices.reduce((a, v) => a + v.seconds, 0);
@@ -1062,7 +1061,6 @@ export function voiceRows(taps, { mapping, nameById }) {
         label: taps.length > 1 ? `${tap.name} · Speaker ${v.label}` : `Speaker ${v.label}`,
         pct: total > 0 ? Math.round((100 * v.seconds) / total) : 0,
         personId: mapped?.person_id || "",
-        personName: mapped ? nameById.get(mapped.person_id) || "" : "",
         // A mapping stamped with a superseded run is NOT applied server-side, so
         // the row has to say so — otherwise `Speaker A` comes back with no
         // explanation and no reason to re-map.
@@ -1071,6 +1069,20 @@ export function voiceRows(taps, { mapping, nameById }) {
     }
   }
   return rows;
+}
+
+/** The picker option that reveals the name input. A typed name always CREATES a
+ * Person, even when one already has it (ADR-0021) — two people share a name more
+ * often than one is typed twice, and folding a Voice into a namesake puts their
+ * words under a stranger. */
+const NEW_PERSON = "__new__";
+
+/** Write `text` only when it differs — these run every tick, and assigning
+ * `textContent` replaces the node's children whether or not anything changed.
+ * @param {Element} el
+ * @param {string} text */
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
 }
 
 /** Paint one Voice row in place.
@@ -1101,7 +1113,7 @@ function paintVoiceRow(node, r, people, peopleSig) {
     sel.length = 0; // the <select> idiom for "drop every option" — no markup, no raw swap
     sel.add(new Option("— unmapped —", ""));
     for (const p of people) sel.add(new Option(p.name || p.id, p.id));
-    sel.add(new Option("+ new person…", "__new__"));
+    sel.add(new Option("+ new person…", NEW_PERSON));
   }
   sel.value = r.personId;
 }

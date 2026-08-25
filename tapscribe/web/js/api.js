@@ -135,7 +135,7 @@ export const sessionVoices = createResource(
   {
     holdKeyOf: (/** @type {string} */ session) => session,
     knownValue: (/** @type {string} */ session, /** @type {string} */ voicesSig) =>
-      voicesSig ? undefined : { session, voices_sig: "", identities: [] },
+      voicesSig ? undefined : { session, identities: [] },
   },
 );
 

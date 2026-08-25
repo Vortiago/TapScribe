@@ -20,6 +20,10 @@ FRAME_SHIFT = 160  # 10 ms
 FFT_SIZE = 512  # next power of two >= FRAME_LENGTH
 PREEMPH = 0.97
 LOW_FREQ = 20.0
+#: Frames per pass. Bounds the transient above at ~90 MB regardless of how long
+#: the clip is; smaller would trade FFT throughput for nothing.
+BLOCK_FRAMES = 8192
+
 #: Kaldi floors mel energy at FLT_EPSILON, not FLT_MIN: an empty band reads
 #: -15.94, and FLT_MIN's -87 would put 70 dB of noise in the low bins.
 LOG_FLOOR = float(np.finfo(np.float32).eps)
@@ -85,12 +89,20 @@ def fbank(samples: np.ndarray) -> np.ndarray:
         return np.zeros((0, NUM_BINS), dtype=np.float32)
 
     frames = _frames(np.asarray(samples, dtype=np.float64))
-    # Kaldi's order: DC offset, preemphasis (first sample against itself),
-    # window. Out-of-place: `_frames` returns an overlapping view.
-    frames = frames - frames.mean(axis=1, keepdims=True)
-    frames[:, 1:] -= PREEMPH * frames[:, :-1]
-    frames[:, 0] -= PREEMPH * frames[:, 0]
-    frames *= _WINDOW
+    out = np.empty((len(frames), NUM_BINS), dtype=np.float32)
+    # Every frame is independent, so this runs in blocks: doing the whole clip at
+    # once holds a (frames, 400) float64 copy AND its (frames, 257) complex
+    # spectrum, ~3 GB for an hour of audio, to produce a 115 MB result.
+    for lo in range(0, len(frames), BLOCK_FRAMES):
+        # A copy, not a view: `_frames` hands back overlapping strides.
+        block = np.array(frames[lo : lo + BLOCK_FRAMES])
+        # Kaldi's order: DC offset, preemphasis (first sample against itself),
+        # then the window.
+        block -= block.mean(axis=1, keepdims=True)
+        block[:, 1:] -= PREEMPH * block[:, :-1]
+        block[:, 0] -= PREEMPH * block[:, 0]
+        block *= _WINDOW
 
-    spectrum = np.abs(np.fft.rfft(frames, n=FFT_SIZE)) ** 2
-    return np.log(np.maximum(spectrum @ _BANKS.T, LOG_FLOOR)).astype(np.float32)
+        spectrum = np.abs(np.fft.rfft(block, n=FFT_SIZE)) ** 2
+        out[lo : lo + BLOCK_FRAMES] = np.log(np.maximum(spectrum @ _BANKS.T, LOG_FLOOR))
+    return out
