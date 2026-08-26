@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -57,9 +57,8 @@ def test_load_sets_hardware_only_device_and_backend_label(monkeypatch):
     dashboard can render them in separate columns without parsing strings."""
     # faster_whisper isn't necessarily installed in CI; inject a stub module.
     import sys
-    import types
 
-    fake_fw = types.ModuleType("faster_whisper")
+    fake_fw = ModuleType("faster_whisper")
 
     class _FakeWhisperModel:
         def __init__(self, *a, **kw):
