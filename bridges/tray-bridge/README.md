@@ -272,7 +272,7 @@ source of truth thereafter.
 On **macOS** the same fields live behind the menu-bar icon → **Settings…**,
 saved to `~/Library/Application Support/TapScribe/macos-tray-bridge.json` (its
 own on-disk contract, `TrayStores.SettingsFileName` again) with the tap token in
-the **login Keychain** rather than in the file at all. Four differences worth
+the **login Keychain** rather than in the file at all. Five differences worth
 knowing before you reach for one:
 
 - **`TAPSCRIBE_*` seeding does not reach a Finder-launched `.app`.** A bundle
@@ -287,6 +287,9 @@ knowing before you reach for one:
   Keychain treats each version as a different app. **Always Allow** settles it
   for that build only. A Developer ID signature is what fixes it, and the same
   thing stops macOS re-prompting for the microphone and system-audio grants.
+- **A meeting short a device shows a count beside the menu-bar icon**, where the
+  Windows tray has only the icon colour: a `NotifyIcon` has no text next to it.
+  Both change shape or colour, so neither is silent; the Mac says which.
 - **The meters are on-demand toggles, unlike the Windows dialog's always-on
   bars.** A system-audio meter is a second process tap, and reading one needs
   the System Audio Recording grant, so an eager meter would fire that prompt at
@@ -294,8 +297,11 @@ knowing before you reach for one:
   shared across devices on both platforms, which is parity rather than a gap.
 - **System audio needs a permission the Mac asks for at the first Start**, not
   at install and not when Settings opens. Dismiss the prompt and the meeting
-  records your microphone only, and says so. The grant is per signature, so an
-  ad-hoc build re-prompts on every update (ADR-0020).
+  records your microphone only: macOS hands over silence rather than an error, so
+  the tray cannot report it as a failure, and what you get is the menu bar's
+  count staying at 1 of 2 once you have spoken. Settings → **Permissions** is
+  where to check. The grant is per signature, so an ad-hoc build re-prompts on
+  every update (ADR-0020).
 
 - **Connection** — Recorder host (tolerant: a hostname, an IP, or a pasted
   `wss://host:9000/` all work; Port/TLS stay authoritative), port (default

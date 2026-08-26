@@ -180,15 +180,9 @@ internal sealed class SettingsWindow : IDisposable
         _systemSensitivity.Activated += OnSystemSensitivity;
         (_systemMeterOn, _systemMeter, _systemMeterNote) = MeterRow(content, "Show output level");
         _systemMeterOn.Activated += OnSystemMeterToggled;
-        // The one thing about this row an operator cannot discover by looking: the grant is asked
-        // for at the first Start, so a meeting that records one speaker is usually a dismissed
-        // prompt. Said here because the recovery is in System Settings, not this dialog.
-        Note(
-            content,
-            "macOS asks for permission the first time a meeting records system audio. If only "
-            + "your own voice is recorded, allow TapScribe under System Settings \u203a Privacy "
-            + "& Security \u203a Screen & System Audio Recording.",
-            lines: 3);
+        // The grant this row needs is the Permissions panel's to explain: it says the same thing
+        // with the button that gets there, and two prose answers in one dialog spelled the pane
+        // two different ways.
 
         Section(content, "Devices");
         // Follow-default is the norm and needs no row: the two sections above already say

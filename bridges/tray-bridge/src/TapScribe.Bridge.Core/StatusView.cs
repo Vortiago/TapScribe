@@ -59,18 +59,28 @@ public enum TrayIcon
 /// operator sees while they are on the call. An exception report, not a readout.</param>
 public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, string Badge = "")
 {
+    // Something has been heard and something else has not.
+    private static bool Unheard(TrayStatus.Streaming s) => s.Connected > 0 && s.Connected < s.Total;
+
     public static StatusView For(TrayStatus status)
     {
         ArgumentNullException.ThrowIfNull(status);
         return status switch
         {
-            // Short a device: the meeting is running and is not recording what the operator asked
-            // for, so both the glyph and the badge change and shape and number each carry it.
+            // One device heard and another not. Connected counts devices that have STREAMED, and
+            // a tap opens only when the level gate opens on speech, so 0-of-N is every meeting's
+            // first second rather than a fault: the badge waits until something HAS been heard,
+            // or it would cry wolf on every healthy start.
+            //
+            // This is the never-heard case specifically, which is what a dismissed microphone
+            // grant looks like: the OS hands over silence rather than an error, so nothing ever
+            // reaches the tally's Dropped path. A device that drops after streaming becomes
+            // TrayStatus.Error, naming it, and wears the Error glyph instead.
             TrayStatus.Streaming s => new StatusView(
                 $"● Streaming — {s.Connected}/{s.Total} devices",
-                s.Connected < s.Total ? TrayIcon.Degraded : TrayIcon.Streaming,
+                Unheard(s) ? TrayIcon.Degraded : TrayIcon.Streaming,
                 $"TapScribe — recording {s.Connected} of {s.Total} device(s)",
-                s.Connected < s.Total ? $"{s.Connected}/{s.Total}" : ""),
+                Unheard(s) ? $"{s.Connected}/{s.Total}" : ""),
             TrayStatus.Error e => new StatusView(
                 $"⚠ {e.Reason}",
                 TrayIcon.Error,

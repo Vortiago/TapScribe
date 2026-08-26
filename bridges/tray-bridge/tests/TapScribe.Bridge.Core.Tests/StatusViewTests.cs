@@ -11,11 +11,25 @@ namespace TapScribe.Bridge.Core.Tests;
 public class StatusViewTests
 {
     [Fact]
+    public void For_AMeetingWhereNobodyHasSpokenYet_BadgesNothing()
+    {
+        // Connected counts devices that have STREAMED, and a tap opens only when the level gate
+        // opens on speech (TapSession.OpenUtterance). So every meeting begins at 0-of-N, and a
+        // badge there would fire the alarm on second one of every healthy meeting, which is how
+        // an operator learns to ignore it before it ever means anything.
+        StatusView view = StatusView.For(new TrayStatus.Streaming(Connected: 0, Total: 2));
+
+        Assert.Equal("", view.Badge);
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+    }
+
+    [Fact]
     public void For_AMeetingMissingADevice_BadgesTheCount_AndWarns()
     {
-        // The failure an operator actually pays for: a meeting recording one side of a call
-        // while they believe it is recording both. Until now the only trace outside the menu was
-        // a glyph identical to the healthy one, so nobody saw it until the transcript.
+        // One side has been heard and the other has not: the shape of a microphone whose grant
+        // was dismissed, which delivers silence rather than an error and so never reaches the
+        // tally's Dropped path at all. A device that drops AFTER streaming is TrayStatus.Error
+        // instead, with a message naming it, so this arm is exactly the never-heard case.
         StatusView view = StatusView.For(new TrayStatus.Streaming(Connected: 1, Total: 2));
 
         Assert.Equal("1/2", view.Badge);

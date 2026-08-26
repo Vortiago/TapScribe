@@ -168,6 +168,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     {
         ArgumentNullException.ThrowIfNull(status);
         _statusItem.Text = status.Header;
+        // StatusView.Badge is deliberately unread here. A NotifyIcon has no text beside its icon
+        // to put it in, which is the surface the macOS menu bar offers and this one does not; the
+        // degraded state arrives as its own icon colour instead, and the count is in the header
+        // and the tooltip. Empty on every healthy meeting either way.
         _indicator.Show(status);
     }
 
