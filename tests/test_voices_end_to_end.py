@@ -10,13 +10,16 @@ the far end, so a mis-wired link fails here even when each unit still passes.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from wav_builders import seed_wav  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
 from tapscribe import sessions, voices
+from tapscribe.app import app, get_recorder
 from tapscribe.name_resolution import attach_people
 from tapscribe.roster import record_occurrence
 from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_TRANSCRIPT_JSON
@@ -25,6 +28,7 @@ SESSION = "20260101T010000Z"
 IDENTITY = "tray-system-audio-0011223344"
 SLUG = "sysaudio"
 PERSON = "p_voicetest"
+SURVIVOR = "p_survivor"
 
 
 @pytest.fixture(autouse=True)
@@ -74,14 +78,20 @@ def _seed(root: Path, *, run_id: str, mapped_run: str | None) -> Path:
     return sd
 
 
+def _resolved_names() -> dict[str, str]:
+    """The session's speaker-key → display-name map, off disk. Same resolution
+    the transcript pane, the exports and the summarizer input cross."""
+    listing = sessions.gather_sessions(current_session=SESSION)
+    attach_people(listing, live_identities=set())
+    return next(s for s in listing if s["session"] == SESSION)["names"]
+
+
 def _names(root: Path) -> dict[str, str]:
     (root / "people.json").write_text(
         json.dumps({"people": [{"id": PERSON, "name": "Alice Andersen", "identities": []}]}),
         encoding="utf-8",
     )
-    listing = sessions.gather_sessions(current_session=SESSION)
-    attach_people(listing, live_identities=set())
-    return next(s for s in listing if s["session"] == SESSION)["names"]
+    return _resolved_names()
 
 
 def test_a_mapped_voice_reaches_api_state_as_its_person(rec_root: Path) -> None:
@@ -123,3 +133,87 @@ def test_voice_keys_never_mint_a_person_across_a_poll(rec_root: Path) -> None:
     people = attach_people(listing, live_identities=set())
 
     assert not [p for p in people if "#" in "".join(p.get("identities") or [])]
+
+
+# ---------------------------------------------------------------------------
+# Removing a Person, over the real HTTP surface (#445). The registry is a leaf
+# that knows nothing about sessions, so a fix wired only there still leaves the
+# operator's merge silently breaking every Voice the absorbed id named.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client(recorder_under_test) -> Iterator[TestClient]:
+    """The People mutations are routes; drive them as one. Seeding reads
+    `_config.RECORDINGS_DIR` inside the test — `recorder_under_test` owns it
+    here, not `rec_root`."""
+    app.dependency_overrides[get_recorder] = lambda: recorder_under_test
+    app.state.recorder = recorder_under_test
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+def _write_people(root: Path, rows: list[dict]) -> None:
+    (root / "people.json").write_text(json.dumps({"people": rows}), encoding="utf-8")
+
+
+def _two_alices(root: Path) -> None:
+    """The duplicate the operator merges away: `PERSON` was minted by typing a
+    name onto a Voice and owns no Identity, `SURVIVOR` is the same human already
+    tapped in under their own. Different names, so the assertion cannot pass on
+    the absorbed row's name."""
+    _write_people(
+        root,
+        [
+            {"id": PERSON, "name": "Alice (dup)", "identities": []},
+            {"id": SURVIVOR, "name": "Alice Andersen", "identities": ["alice-laptop"]},
+        ],
+    )
+
+
+def test_merging_a_voice_mapped_person_keeps_the_voice_named(client: TestClient) -> None:
+    """The gate. Unrepointed, `resolve_session_names` finds no Person for the
+    dead id and the Voice reverts to `Speaker A` — asserted through the
+    resolution the transcript crosses, not by reading session-meta back."""
+    root = _config.RECORDINGS_DIR
+    _seed(root, run_id="r1", mapped_run="r1")
+    _two_alices(root)
+    # Resolve once first: the mapping is live, and the poll now holds the
+    # pre-merge meta in `_SESSION_JSON_CACHE` — the state a running dashboard is
+    # always in when the operator hits merge.
+    assert _resolved_names()[f"{SLUG}#A"] == "Alice (dup)"
+
+    r = client.post("/api/people/merge", json={"survivor": SURVIVOR, "absorbed": PERSON})
+
+    assert r.status_code == 200
+    assert _resolved_names()[f"{SLUG}#A"] == "Alice Andersen"
+
+
+def test_merging_reattributes_the_voice_mapped_session_to_the_survivor(client: TestClient) -> None:
+    """`_sessions_by_voice_pointer` reads the same pointer, so the People view
+    counts the meeting for the survivor instead of emitting a dead id."""
+    root = _config.RECORDINGS_DIR
+    _seed(root, run_id="r1", mapped_run="r1")
+    _two_alices(root)
+
+    rows = client.post("/api/people/merge", json={"survivor": SURVIVOR, "absorbed": PERSON}).json()["people"]
+
+    assert SESSION in next(p for p in rows if p["id"] == SURVIVOR)["sessions"]
+    assert not [p for p in rows if p["id"] == PERSON]
+
+
+def test_detaching_an_identity_leaves_the_voice_mapping_named(client: TestClient) -> None:
+    """Detach needs no mirror walk: the Person survives under the same id, so
+    the pointer stays valid. Repointing on detach would be the bug."""
+    root = _config.RECORDINGS_DIR
+    _seed(root, run_id="r1", mapped_run="r1")
+    _write_people(
+        root,
+        [{"id": PERSON, "name": "Alice Andersen", "identities": ["alice-laptop", "alice-office"]}],
+    )
+
+    r = client.post(f"/api/people/{PERSON}/detach", json={"identity": "alice-office"})
+
+    assert r.status_code == 200
+    assert _resolved_names()[f"{SLUG}#A"] == "Alice Andersen"

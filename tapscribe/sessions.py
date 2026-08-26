@@ -210,6 +210,43 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     )
 
 
+def repoint_voice_person(old_person_id: str, new_person_id: str) -> list[str]:
+    """Rewrite every session's Voice→Person map from `old_person_id` to
+    `new_person_id`. Returns the sessions touched, in walk order.
+
+    A Voice-mapped Person owns no Identity (ADR-0021), so
+    `voices[key].person_id` is the only route to them: remove that Person
+    without this walk and every Voice it named reverts to `Speaker A` — pane,
+    exports and summarizer input alike. `POST /api/people/merge` runs it before
+    the registry write.
+
+    Only a session whose map names the old id is written. The read goes off the
+    walked path, not `read_session_meta`, so one junk directory name can't abort
+    the walk; the write still crosses `session_paths` via `write_session_meta`.
+    """
+    touched: list[str] = []
+    for sd in sorted(config.RECORDINGS_DIR.glob("*")):
+        if not sd.is_dir():
+            continue
+        raw = _read_json_or_none(sd / FILENAME_META_JSON)
+        mapping = _coerce_voices(raw.get("voices") if isinstance(raw, dict) else None)
+        if not any(entry["person_id"] == old_person_id for entry in mapping.values()):
+            continue
+        write_session_meta(
+            sd.name,
+            {
+                "voices": {
+                    key: {**entry, "person_id": new_person_id}
+                    if entry["person_id"] == old_person_id
+                    else entry
+                    for key, entry in mapping.items()
+                }
+            },
+        )
+        touched.append(sd.name)
+    return touched
+
+
 def _resolution_inputs(session: str) -> dict[str, Any] | None:
     """The reads both name-resolution wrappers below need, done once and in one
     place so they cannot drift on WHICH inputs they pass (a wrapper that forgets

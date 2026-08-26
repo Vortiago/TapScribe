@@ -8,10 +8,12 @@
 
 The registry view also rides on `/api/state` (`people`); these routes are the
 explicit fetch plus the mutations. people.json is mutated ONLY here and in the
-/api/state sync, both on the event loop, so they cannot race. A person_id /
-identity from the body is validated against the loaded registry (KeyError → 404)
-before anything is written; nothing here builds a filesystem path from request
-input (people.json is a fixed path).
+/api/state sync, both on the event loop, so they cannot race. The merge's walk
+over every session's `voices` map runs on the loop for the same reason, and
+because it shares the session-meta read-modify-write with the voice-mapping PUT
+below. A person_id / identity from the body is validated against the loaded
+registry (KeyError → 404) before anything is written; nothing here builds a
+filesystem path from request input (people.json is a fixed path).
 
 The Voice mapping sits here despite its `/api/sessions/*` prefix because mapping
 by NAME creates a Person — a third people.json writer would break the invariant
@@ -37,7 +39,12 @@ from ..name_resolution import attach_people
 from ..people import PeopleRegistry
 from ..recorder import Recorder
 from ..session_paths import resolve_session_dir
-from ..sessions import gather_sessions, read_session_meta, write_session_meta
+from ..sessions import (
+    gather_sessions,
+    read_session_meta,
+    repoint_voice_person,
+    write_session_meta,
+)
 from ..text import split_voice_key
 from ..voices import read_voices
 from .body import json_body, require_json_object_body, require_str
@@ -93,6 +100,19 @@ async def api_people_merge(req: Request, recorder: Recorder = Depends(get_record
         raise HTTPException(400, "survivor and absorbed person ids are required")
     registry = PeopleRegistry.load()
     registry.merge(survivor, absorbed)
+    # Merge is the one verb that REMOVES a Person, and a Voice-mapped Person owns
+    # no Identity: `voices[key].person_id` is the only route to them (ADR-0021).
+    # Unrepointed, every Voice it named reverts to `Speaker A`. `detach` needs no
+    # mirror — same Person, same id.
+    #
+    # Before `save()`: a half-done walk points at a Person that still exists.
+    # After, it strands pointers at one already gone.
+    #
+    # Synchronous, never `asyncio.to_thread`: an await between `load()` and
+    # `save()` breaks the serialisation both people.json writers rely on, and
+    # lets the voice-mapping PUT's session-meta read-modify-write interleave.
+    # `prune_empty_sessions` is on the loop for the same reason.
+    repoint_voice_person(absorbed, survivor)
     registry.save()
     return {"ok": True, "people": await _people_view(recorder)}
 

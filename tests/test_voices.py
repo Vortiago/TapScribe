@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from tapscribe import voices
-from tapscribe.sessions import read_session_meta, write_session_meta
+from tapscribe import config, voices
+from tapscribe.session_paths import FILENAME_META_JSON
+from tapscribe.sessions import read_session_meta, repoint_voice_person, write_session_meta
 
 SYSAUDIO = "sysaudio-tray-9f2c1b"
 
@@ -158,6 +159,86 @@ def test_editing_another_meta_field_preserves_the_voices_map(recorder_under_test
     meta = read_session_meta("sv3")
     assert meta["label"] == "Renamed"
     assert meta["voices"] == {"tray-sys#A": {"person_id": "p1", "run_id": "r1"}}
+
+
+# ---------------------------------------------------------------------------
+# `repoint_voice_person` — the cross-session half of removing a Person (#445).
+# A Voice-mapped Person owns no Identity, so the pointer is the only route to
+# them; the walk keeps merge from stranding it.
+# ---------------------------------------------------------------------------
+
+
+def test_repoint_moves_every_session_that_named_the_old_person(recorder_under_test) -> None:
+    write_session_meta("rp1", {"voices": {"tray-sys#A": {"person_id": "p_old", "run_id": "r1"}}})
+    write_session_meta("rp2", {"voices": {"laptop#B": {"person_id": "p_old", "run_id": "r2"}}})
+
+    assert repoint_voice_person("p_old", "p_new") == ["rp1", "rp2"]
+    assert read_session_meta("rp1")["voices"]["tray-sys#A"]["person_id"] == "p_new"
+    assert read_session_meta("rp2")["voices"]["laptop#B"]["person_id"] == "p_new"
+
+
+def test_repoint_keeps_the_run_stamp_and_the_pointers_it_does_not_name(recorder_under_test) -> None:
+    """The stamp is what makes a mapping apply (ADR-0021): drop it on the
+    rewrite and the Voice the repoint just saved goes unnamed anyway. A sibling
+    Voice mapped to somebody else is not this merge's business."""
+    write_session_meta(
+        "rp3",
+        {
+            "voices": {
+                "tray-sys#A": {"person_id": "p_old", "run_id": "r1"},
+                "tray-sys#B": {"person_id": "p_other", "run_id": "r1"},
+            }
+        },
+    )
+
+    assert repoint_voice_person("p_old", "p_new") == ["rp3"]
+    assert read_session_meta("rp3")["voices"] == {
+        "tray-sys#A": {"person_id": "p_new", "run_id": "r1"},
+        "tray-sys#B": {"person_id": "p_other", "run_id": "r1"},
+    }
+
+
+def test_repoint_preserves_the_rest_of_the_meta_it_rewrites(recorder_under_test) -> None:
+    """The walk re-emits the whole meta, so every operator-owned field on a
+    touched session rides along. A repoint that ate the label would be a worse
+    bug than the one it fixes."""
+    write_session_meta(
+        "rp4",
+        {
+            "label": "Standup",
+            "aliases": {"tray-sys#A": "Chair"},
+            "prompt": "meeting notes",
+            "languages": ["no"],
+            "voices": {"tray-sys#A": {"person_id": "p_old", "run_id": "r1"}},
+        },
+    )
+
+    repoint_voice_person("p_old", "p_new")
+
+    meta = read_session_meta("rp4")
+    assert meta["label"] == "Standup"
+    assert meta["aliases"] == {"tray-sys#A": "Chair"}
+    assert meta["prompt"] == "meeting notes"
+    assert meta["languages"] == ["no"]
+    assert meta["voices"]["tray-sys#A"]["person_id"] == "p_new"
+
+
+def test_repoint_writes_nothing_for_a_session_it_does_not_name(recorder_under_test) -> None:
+    """A merge must not rewrite the archive: no `voices` map, or a map naming
+    somebody else, means no write."""
+    write_session_meta("rp5", {"label": "No voices here"})
+    write_session_meta("rp6", {"voices": {"tray-sys#A": {"person_id": "p_other", "run_id": "r1"}}})
+    root = config.RECORDINGS_DIR
+    before = {s: (root / s / FILENAME_META_JSON).stat().st_ino for s in ("rp5", "rp6")}
+
+    assert repoint_voice_person("p_old", "p_new") == []
+    # `atomic_write_text` replaces the file, so a write is visible as a new
+    # inode even when the bytes are unchanged.
+    assert {s: (root / s / FILENAME_META_JSON).stat().st_ino for s in ("rp5", "rp6")} == before
+
+
+def test_repoint_leaves_an_empty_archive_alone(recorder_under_test) -> None:
+    assert repoint_voice_person("p_old", "p_new") == []
 
 
 # ---------------------------------------------------------------------------
