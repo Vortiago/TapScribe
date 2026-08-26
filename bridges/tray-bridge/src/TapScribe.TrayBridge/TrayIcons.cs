@@ -17,6 +17,7 @@ internal sealed class TrayIcons : IDisposable
     {
         [TrayIcon.Idle] = Dot(Color.Gray),
         [TrayIcon.Streaming] = Dot(Color.LimeGreen),
+        [TrayIcon.Degraded] = Dot(Color.Goldenrod),
         [TrayIcon.Error] = Dot(Color.Firebrick),
     };
 

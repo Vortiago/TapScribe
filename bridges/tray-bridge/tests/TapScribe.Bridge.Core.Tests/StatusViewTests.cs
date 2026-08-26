@@ -11,13 +11,57 @@ namespace TapScribe.Bridge.Core.Tests;
 public class StatusViewTests
 {
     [Fact]
-    public void For_Streaming_UsesStreamingIcon_AndShowsTheDeviceCount()
+    public void For_AMeetingMissingADevice_BadgesTheCount_AndWarns()
     {
+        // The failure an operator actually pays for: a meeting recording one side of a call
+        // while they believe it is recording both. Until now the only trace outside the menu was
+        // a glyph identical to the healthy one, so nobody saw it until the transcript.
         StatusView view = StatusView.For(new TrayStatus.Streaming(Connected: 1, Total: 2));
 
+        Assert.Equal("1/2", view.Badge);
+        Assert.Equal(TrayIcon.Degraded, view.Icon);
+    }
+
+    [Fact]
+    public void For_AMeetingWithEveryDeviceStreaming_BadgesNothing()
+    {
+        // The badge is an exception report, not a readout. A number sitting in the menu bar for
+        // every healthy meeting is one an operator stops reading, which is how the degraded case
+        // would go unnoticed again.
+        StatusView view = StatusView.For(new TrayStatus.Streaming(Connected: 2, Total: 2));
+
+        Assert.Equal("", view.Badge);
         Assert.Equal(TrayIcon.Streaming, view.Icon);
-        Assert.Contains("1", view.Header, StringComparison.Ordinal);
-        Assert.Contains("2", view.Header, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void For_EveryOtherStatus_BadgesNothing()
+    {
+        // Only a live meeting can be short a device; anything else with a badge would be the
+        // shell rendering a number about nothing.
+        TrayStatus[] rest =
+        [
+            new TrayStatus.Idle(),
+            new TrayStatus.Starting(),
+            new TrayStatus.Ending(),
+            new TrayStatus.Processing("Transcribing"),
+            new TrayStatus.SummaryReady(),
+            new TrayStatus.Error("nope"),
+            new TrayStatus.PipelineFailed("nope"),
+        ];
+
+        Assert.All(rest, status => Assert.Equal("", StatusView.For(status).Badge));
+    }
+
+    [Fact]
+    public void For_Streaming_UsesStreamingIcon_AndShowsTheDeviceCount()
+    {
+        // A HEALTHY pair: this is about the header carrying the count, and 1-of-2 is now the
+        // degraded case with a glyph of its own.
+        StatusView view = StatusView.For(new TrayStatus.Streaming(Connected: 2, Total: 2));
+
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+        Assert.Contains("2/2", view.Header, StringComparison.Ordinal);
     }
 
     [Fact]

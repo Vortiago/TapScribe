@@ -23,6 +23,7 @@ internal static class StatusSymbols
     {
         TrayIcon.Idle => new StatusSymbol("waveform", "◦"),
         TrayIcon.Streaming => new StatusSymbol("waveform.circle.fill", "●"),
+        TrayIcon.Degraded => new StatusSymbol("waveform.badge.exclamationmark", "!"),
         TrayIcon.Error => new StatusSymbol("exclamationmark.triangle.fill", "⚠"),
         // A state added in Core reaches here with no glyph of its own. Answering with the
         // idle one would show a Bridge at rest through a failure, so this refuses instead:

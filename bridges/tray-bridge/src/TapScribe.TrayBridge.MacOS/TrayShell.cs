@@ -144,7 +144,9 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             // light or dark menu bar and a highlighted item without being redrawn.
             image.Template = true;
             button.Image = image;
-            button.Title = "";
+            // Beside the glyph, and usually empty: this is the only part of a status an operator
+            // sees without opening the menu, which is why a half-recorded meeting went unnoticed.
+            button.Title = status.Badge;
         }
         else
         {

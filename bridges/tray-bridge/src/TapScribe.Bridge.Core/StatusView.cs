@@ -40,22 +40,39 @@ public enum TrayIcon
 {
     Idle,
     Streaming,
+
+    /// <summary>Streaming, but short a device. Its own key rather than reusing
+    /// <see cref="Error"/>, since the meeting IS running and must not read as stopped, and rather
+    /// than <see cref="Streaming"/>, which is what made a half-recorded meeting invisible.</summary>
+    Degraded,
     Error,
 }
 
 /// <summary>
-/// The view-model the NotifyIcon applies: a context-menu <see cref="Header"/> line, an
-/// <see cref="Icon"/> key, and a hover <see cref="Tooltip"/>. Built purely from a
-/// <see cref="TrayStatus"/> by <see cref="For"/>, so the status presentation is
-/// unit-tested without WinForms.
+/// The view-model a tray applies: a menu <see cref="Header"/> line, an <see cref="Icon"/> key,
+/// a hover <see cref="Tooltip"/>, and a <see cref="Badge"/> for the shell to put BESIDE the
+/// glyph. Built purely from a <see cref="TrayStatus"/> by <see cref="For"/>, so the status
+/// presentation is unit-tested without WinForms or AppKit.
 /// </summary>
-public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip)
+/// <param name="Badge">A few characters shown next to the menu-bar glyph, or "" for nothing to
+/// say. It exists because the header is behind a click and the glyph is easy to miss: a meeting
+/// recording one side of a call looked exactly like a healthy one until the transcript arrived.
+/// An exception report, not a readout, since a number present on every healthy meeting is one
+/// nobody reads.</param>
+public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, string Badge = "")
 {
     public static StatusView For(TrayStatus status)
     {
         ArgumentNullException.ThrowIfNull(status);
         return status switch
         {
+            // Short a device: the meeting is running, and it is not recording what the operator
+            // asked for. Both the glyph and the badge change, so shape and number each carry it.
+            TrayStatus.Streaming s when s.Connected < s.Total => new StatusView(
+                $"● Streaming — {s.Connected}/{s.Total} devices",
+                TrayIcon.Degraded,
+                $"TapScribe — recording {s.Connected} of {s.Total} device(s)",
+                $"{s.Connected}/{s.Total}"),
             TrayStatus.Streaming s => new StatusView(
                 $"● Streaming — {s.Connected}/{s.Total} devices",
                 TrayIcon.Streaming,
