@@ -71,9 +71,9 @@ internal sealed class MeterProbe(
         }
         catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
         {
-            // The seam's whole set, named once in Core: listing it here listed two of four, and
-            // the rest escaped an NSButton handler, which on AppKit ends the tray. Not a
-            // catch-all: that would report a bug as a bar that will not move.
+            // The seam's whole set, named once in Core: a subset lets the rest escape an
+            // NSButton handler, which on AppKit ends the tray. Not a catch-all: that would
+            // report a bug as a bar that will not move.
             Error = ex.Message;
             Stop();
         }

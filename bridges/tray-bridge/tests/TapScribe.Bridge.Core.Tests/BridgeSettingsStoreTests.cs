@@ -244,6 +244,23 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Null(keychain.Secret);
     }
 
+    [Fact]
+    public void Save_AfterTheOperatorClearsATokenEnteredThisSession_DeletesTheStoredSecret()
+    {
+        // The case with no Load between the two Saves, which is every operator's: the shell loads
+        // once at launch and the dialog edits the settings in memory thereafter. A token entered
+        // and then blanked leaves the store's last-seen value empty on both sides of the guard, so
+        // the delete was skipped and the next launch read the revoked token back out.
+        var keychain = new RefusingKeychain { Refuse = false };
+        BridgeSettingsStore store = Store(keychain);
+        store.Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        store.Save(new BridgeSettings { Host = "rec.example", Token = "" });
+
+        Assert.Null(keychain.Secret);
+        Assert.Equal("", store.Load().Token);
+    }
+
     /// <summary>An out-of-band secret store that can refuse a read the way a locked Keychain
     /// does: "" rather than a throw. <see cref="Secret"/> is the item itself, so a test can ask
     /// whether a Save destroyed it.</summary>

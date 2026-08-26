@@ -90,10 +90,12 @@ public class SystemAudioTapSmokeTests
 
     private static Process Play(string wav)
     {
+        // stderr is left on the test runner's, not redirected: nothing here reads a pipe, and an
+        // unread one blocks the player once its buffer fills, which would wedge the smoke rather
+        // than fail it. Inherited, afplay's complaint is in the run's output where it is useful.
         Process? afplay = Process.Start(new ProcessStartInfo("/usr/bin/afplay", [wav])
         {
             UseShellExecute = false,
-            RedirectStandardError = true,
         });
         Assert.True(afplay is not null, "afplay would not start, so nothing was playing to tap");
         // The first buffers land once CoreAudio has the stream running; starting the capture into

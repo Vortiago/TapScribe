@@ -31,9 +31,9 @@ namespace TapScribe.Bridge.MacOS;
 /// the realtime path pays nothing.
 ///
 /// The macos platform attribute is on the TYPE, so "never touch a native symbol off a Mac" is
-/// decided once, where this is CONSTRUCTED, and CA1416 proves it at compile time. Per-method guards
-/// answered in three different shapes, ran on no lane, and the one ListDevices used (an empty list)
-/// told the enumerator "no endpoints" when the truth was "this host cannot be asked".
+/// decided once, where this is CONSTRUCTED, and CA1416 proves it at compile time. A per-method guard
+/// runs on no lane and has to invent an answer: an empty list from ListDevices tells the enumerator
+/// "no endpoints" when the truth is "this host cannot be asked".
 /// </summary>
 [SupportedOSPlatform("macos")]
 public sealed unsafe partial class CoreAudioHal : ICoreAudioHal

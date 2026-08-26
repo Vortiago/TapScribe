@@ -44,10 +44,9 @@ ditto "$app" "$stage/$(basename "$app")"
 # with a stray copy in ~/Downloads would have the update land on it while
 # /Applications stayed on the old version.
 #
-# It is not a hypothetical: it broke CI's own check, and only intermittently,
-# because whether the freshly built bundle in the workspace has been registered
-# yet is a race. `pkgbuild --component` cannot turn it off, which is the only
-# reason this goes the longer --root route.
+# Whether the volume holds a registered copy is a race, so the symptom is
+# intermittent. `pkgbuild --component` cannot turn the flag off, which is the
+# only reason this goes the longer --root route.
 pkgbuild --analyze --root "$stage" "$component" >/dev/null
 plutil -replace 0.BundleIsRelocatable -bool NO "$component"
 

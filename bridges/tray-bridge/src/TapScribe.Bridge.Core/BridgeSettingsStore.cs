@@ -34,14 +34,16 @@ public sealed class BridgeSettingsStore(
         return fallbackIdentity;
     }
 
+    // The token this store last saw at rest: what Load read, or what Save wrote. Save compares
+    // against it to tell "the operator cleared the field" from "this platform would not tell us
+    // what it was". Kept current by BOTH, since a token entered and then blanked in one session
+    // never passes through a Load.
+    private string _tokenAtRest = "";
+
     /// <summary>
     /// Load the settings. A missing, corrupt, or unreadable file falls back to
     /// environment-seeded defaults rather than throwing, so the app always launches.
     /// </summary>
-    // The token the last Load found at rest, so Save can tell "the operator cleared it" from
-    // "this platform would not tell us what it was".
-    private string _loadedToken = "";
-
     public BridgeSettings Load()
     {
         try
@@ -53,7 +55,7 @@ public sealed class BridgeSettingsStore(
                 if (loaded is not null)
                 {
                     loaded.Token = ReadToken(loaded.ProtectedToken);
-                    _loadedToken = loaded.Token;
+                    _tokenAtRest = loaded.Token;
                     // The file has no such key and never will: it is the shell's, not the
                     // operator's. Stamped on the way out so nothing downstream can meet a
                     // settings object carrying another platform's name.
@@ -86,8 +88,16 @@ public sealed class BridgeSettingsStore(
         // signature), and saving anything at all afterwards would then destroy a working token
         // nobody asked to revoke. Skipping also leaves ProtectedToken as loaded, so the Windows
         // blob in the file survives the same way.
-        if (!string.IsNullOrEmpty(settings.Token) || !string.IsNullOrEmpty(_loadedToken))
+        if (!string.IsNullOrEmpty(settings.Token) || !string.IsNullOrEmpty(_tokenAtRest))
+        {
             settings.ProtectedToken = tokens.Write(settings.Token);
+            // What is at rest now, so the NEXT Save can read this one as the operator's word.
+            // Without it a token entered and then blanked in one session never reaches Write("")
+            // - nothing loaded it, so both halves of the guard are empty - and the item outlives
+            // the revocation, to be read back on the next launch.
+            _tokenAtRest = settings.Token;
+        }
+
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         using FileStream stream = File.Create(FilePath);
         JsonSerializer.Serialize(stream, settings, new JsonSerializerOptions { WriteIndented = true });

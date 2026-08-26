@@ -58,4 +58,19 @@ public class SettingsFieldsTests
         Assert.Equal(1, SettingsFields.Int("1", fallback: 8001, min: 1, max: 65535));
         Assert.Equal(65535, SettingsFields.Int("65535", fallback: 8001, min: 1, max: 65535));
     }
+
+    [Fact]
+    public void TryInt_SeparatesAUsableEntryFromOneThatFellBack()
+    {
+        // The distinction the window acts on: it snaps the field back to the value in force and
+        // refuses to close, so an entry that was DISCARDED is not reported by a closing dialog as
+        // one that was saved. A fallback that happens to equal the typed number is why this is
+        // the same read as Int rather than a comparison after it.
+        Assert.True(SettingsFields.TryInt("8001", min: 1, max: 65535, out int usable));
+        Assert.Equal(8001, usable);
+
+        Assert.False(SettingsFields.TryInt("8,001", min: 1, max: 65535, out _));
+        Assert.False(SettingsFields.TryInt("0", min: 1, max: 65535, out _));
+        Assert.False(SettingsFields.TryInt(null, min: 1, max: 65535, out _));
+    }
 }

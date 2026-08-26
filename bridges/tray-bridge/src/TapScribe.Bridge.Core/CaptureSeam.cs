@@ -7,8 +7,8 @@ namespace TapScribe.Bridge.Core;
 ///
 /// <see cref="IAudioDeviceEnumerator.Open"/> documents four exceptions; every caller that
 /// survives an unopenable device filters on them. Listing them per call site is how a caller
-/// ends up listing a subset, which is what happened. A catch-all is the wrong repair: it also
-/// swallows what no device can produce, hiding a bug behind an operator-facing message.
+/// ends up listing a subset. A catch-all is the wrong repair: it also swallows what no device
+/// can produce, hiding a bug behind an operator-facing message.
 /// </summary>
 public static class CaptureSeam
 {

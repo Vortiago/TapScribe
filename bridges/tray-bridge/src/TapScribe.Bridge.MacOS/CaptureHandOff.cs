@@ -29,9 +29,9 @@ internal sealed class CaptureHandOff
     private const int RingSlots = 8;
 
     // One device buffer, not one second: CoreAudio's period is 512 frames typically and 4096 at the
-    // ceiling, so this is double the largest expected. Sizing by SampleRate instead put every slot
-    // over the 85 KB LOH threshold, 3 MB per capture at 48 kHz stereo and 98 MB on a 64-channel
-    // aggregate, pinned for the meeting. Pump slack is RingSlots, not slot size.
+    // ceiling, so this is double the largest expected. A second's worth would put every slot over
+    // the 85 KB LOH threshold and pin megabytes for the meeting. Pump slack is RingSlots, not slot
+    // size.
     private const int MaxBufferFrames = 8192;
 
     /// <summary>How long <see cref="Stop"/> waits for the pump before abandoning it. Sized like its

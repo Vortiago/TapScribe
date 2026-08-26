@@ -84,6 +84,11 @@ internal sealed class SettingsWindow : IDisposable
     private nfloat _lastRowTop;
     private bool _disposed;
 
+    // Set by the last Collect when a numeric field held something it could not use: what to tell
+    // the operator, or "" when everything was usable. Save reads it to decide whether the window
+    // may close, and shows it.
+    private string _rejectedAnEntry = "";
+
     /// <summary>Build the window over the settings in force.</summary>
     /// <param name="current">What the runtime is running on, which is what the window seeds
     /// itself from: an edit that failed to reach disk still governs the session.</param>
@@ -299,7 +304,23 @@ internal sealed class SettingsWindow : IDisposable
 
     private void Save()
     {
-        _apply(Collect());
+        BridgeSettings edited = Collect();
+
+        // A field whose entry was unusable has just snapped back to the value in force, and the
+        // window stays open. Closing over it would be the dialog telling them an entry it
+        // discarded was accepted, which is the same lie clamping to the nearest legal value would
+        // be (see SettingsFields).
+        //
+        // Said in words, not left to the field changing under them: the snapped-back value parses,
+        // so a second click on Save saves the OLD one and closes, which is the discarded entry
+        // reported as a success one click later.
+        if (_rejectedAnEntry.Length != 0)
+        {
+            _testStatus.StringValue = _rejectedAnEntry;
+            return;
+        }
+
+        _apply(edited);
         Close();
     }
 
@@ -308,6 +329,7 @@ internal sealed class SettingsWindow : IDisposable
     // which gate a device keeps.
     private BridgeSettings Collect()
     {
+        _rejectedAnEntry = "";
         // End the edit first. A field being edited keeps its text in the window's field editor
         // and hands StringValue the LAST COMMITTED value, and clicking a button does not move
         // first responder off it. So typing a host and clicking Save with the mouse would save
@@ -315,8 +337,7 @@ internal sealed class SettingsWindow : IDisposable
         _window.MakeFirstResponder(null);
 
         _draft.Host = _host.StringValue.Trim();
-        _draft.Port = SettingsFields.Int(
-            _port.StringValue, _draft.Port, min: SettingsBounds.PortMin, max: SettingsBounds.PortMax);
+        _draft.Port = Number(_port, "Port", _draft.Port, min: SettingsBounds.PortMin, max: SettingsBounds.PortMax);
         _draft.Token = _token.StringValue;
         _draft.Tls = IsOn(_tls);
         _draft.AllowSelfSignedCert = IsOn(_allowSelfSigned);
@@ -326,13 +347,34 @@ internal sealed class SettingsWindow : IDisposable
         _draft.SystemEnabled = IsOn(_systemEnabled);
         _draft.SystemName = _systemName.StringValue;
         _draft.SystemSensitivity = _systemSensitivity.IntValue;
-        _draft.HangoverMs = SettingsFields.Int(
-            _hangover.StringValue, _draft.HangoverMs, min: 0, max: SettingsBounds.HangoverMaxMs);
-        _draft.PreRollMs = SettingsFields.Int(
-            _preRoll.StringValue, _draft.PreRollMs, min: 0, max: SettingsBounds.PreRollMaxMs);
+        _draft.HangoverMs = Number(_hangover, "Hangover (ms)", _draft.HangoverMs, min: 0, max: SettingsBounds.HangoverMaxMs);
+        _draft.PreRollMs = Number(_preRoll, "Pre-roll (ms)", _draft.PreRollMs, min: 0, max: SettingsBounds.PreRollMaxMs);
         _draft.ProcessOnEnd = IsOn(_processOnEnd);
         CollectPinGrid();
         return _draft.ToSettings();
+    }
+
+    // One numeric field, read back and made to SHOW what was taken from it. A rejected entry
+    // keeps the value in force (SettingsFields owns that decision) and puts it in the field, so
+    // the operator watches their typo go instead of being left believing it was saved.
+    private int Number(NSTextField field, string label, int inForce, int min, int max)
+    {
+        if (SettingsFields.TryInt(field.StringValue, min, max, out int typed))
+            return typed;
+
+        // Untouched, and the value in force is itself outside the range: nothing was rejected
+        // because nothing was entered. Reported as an entry, this makes Save unreachable for
+        // someone who came to tick a box, since the value they never typed fails every time.
+        // A settings file edited by hand and TAPSCRIBE_PORT both reach here.
+        string inForceText = inForce.ToString(CultureInfo.InvariantCulture);
+        if (string.Equals(field.StringValue?.Trim(), inForceText, StringComparison.Ordinal))
+            return inForce;
+
+        field.StringValue = inForceText;
+        // First rejection wins: naming one field the operator can go and fix beats a list.
+        if (_rejectedAnEntry.Length == 0)
+            _rejectedAnEntry = $"{label} must be a whole number from {min} to {max}. Not saved.";
+        return inForce;
     }
 
     // The same probe the SpatialChat bridge's popup runs: reachability, then a /tap handshake
@@ -702,8 +744,7 @@ internal sealed class SettingsWindow : IDisposable
     /// is for a note whose text arrives LATER (a status line that starts empty): reserving nothing
     /// there would have the rows below it jump when the first message lands.</param>
     // How many rows this text wraps to in the note column. Measured rather than guessed from its
-    // length: a character count cannot know the font, and the one that was here gave a 60-odd
-    // character sentence a single row and clipped it, which is the failure Check's sizing fixed.
+    // length: a character count cannot know the font, so it under-counts and clips the note.
     private static int LinesFor(string text)
     {
         using var cell = new NSTextFieldCell(text)
