@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
-import tapscribe.batch_diarize as batch_diarize
 from tapscribe import voices
 from tapscribe.batch_diarize import DiarizeSessionRequest, diarize_session
 from tapscribe.diarizers.base import DiarizationResult, DiarizerUnavailable
@@ -60,7 +59,7 @@ class StubDiarizer:
 @pytest.fixture
 def stub(monkeypatch: pytest.MonkeyPatch) -> StubDiarizer:
     engine = StubDiarizer()
-    monkeypatch.setattr(batch_diarize, "load_diarizer", lambda: engine)
+    monkeypatch.setattr("tapscribe.batch_diarize.load_diarizer", lambda: engine)
     return engine
 
 
@@ -300,7 +299,7 @@ async def test_a_missing_engine_beats_a_busy_session(
     preflight; `SessionBusy` fixes itself. Loading before the claim — as
     `batch_summarize` does — is what makes the actionable one the one they see.
     """
-    monkeypatch.setattr(batch_diarize, "load_diarizer", _no_engine)
+    monkeypatch.setattr("tapscribe.batch_diarize.load_diarizer", _no_engine)
     _seed(recorder_under_test, "s", {"sysaudio": _multi("them")}, wavs=[_wav("them", "sysaudio", T0)])
     await recorder_under_test.jobs.claim(
         JobState(
@@ -317,7 +316,7 @@ async def test_a_session_with_nothing_to_do_needs_no_engine(
 ) -> None:
     """Most sessions are single-person. Loading a 30 MB graph to decide there is
     nothing to diarize would make every such call pay for the feature."""
-    monkeypatch.setattr(batch_diarize, "load_diarizer", _no_engine)
+    monkeypatch.setattr("tapscribe.batch_diarize.load_diarizer", _no_engine)
     _seed(
         recorder_under_test,
         "s",
