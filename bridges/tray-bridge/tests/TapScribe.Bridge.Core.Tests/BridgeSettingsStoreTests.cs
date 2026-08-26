@@ -261,6 +261,42 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal("", store.Load().Token);
     }
 
+    [Fact]
+    public void Save_WhenTheAtRestTokenCouldNotBeRead_KeepsTheOpaqueValueTheFileHeld()
+    {
+        // The in-file half of the same skip: the settings object a dialog hands to Save is
+        // rebuilt from its draft and carries no ProtectedToken at all, so leaving the property
+        // alone rewrites the file WITHOUT the key. Skipping the Write then protects the secret
+        // store and destroys the reference to it in the same Save.
+        var blobs = new RefusingBlobStore();
+        Store(blobs).Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        blobs.Refuse = true;
+        BridgeSettingsStore relaunched = Store(blobs);
+        relaunched.Load(); // the refused read: the token comes back "" through no fault of the operator
+        relaunched.Save(new BridgeSettings { Host = "rec.other" });
+
+        blobs.Refuse = false;
+        Assert.Equal("tok-abc", Store(blobs).Load().Token);
+    }
+
+    /// <summary>A DPAPI-shaped store: the opaque value lives in the settings file, and reading
+    /// it back can refuse the way an unprotect against another profile does — "" rather than a
+    /// throw.</summary>
+    private sealed class RefusingBlobStore : ITapTokenStore
+    {
+        internal bool Refuse { get; set; }
+
+        public string? Write(string token) => string.IsNullOrEmpty(token) ? null : Blob + token;
+
+        public string Read(string? atRest) =>
+            Refuse || atRest is null || !atRest.StartsWith(Blob, StringComparison.Ordinal)
+                ? ""
+                : atRest[Blob.Length..];
+
+        private const string Blob = "blob:";
+    }
+
     /// <summary>An out-of-band secret store that can refuse a read the way a locked Keychain
     /// does: "" rather than a throw. <see cref="Secret"/> is the item itself, so a test can ask
     /// whether a Save destroyed it.</summary>

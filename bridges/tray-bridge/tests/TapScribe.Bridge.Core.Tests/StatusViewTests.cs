@@ -3,10 +3,10 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.Bridge.Core.Tests;
 
 /// <summary>
-/// Tests for <see cref="StatusView"/> — the pure map from a <see cref="TrayStatus"/> to
-/// the three things the NotifyIcon shows: a context-menu header line, an icon key, and a
-/// tooltip. Keeping it pure lets the at-a-glance status (issue #106) be unit-tested with
-/// no WinForms; the shell just applies the result on the events it already raises.
+/// Tests for <see cref="StatusView"/> — the pure map from a <see cref="TrayStatus"/> to the
+/// four things a tray shows: a menu header line, an icon key, a tooltip, and the badge beside
+/// the glyph. Keeping it pure lets the at-a-glance status (issue #106) be unit-tested with no
+/// WinForms and no AppKit; a shell just applies the result on the events it already raises.
 /// </summary>
 public class StatusViewTests
 {

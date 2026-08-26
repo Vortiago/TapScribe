@@ -148,6 +148,10 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         // there is (an empty menu-bar item is indistinguishable from a Bridge that is not
         // running), and dropping the badge there would lose the count on exactly the Macs with
         // the least to go on.
+        //
+        // Said rather than inherited: the badge is only BESIDE the glyph if the button draws both,
+        // and a default that put the image over the title would leave the count invisible.
+        button.ImagePosition = NSCellImagePosition.ImageLeading;
         button.Title = image is null ? symbol.Fallback + status.Badge : status.Badge;
         button.ToolTip = status.Tooltip;
     }

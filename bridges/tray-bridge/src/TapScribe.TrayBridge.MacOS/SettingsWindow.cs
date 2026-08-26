@@ -73,8 +73,13 @@ internal sealed class SettingsWindow : IDisposable
     private readonly NSTextField _micMeterNote;
     private readonly NSTextField _systemMeterNote;
     private NSTimer? _meterTimer;
+    private readonly NSTextField _entryStatus;
     private readonly NSButton _save;
     private readonly NSButton _cancel;
+
+    // One per permission shown, so a grant answered while the window is open can re-render its
+    // own row rather than leaving the copy the dialog opened with.
+    private readonly List<PermissionRowView> _permissionRows = [];
 
     // Grows downward: the document view is flipped, so y is a distance from the TOP.
     private nfloat _y = Padding;
@@ -85,8 +90,8 @@ internal sealed class SettingsWindow : IDisposable
     private bool _disposed;
 
     // Set by the last Collect when a numeric field held something it could not use: what to tell
-    // the operator, or "" when everything was usable. Save reads it to decide whether the window
-    // may close, and shows it.
+    // the operator, or "" when everything was usable. Read through EntryAccepted by both buttons
+    // that run a Collect, which is what decides whether either may act on what it collected.
     private string _rejectedAnEntry = "";
 
     /// <summary>Build the window over the settings in force.</summary>
@@ -185,9 +190,6 @@ internal sealed class SettingsWindow : IDisposable
         _systemSensitivity.Activated += OnSystemSensitivity;
         (_systemMeterOn, _systemMeter, _systemMeterNote) = MeterRow(content, "Show output level");
         _systemMeterOn.Activated += OnSystemMeterToggled;
-        // The grant this row needs is the Permissions panel's to explain: it says the same thing
-        // with the button that gets there, and two prose answers in one dialog spelled the pane
-        // two different ways.
 
         Section(content, "Devices");
         // Follow-default is the norm and needs no row: the two sections above already say
@@ -208,8 +210,15 @@ internal sealed class SettingsWindow : IDisposable
         _processOnEnd = Check(content, "Transcribe and summarize when the meeting ends", _draft.ProcessOnEnd);
 
         Section(content, "Permissions");
+        // The system-audio row's grant is explained here rather than beside the row that needs it:
+        // this says the same thing with the button that gets there, and two prose answers in one
+        // dialog spelled the pane two different ways.
         PermissionRows(content);
 
+        // Beside the buttons that write it, not up in the Recorder section: a rejected Hangover
+        // entry reported twenty rows above the Save the operator just clicked is a Save that
+        // appears to do nothing at all.
+        _entryStatus = Note(content, "", lines: 2);
         _save = Button(content, "Save", Width - Padding - 100, 100);
         _save.Activated += OnSave;
         _save.KeyEquivalent = "\r"; // Return saves, the way a Mac dialog's default button does
@@ -223,6 +232,7 @@ internal sealed class SettingsWindow : IDisposable
         // about otherwise: Dispose only runs when the shell next opens Settings, so a window
         // closed and left alone would keep a capture running for as long as the tray does.
         _window.WillClose += OnWillClose;
+        _window.DidBecomeKey += OnDidBecomeKey;
 
         // The cursor knows what the layout came to, so the document takes that height. At least
         // the viewport, so a short layout does not float the rows in a taller document.
@@ -280,7 +290,10 @@ internal sealed class SettingsWindow : IDisposable
         _systemMeterOn.Activated -= OnSystemMeterToggled;
         _save.Activated -= OnSave;
         _cancel.Activated -= OnCancel;
+        foreach (PermissionRowView row in _permissionRows)
+            row.Dispose();
         _window.WillClose -= OnWillClose;
+        _window.DidBecomeKey -= OnDidBecomeKey;
         StopMeters();
         _micProbe.Dispose();
         _systemProbe.Dispose();
@@ -314,14 +327,20 @@ internal sealed class SettingsWindow : IDisposable
         // Said in words, not left to the field changing under them: the snapped-back value parses,
         // so a second click on Save saves the OLD one and closes, which is the discarded entry
         // reported as a success one click later.
-        if (_rejectedAnEntry.Length != 0)
-        {
-            _testStatus.StringValue = _rejectedAnEntry;
+        if (!EntryAccepted())
             return;
-        }
 
         _apply(edited);
         Close();
+    }
+
+    // Whether the last Collect could use every numeric field, SHOWING what it could not. Both
+    // buttons that run a Collect ask, because either one proceeding on a value the operator did
+    // not type reports their discarded entry as a success.
+    private bool EntryAccepted()
+    {
+        _entryStatus.StringValue = _rejectedAnEntry;
+        return _rejectedAnEntry.Length == 0;
     }
 
     // Read every control back into the draft and let Core collect it. The draft is the one
@@ -392,11 +411,22 @@ internal sealed class SettingsWindow : IDisposable
             // "Testing…" from here, so anything that escapes leaves both stuck that way for as
             // long as the window is open.
             TapConnectionOptions options = Collect().ToConnectionOptions();
-            using var timeout = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
-            ConnectionTestResult result = await ConnectionTester
-                .TestAsync(options, http: null, timeout.Token)
-                .ConfigureAwait(false);
-            outcome = result.Describe();
+            if (!EntryAccepted())
+            {
+                // Reported rather than tested. That Collect snapped a rejected port back to the
+                // one in force, so testing would answer about a connection the operator never
+                // asked about - and a green verdict on it is what makes the next Save close over
+                // their discarded entry believing it was checked.
+                outcome = _rejectedAnEntry;
+            }
+            else
+            {
+                using var timeout = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
+                ConnectionTestResult result = await ConnectionTester
+                    .TestAsync(options, http: null, timeout.Token)
+                    .ConfigureAwait(false);
+                outcome = result.Describe();
+            }
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -447,6 +477,15 @@ internal sealed class SettingsWindow : IDisposable
     }
 
     private void OnWillClose(object? sender, EventArgs e) => StopMeters();
+
+    // The rows re-read the platform every time this window comes forward. That covers both ways a
+    // grant changes without this dialog hearing about it: the operator left for System Settings
+    // and came back, or the window was reopened rather than rebuilt.
+    private void OnDidBecomeKey(object? sender, EventArgs e)
+    {
+        foreach (PermissionRowView row in _permissionRows)
+            row.Refresh();
+    }
 
     // Untick as well as stop, so reopening the window does not show two toggles claiming to be
     // on over two dead bars.
@@ -653,10 +692,10 @@ internal sealed class SettingsWindow : IDisposable
         };
         check.SetButtonType(NSButtonType.Switch);
         check.State = on ? NSCellStateValue.On : NSCellStateValue.Off;
-        // A switch does not shrink its title to fit: ControlWidth clipped the longest of these to
-        // "…when the meeting e…". Take what the text needs, and when the control column cannot
-        // hold it, start at the left margin instead: a checkbox has no caption beside it, so that
-        // space is free, and one row out of alignment beats a sentence cut in half.
+        // A switch does not shrink its title to fit, it clips it. Take what the text needs, and
+        // when the control column cannot hold it, start at the left margin instead: a checkbox has
+        // no caption beside it, so that space is free, and one row out of alignment beats a
+        // sentence cut in half.
         check.SizeToFit();
         nfloat left = check.Frame.Width <= ControlWidth ? ControlLeft : Padding;
         check.Frame = new CGRect(
@@ -688,26 +727,105 @@ internal sealed class SettingsWindow : IDisposable
     /// so. What each state MEANS is Core's <see cref="PermissionRow"/>; this renders it.</summary>
     private void PermissionRows(NSView content)
     {
-        AddPermissionRow(content, PermissionRow.For(MicrophoneTitle, MicrophoneState()), Privacy.Microphone);
+        AddPermissionRow(content, MicrophoneTitle, MicrophoneState, Privacy.Microphone);
         // Only ever Unknown, and shown anyway: an operator who has just recorded a silent far end
         // is looking for exactly this row, and its button still reaches the place that fixes it.
-        AddPermissionRow(content, PermissionRow.For(SystemAudioTitle, PermissionState.Unknown), Privacy.AudioCapture);
+        AddPermissionRow(content, SystemAudioTitle, () => PermissionState.Unknown, Privacy.AudioCapture);
     }
 
-    private void AddPermissionRow(NSView content, PermissionRow row, string privacyPane)
+    private void AddPermissionRow(
+        NSView content, string title, Func<PermissionState> state, string privacyPane)
     {
-        Note(content, $"{row.Title}: {row.Detail}");
-        if (row.Button is not { } offer)
-            return;
+        // Sized for the WIDEST copy this permission can carry, not for the state it opened in: a
+        // grant answered while the window is up re-renders the row, and "Not asked for yet." is
+        // one line where the sentence that replaces it is two.
+        NSTextField note = Note(content, "", lines: WidestDetail(title));
+        // Built even for a permission that opens Granted and offers nothing: Render hides it, and
+        // a grant REVOKED in System Settings while this window sits open comes back to a row that
+        // needs one again. Attach fills in both.
+        var view = new PermissionRowView(
+            title, privacyPane, state, note, Button(content, "", ControlLeft, 190), _dispatcher);
+        _permissionRows.Add(view);
+        view.Attach();
+    }
 
-        NSButton button = Button(content, offer.Label, ControlLeft, 190);
-        button.Activated += (_, _) =>
+    private static string Line(string title, PermissionRow row) => $"{title}: {row.Detail}";
+
+    // How many note rows the longest of this permission's states needs, so re-rendering one in
+    // place never clips it.
+    private static int WidestDetail(string title) =>
+        Enum.GetValues<PermissionState>().Max(state => LinesFor(Line(title, PermissionRow.For(title, state))));
+
+    /// <summary>One permission on screen: the sentence, and the button that can still do
+    /// something about it. Re-rendered when the platform's answer changes, because a row that
+    /// still reads "Not asked for yet." over a grant the operator has just given is the same
+    /// silent lie this panel exists to end. A class rather than a closure per control so the
+    /// handler is one named method <see cref="Dispose"/> can unhook.</summary>
+    private sealed class PermissionRowView(
+        string title,
+        string privacyPane,
+        Func<PermissionState> state,
+        NSTextField note,
+        NSButton button,
+        IDispatcher dispatcher) : IDisposable
+    {
+        private PermissionAction _action;
+        private bool _detached;
+
+        internal void Attach()
         {
-            if (offer.Action == PermissionAction.Request)
-                AVCaptureDevice.RequestAccessForMediaType(AVAuthorizationMediaType.Audio, _ => { });
-            else
+            button.Activated += OnActivated;
+            Render();
+        }
+
+        // Re-read the platform's answer. Nothing notifies on a TCC change, so the window becoming
+        // key is the only signal that the operator has been to System Settings and back - and for
+        // System Audio Recording that is the ONLY route to a grant, since nothing here can ask.
+        internal void Refresh()
+        {
+            if (!_detached)
+                Render();
+        }
+
+        private void Render()
+        {
+            PermissionRow row = PermissionRow.For(title, state());
+            note.StringValue = Line(title, row);
+            // Granted is the one state with nothing left to offer, and it is only ever reached
+            // FROM a state that had a button, so the button is hidden rather than never built.
+            button.Hidden = row.Button is null;
+            if (row.Button is { } offer)
+            {
+                button.Title = offer.Label;
+                _action = offer.Action;
+            }
+        }
+
+        private void OnActivated(object? sender, EventArgs e)
+        {
+            if (_action != PermissionAction.Request)
+            {
                 NSWorkspace.SharedWorkspace.OpenUrl(new NSUrl(privacyPane));
-        };
+                return;
+            }
+
+            // The completion lands on an arbitrary queue and AppKit may not be touched from one,
+            // so the re-render is posted. Skipped once the window is released, since the note and
+            // the button are gone by then.
+            AVCaptureDevice.RequestAccessForMediaType(
+                AVAuthorizationMediaType.Audio,
+                _ => dispatcher.Post(() =>
+                {
+                    if (!_detached)
+                        Render();
+                }));
+        }
+
+        public void Dispose()
+        {
+            _detached = true;
+            button.Activated -= OnActivated;
+        }
     }
 
     // What macOS says about the microphone right now. Asking does NOT prompt: only
@@ -736,8 +854,11 @@ internal sealed class SettingsWindow : IDisposable
 
         internal const string Microphone = Pane + "Privacy_Microphone";
 
-        // Named after kTCCServiceAudioCapture, the service this grant belongs to.
-        internal const string AudioCapture = Pane + "Privacy_AudioCapture";
+        // The pane macOS 14.4 renamed to "Screen & System Audio Recording" when it added the
+        // process tap: the anchor is still the screen-capture one, and it is where this grant is
+        // listed. Privacy_AudioCapture, after kTCCServiceAudioCapture, is not an anchor System
+        // Settings knows, and a wrong anchor lands on the Privacy root without saying so.
+        internal const string AudioCapture = Pane + "Privacy_ScreenCapture";
     }
 
     /// <param name="lines">How many rows to reserve, or null to take what the text needs. A count

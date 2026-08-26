@@ -40,6 +40,12 @@ public sealed class BridgeSettingsStore(
     // never passes through a Load.
     private string _tokenAtRest = "";
 
+    // The opaque value that went with it, so the skip in Save can put it back. A dialog hands
+    // Save a settings object rebuilt from its draft, which carries no ProtectedToken at all, so
+    // leaving the property alone writes the file WITHOUT the key and destroys the blob the skip
+    // exists to protect.
+    private string? _protectedAtRest;
+
     /// <summary>
     /// Load the settings. A missing, corrupt, or unreadable file falls back to
     /// environment-seeded defaults rather than throwing, so the app always launches.
@@ -56,6 +62,7 @@ public sealed class BridgeSettingsStore(
                 {
                     loaded.Token = ReadToken(loaded.ProtectedToken);
                     _tokenAtRest = loaded.Token;
+                    _protectedAtRest = loaded.ProtectedToken;
                     // The file has no such key and never will: it is the shell's, not the
                     // operator's. Stamped on the way out so nothing downstream can meet a
                     // settings object carrying another platform's name.
@@ -86,8 +93,8 @@ public sealed class BridgeSettingsStore(
         // anything. A platform that REFUSES a read answers "" as well (a locked Keychain, a
         // prompt the operator dismissed, an ACL that no longer trusts this build's ad-hoc
         // signature), and saving anything at all afterwards would then destroy a working token
-        // nobody asked to revoke. Skipping also leaves ProtectedToken as loaded, so the Windows
-        // blob in the file survives the same way.
+        // nobody asked to revoke. Skipping also puts ProtectedToken back as it was loaded, so the
+        // Windows blob in the file survives the same way.
         if (!string.IsNullOrEmpty(settings.Token) || !string.IsNullOrEmpty(_tokenAtRest))
         {
             settings.ProtectedToken = tokens.Write(settings.Token);
@@ -96,6 +103,11 @@ public sealed class BridgeSettingsStore(
             // - nothing loaded it, so both halves of the guard are empty - and the item outlives
             // the revocation, to be read back on the next launch.
             _tokenAtRest = settings.Token;
+            _protectedAtRest = settings.ProtectedToken;
+        }
+        else
+        {
+            settings.ProtectedToken = _protectedAtRest;
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
