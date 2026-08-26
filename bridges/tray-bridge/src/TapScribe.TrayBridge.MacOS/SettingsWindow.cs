@@ -622,9 +622,9 @@ internal sealed class SettingsWindow : IDisposable
         // hold it, start at the left margin instead: a checkbox has no caption beside it, so that
         // space is free, and one row out of alignment beats a sentence cut in half.
         check.SizeToFit();
-        nfloat needed = check.Frame.Width;
-        nfloat left = needed <= Width - ControlLeft - Padding ? ControlLeft : Padding;
-        check.Frame = new CGRect(left, y, Math.Min(needed, Width - left - Padding), RowHeight);
+        nfloat left = check.Frame.Width <= ControlWidth ? ControlLeft : Padding;
+        check.Frame = new CGRect(
+            left, y, Math.Min(check.Frame.Width, Width - left - Padding), RowHeight);
         content.AddSubview(check);
         return check;
     }
@@ -652,30 +652,26 @@ internal sealed class SettingsWindow : IDisposable
     /// so. What each state MEANS is Core's <see cref="PermissionRow"/>; this renders it.</summary>
     private void PermissionRows(NSView content)
     {
-        Row(PermissionRow.For(MicrophoneTitle, MicrophoneState()), Privacy.Microphone);
-        // macOS 14.4 gained the process tap and no API for its consent, so this row can only ever
-        // report Unknown. Shown anyway: half the operators who meet the silent-far-end failure
-        // are looking for exactly this row, and the button still reaches the place that fixes it.
-        Row(PermissionRow.For(SystemAudioTitle, PermissionState.Unknown), Privacy.AudioCapture);
+        AddPermissionRow(content, PermissionRow.For(MicrophoneTitle, MicrophoneState()), Privacy.Microphone);
+        // Only ever Unknown, and shown anyway: an operator who has just recorded a silent far end
+        // is looking for exactly this row, and its button still reaches the place that fixes it.
+        AddPermissionRow(content, PermissionRow.For(SystemAudioTitle, PermissionState.Unknown), Privacy.AudioCapture);
+    }
 
-        void Row(PermissionRow row, string privacyPane)
+    private void AddPermissionRow(NSView content, PermissionRow row, string privacyPane)
+    {
+        Note(content, $"{row.Title}: {row.Detail}");
+        if (row.Button is not { } offer)
+            return;
+
+        NSButton button = Button(content, offer.Label, ControlLeft, 190);
+        button.Activated += (_, _) =>
         {
-            // One line where one is enough: the detail runs from a short "Granted." to a
-            // sentence, and a fixed two left a blank row above every button.
-            string text = $"{row.Title}: {row.Detail}";
-            Note(content, text, lines: text.Length > 64 ? 2 : 1);
-            if (row.ActionLabel is not { } label)
-                return;
-
-            NSButton button = Button(content, label, ControlLeft, 190);
-            button.Activated += (_, _) =>
-            {
-                if (row.Action == PermissionAction.Request)
-                    AVCaptureDevice.RequestAccessForMediaType(AVAuthorizationMediaType.Audio, _ => { });
-                else
-                    NSWorkspace.SharedWorkspace.OpenUrl(new NSUrl(privacyPane));
-            };
-        }
+            if (offer.Action == PermissionAction.Request)
+                AVCaptureDevice.RequestAccessForMediaType(AVAuthorizationMediaType.Audio, _ => { });
+            else
+                NSWorkspace.SharedWorkspace.OpenUrl(new NSUrl(privacyPane));
+        };
     }
 
     // What macOS says about the microphone right now. Asking does NOT prompt: only
@@ -708,13 +704,30 @@ internal sealed class SettingsWindow : IDisposable
         internal const string AudioCapture = Pane + "Privacy_AudioCapture";
     }
 
-    private NSTextField Note(NSView content, string text, int lines)
+    /// <param name="lines">How many rows to reserve, or null to take what the text needs. A count
+    /// is for a note whose text arrives LATER (a status line that starts empty): reserving nothing
+    /// there would have the rows below it jump when the first message lands.</param>
+    // How many rows this text wraps to in the note column. Measured rather than guessed from its
+    // length: a character count cannot know the font, and the one that was here gave a 60-odd
+    // character sentence a single row and clipped it, which is the failure Check's sizing fixed.
+    private static int LinesFor(string text)
     {
-        nfloat height = RowHeight * lines;
+        using var cell = new NSTextFieldCell(text)
+        {
+            Font = NSFont.SystemFontOfSize(NSFont.SmallSystemFontSize)!,
+            Wraps = true,
+        };
+        nfloat needed = cell.CellSizeForBounds(new CGRect(0, 0, ControlWidth, short.MaxValue)).Height;
+        return Math.Max(1, (int)Math.Ceiling(needed / RowHeight));
+    }
+
+    private NSTextField Note(NSView content, string text, int? lines = null)
+    {
+        nfloat height = RowHeight * (lines ?? LinesFor(text));
         nfloat y = NextRow(height);
         var note = new NSTextField
         {
-            Frame = new CGRect(ControlLeft, y, Width - ControlLeft - Padding, height),
+            Frame = new CGRect(ControlLeft, y, ControlWidth, height),
             StringValue = text,
             Editable = false,
             Selectable = false,

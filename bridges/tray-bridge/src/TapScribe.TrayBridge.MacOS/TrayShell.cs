@@ -139,22 +139,16 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         StatusSymbol symbol = StatusSymbols.For(status.Icon);
         NSImage? image = NSImage.GetSystemSymbol(symbol.Name, status.Tooltip);
         if (image is not null)
-        {
-            // A template image is recoloured by the menu bar itself, so the glyph follows a
-            // light or dark menu bar and a highlighted item without being redrawn.
+            // A template image is recoloured by the menu bar itself, so the glyph follows a light
+            // or dark menu bar and a highlighted item without being redrawn.
             image.Template = true;
-            button.Image = image;
-            // Beside the glyph, and usually empty: this is the only part of a status an operator
-            // sees without opening the menu, which is why a half-recorded meeting went unnoticed.
-            button.Title = status.Badge;
-        }
-        else
-        {
-            // The system has no such symbol. An empty menu-bar item is indistinguishable from
-            // a Bridge that is not running, so fall back to the glyph's text stand-in.
-            button.Image = null;
-            button.Title = symbol.Fallback;
-        }
+        button.Image = image;
+
+        // The badge rides BOTH paths. On a system with no such symbol the text stand-in is all
+        // there is (an empty menu-bar item is indistinguishable from a Bridge that is not
+        // running), and dropping the badge there would lose the count on exactly the Macs with
+        // the least to go on.
+        button.Title = image is null ? symbol.Fallback + status.Badge : status.Badge;
         button.ToolTip = status.Tooltip;
     }
 

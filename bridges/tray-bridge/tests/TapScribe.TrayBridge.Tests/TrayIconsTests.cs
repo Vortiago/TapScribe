@@ -5,32 +5,21 @@ namespace TapScribe.TrayBridge.Tests;
 
 /// <summary>
 /// The tray icon for each <see cref="TrayIcon"/>, and the AppKit shell's
-/// <c>StatusSymbolsTests</c> asked of the Windows side. It had no equivalent, and the shapes
-/// differ in a way that matters: the Mac maps through a switch that throws on a state it does not
-/// know, while this is a DICTIONARY, so a state added in Core reaches the indexer and raises
-/// KeyNotFoundException from inside a status render, which is a tray that dies mid-meeting.
-///
-/// Distinctness is the same claim as the Mac's: the icon is the at-a-glance signal, and two
-/// states wearing one colour is the same as having no signal.
+/// <c>StatusSymbolsTests</c> asked of the Windows side. The shapes differ in a way that matters:
+/// the Mac maps through a switch that throws on a state it does not know, while this is a
+/// DICTIONARY, so a state added in Core reaches the indexer and raises KeyNotFoundException from
+/// inside a status render.
 /// </summary>
 public class TrayIconsTests
 {
     [Fact]
-    public void Indexer_AnswersEveryTrayIcon()
-    {
-        using var icons = new TrayIcons();
-
-        foreach (TrayIcon icon in Enum.GetValues<TrayIcon>())
-            Assert.NotNull(icons[icon]);
-    }
-
-    [Fact]
     public void Indexer_GivesEveryTrayIconItsOwnColour()
     {
+        // Rendered rather than declared: the colours live inside a private Dot(), so the pixel is
+        // what says two states are distinguishable. Indexing every value also covers "answers at
+        // all", which is the other half of the claim.
         using var icons = new TrayIcons();
 
-        // Rendered rather than declared: the colours live inside Dot(), so the pixel is what
-        // says two states are distinguishable. The centre of a 16x16 dot is its fill.
         List<Color> centres = [];
         foreach (TrayIcon icon in Enum.GetValues<TrayIcon>())
         {
@@ -39,5 +28,15 @@ public class TrayIconsTests
         }
 
         Assert.Equal(centres.Count, centres.Distinct().Count());
+    }
+
+    [Fact]
+    public void Indexer_AStateItDoesNotKnow_Refuses()
+    {
+        // The hazard the dictionary carries and the Mac's switch does not, pinned rather than
+        // described: a state added in Core must fail here, not inside a status render.
+        using var icons = new TrayIcons();
+
+        Assert.Throws<KeyNotFoundException>(() => icons[(TrayIcon)999]);
     }
 }

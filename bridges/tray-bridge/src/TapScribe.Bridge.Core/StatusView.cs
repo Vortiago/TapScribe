@@ -54,11 +54,9 @@ public enum TrayIcon
 /// glyph. Built purely from a <see cref="TrayStatus"/> by <see cref="For"/>, so the status
 /// presentation is unit-tested without WinForms or AppKit.
 /// </summary>
-/// <param name="Badge">A few characters shown next to the menu-bar glyph, or "" for nothing to
-/// say. It exists because the header is behind a click and the glyph is easy to miss: a meeting
-/// recording one side of a call looked exactly like a healthy one until the transcript arrived.
-/// An exception report, not a readout, since a number present on every healthy meeting is one
-/// nobody reads.</param>
+/// <param name="Badge">A few characters beside the menu-bar glyph, or "" for nothing to say. The
+/// header is behind a click and the glyph is easy to miss, so this is the only part of a status an
+/// operator sees while they are on the call. An exception report, not a readout.</param>
 public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, string Badge = "")
 {
     public static StatusView For(TrayStatus status)
@@ -66,17 +64,13 @@ public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, st
         ArgumentNullException.ThrowIfNull(status);
         return status switch
         {
-            // Short a device: the meeting is running, and it is not recording what the operator
-            // asked for. Both the glyph and the badge change, so shape and number each carry it.
-            TrayStatus.Streaming s when s.Connected < s.Total => new StatusView(
-                $"● Streaming — {s.Connected}/{s.Total} devices",
-                TrayIcon.Degraded,
-                $"TapScribe — recording {s.Connected} of {s.Total} device(s)",
-                $"{s.Connected}/{s.Total}"),
+            // Short a device: the meeting is running and is not recording what the operator asked
+            // for, so both the glyph and the badge change and shape and number each carry it.
             TrayStatus.Streaming s => new StatusView(
                 $"● Streaming — {s.Connected}/{s.Total} devices",
-                TrayIcon.Streaming,
-                $"TapScribe — recording {s.Connected} of {s.Total} device(s)"),
+                s.Connected < s.Total ? TrayIcon.Degraded : TrayIcon.Streaming,
+                $"TapScribe — recording {s.Connected} of {s.Total} device(s)",
+                s.Connected < s.Total ? $"{s.Connected}/{s.Total}" : ""),
             TrayStatus.Error e => new StatusView(
                 $"⚠ {e.Reason}",
                 TrayIcon.Error,

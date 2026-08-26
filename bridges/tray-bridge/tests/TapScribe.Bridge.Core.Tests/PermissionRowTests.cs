@@ -20,8 +20,8 @@ public class PermissionRowTests
         // operator opened deliberately, beats the first prompt landing mid-Start.
         PermissionRow row = PermissionRow.For("Microphone", PermissionState.NotDetermined);
 
-        Assert.Equal(PermissionAction.Request, row.Action);
-        Assert.False(string.IsNullOrWhiteSpace(row.ActionLabel));
+        Assert.Equal(PermissionAction.Request, row.Button?.Action);
+        Assert.False(string.IsNullOrWhiteSpace(row.Button?.Label));
     }
 
     [Fact]
@@ -32,7 +32,7 @@ public class PermissionRowTests
         // button, so the only honest offer is the place that can still change it.
         PermissionRow row = PermissionRow.For("Microphone", PermissionState.Denied);
 
-        Assert.Equal(PermissionAction.OpenSettings, row.Action);
+        Assert.Equal(PermissionAction.OpenSettings, row.Button?.Action);
         Assert.Contains("denied", row.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -41,29 +41,26 @@ public class PermissionRowTests
     {
         PermissionRow row = PermissionRow.For("Microphone", PermissionState.Granted);
 
-        Assert.Equal(PermissionAction.None, row.Action);
-        Assert.Null(row.ActionLabel);
+        Assert.Null(row.Button);
     }
 
     [Fact]
     public void For_APermissionMacOSWillNotReportOn_SaysSo_AndStillOffersSystemSettings()
     {
-        // System Audio Recording. macOS 14.4 gained the process tap and no API to ask about its
-        // consent, so the tray cannot know. Saying "unknown" is the honest answer: claiming
-        // granted would be the same silent lie the badge and this dialog exist to end, and
-        // claiming denied would send operators to fix something that is probably fine.
+        // System Audio Recording, permanently: see PermissionState.Unknown for why macOS cannot
+        // be asked, and PermissionRow.For for why unknown is reported rather than guessed.
         PermissionRow row = PermissionRow.For("System Audio Recording", PermissionState.Unknown);
 
-        Assert.Equal(PermissionAction.OpenSettings, row.Action);
+        Assert.Equal(PermissionAction.OpenSettings, row.Button?.Action);
         Assert.Contains("cannot", row.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void For_EveryState_SaysWhichPermissionItIsAbout()
+    public void For_AStateItDoesNotKnow_Refuses()
     {
-        // Two rows sit side by side and one of them is the one that matters; a detail line that
-        // does not name its permission is a row an operator cannot act on.
-        foreach (PermissionState state in Enum.GetValues<PermissionState>())
-            Assert.Equal("System Audio Recording", PermissionRow.For("System Audio Recording", state).Title);
+        // A state added in Core must not silently inherit another one's copy, which makes a
+        // specific claim about a specific permission.
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PermissionRow.For("Microphone", (PermissionState)999));
     }
 }

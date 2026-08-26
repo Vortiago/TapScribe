@@ -6,7 +6,7 @@ using TapScribe.Bridge.Core;
 namespace TapScribe.TrayBridge;
 
 /// <summary>
-/// The three at-a-glance tray icons (idle / streaming / error), drawn at runtime as a
+/// The at-a-glance tray icons (idle / streaming / degraded / error), drawn at runtime as a
 /// coloured dot rather than shipped as binary <c>.ico</c> assets. <see cref="StatusView"/>
 /// chooses which <see cref="TrayIcon"/> to show; this maps that to a concrete icon. Built
 /// once and reused for the process lifetime; <see cref="Dispose"/> releases the GDI handles.
