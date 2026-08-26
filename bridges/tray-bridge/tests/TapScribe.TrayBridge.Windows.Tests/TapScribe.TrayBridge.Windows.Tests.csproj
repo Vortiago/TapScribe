@@ -42,7 +42,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\TapScribe.TrayBridge\TapScribe.TrayBridge.csproj" />
+    <ProjectReference Include="..\..\src\TapScribe.TrayBridge.Windows\TapScribe.TrayBridge.Windows.csproj" />
   </ItemGroup>
 
 </Project>

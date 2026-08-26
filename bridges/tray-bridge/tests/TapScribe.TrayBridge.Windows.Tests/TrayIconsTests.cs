@@ -1,7 +1,7 @@
 using System.Drawing;
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// The tray icon for each <see cref="TrayIcon"/>, and the AppKit shell's

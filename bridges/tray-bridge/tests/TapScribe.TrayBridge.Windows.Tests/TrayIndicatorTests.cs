@@ -1,6 +1,6 @@
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// The shell as an <see cref="ITrayView"/>: what the runtime tells it, rendered onto a

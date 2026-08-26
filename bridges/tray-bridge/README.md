@@ -36,8 +36,9 @@ Session).
   loopback and enumeration (NAudio), plus the Windows half of the storage
   layer — `DpapiTapTokenStore` and the `TrayStores` binding of the Core stores
   to `%APPDATA%\TapScribe`.
-- **`src/TapScribe.TrayBridge`** (net10.0-windows WinForms): the tray shell,
-  which is Core's `ITrayView` over a `NotifyIcon` and a `ContextMenuStrip`.
+- **`src/TapScribe.TrayBridge.Windows`** (net10.0-windows WinForms): the tray
+  shell, which is Core's `ITrayView` over a `NotifyIcon` and a
+  `ContextMenuStrip`.
   Widgets only: the menu (Start meeting / End meeting / Past meetings /
   Settings… / Quit), the 4-tab Settings dialog, and the per-meeting summary
   window with Copy. What a meeting DOES is `BridgeRuntime`'s.
@@ -111,9 +112,9 @@ On Windows:
 # from this directory (bridges/tray-bridge/)
 dotnet test  tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 dotnet test  tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj -c Release
-dotnet test  tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
-dotnet build src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
-dotnet run   --project src/TapScribe.TrayBridge                 # launch the tray app
+dotnet test  tests/TapScribe.TrayBridge.Windows.Tests/TapScribe.TrayBridge.Windows.Tests.csproj -c Release
+dotnet build src/TapScribe.TrayBridge.Windows/TapScribe.TrayBridge.Windows.csproj -c Release
+dotnet run   --project src/TapScribe.TrayBridge.Windows   # launch the tray app
 ```
 
 On macOS:
@@ -171,14 +172,14 @@ commands below are what those jobs run, minus the `-p:Version=<tag>` they add.
 
 ```powershell
 # from this directory (bridges/tray-bridge/)
-dotnet publish src/TapScribe.TrayBridge -c Release -r win-x64 `
+dotnet publish src/TapScribe.TrayBridge.Windows -c Release -r win-x64 `
   --self-contained `
   -p:PublishSingleFile=true `
   -p:IncludeNativeLibrariesForSelfExtract=true
 ```
 
 The exe lands at
-`src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`
+`src/TapScribe.TrayBridge.Windows/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`
 and runs on a clean Windows 10/11 box (use `-r win-arm64` for ARM). No
 installer, code signing, or auto-update: it's a copy-and-run exe. Ships as
 `TapScribe.TrayBridge-win-x64.zip`.
@@ -349,7 +350,7 @@ runner it would be indistinguishable from a broken tap. The microphone half, and
 everything below, still needs a person.
 
 1. Start a Recorder: `python -m tapscribe --no-auth` (or `./start.ps1`).
-2. `dotnet run --project src/TapScribe.TrayBridge`. On macOS launch the built
+2. `dotnet run --project src/TapScribe.TrayBridge.Windows`. On macOS launch the built
    bundle instead (`open …/TapScribe.TrayBridge.MacOS.app`, or its inner binary
    from a terminal when you want the stderr): only the bundle carries the
    `Info.plist` that makes it a menu-bar app and names the microphone in the TCC

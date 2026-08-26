@@ -7,7 +7,11 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
-    <RootNamespace>TapScribe.TrayBridge</RootNamespace>
+    <RootNamespace>TapScribe.TrayBridge.Windows</RootNamespace>
+    <!-- The project says which shell it is; the EXE keeps the name operators already have.
+         It is what the release zip contains and what ADR-0012's artifact contract is named
+         after, so renaming the project must not move it. -->
+    <AssemblyName>TapScribe.TrayBridge</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,7 +22,7 @@
   <!-- TrayContext is internal (it is the app's own shell, not an API), and its meeting
        lifecycle is exactly what the tray tests drive. -->
   <ItemGroup>
-    <InternalsVisibleTo Include="TapScribe.TrayBridge.Tests" />
+    <InternalsVisibleTo Include="TapScribe.TrayBridge.Windows.Tests" />
   </ItemGroup>
 
   <!-- System.Security.Cryptography.ProtectedData (DPAPI, used by

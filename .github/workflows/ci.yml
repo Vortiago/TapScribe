@@ -446,7 +446,7 @@ jobs:
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj -c Release
 
       - name: Test the Windows tray shell
-        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Windows.Tests/TapScribe.TrayBridge.Windows.Tests.csproj -c Release
 
       # The macOS job proves its .pkg installs and that the installed app launches. This
       # is that gate for Windows, and on the same thing an operator downloads: the
@@ -455,7 +455,7 @@ jobs:
       #
       # This publish also IS the build gate for the shell, which is why no plain build
       # step precedes it: if the launch half is ever deleted (see below), leave a
-      # `dotnet build` of TapScribe.TrayBridge.csproj behind.
+      # `dotnet build` of TapScribe.TrayBridge.Windows.csproj behind.
       #
       # The publish flags are release.yml's, minus the -p:Version it stamps from the tag.
       # Copied out of its build tree rather than zipped: the property under test is that
@@ -468,10 +468,10 @@ jobs:
       - name: Prove the published exe launches
         timeout-minutes: 5
         run: |
-          dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge `
+          dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge.Windows `
             -c Release -r win-x64 --self-contained `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-          $published = "bridges/tray-bridge/src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
+          $published = "bridges/tray-bridge/src/TapScribe.TrayBridge.Windows/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
           $alone = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-launch")).FullName
           Copy-Item $published $alone
           $env:APPDATA = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-appdata")).FullName

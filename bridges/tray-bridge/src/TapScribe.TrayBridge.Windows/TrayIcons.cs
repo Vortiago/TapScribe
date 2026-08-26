@@ -3,7 +3,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// The at-a-glance tray icons (idle / streaming / degraded / error), drawn at runtime as a

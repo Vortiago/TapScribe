@@ -1,6 +1,6 @@
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// The tray's presence in the notification area: the icon, its hover tooltip, and its

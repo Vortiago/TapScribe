@@ -2,7 +2,7 @@ using System.Text;
 using TapScribe.Bridge.Core;
 using TapScribe.Bridge.Windows;
 
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// The tray's notification-area presence, recorded instead of registered. This is the ONE

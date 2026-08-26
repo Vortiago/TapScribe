@@ -3,7 +3,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// A horizontal input-level meter (issue #152): a fill that tracks the current RMS

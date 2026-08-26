@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// A dedicated STA thread with a hand-pumped <see cref="SynchronizationContext"/> — the

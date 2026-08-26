@@ -1,6 +1,6 @@
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// Pins B10 — the tray's menu must not outlive the tray. <c>NotifyIcon.Dispose</c> does NOT

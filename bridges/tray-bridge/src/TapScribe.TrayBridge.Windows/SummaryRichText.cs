@@ -2,7 +2,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// Paints Core's <see cref="SummaryLayout"/> runs into a <see cref="RichTextBox"/>.

@@ -1,4 +1,4 @@
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// Tests for the test harness. Unusual, and earned: <see cref="StaShell"/> has taken the test

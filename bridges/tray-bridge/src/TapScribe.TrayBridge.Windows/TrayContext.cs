@@ -1,7 +1,7 @@
 using TapScribe.Bridge.Core;
 using TapScribe.Bridge.Windows;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// The tray shell: a NotifyIcon with a status header line, Start meeting / End meeting /
@@ -151,7 +151,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     }
 
     // ---- Test-visible state (read-only) -------------------------------------------------
-    // The tray's observable surface, so TapScribe.TrayBridge.Tests can assert on what the
+    // The tray's observable surface, so TapScribe.TrayBridge.Windows.Tests can assert on what the
     // operator would see without a message loop or a visible window. Nothing here mutates.
 
     internal ContextMenuStrip Menu => _menu;

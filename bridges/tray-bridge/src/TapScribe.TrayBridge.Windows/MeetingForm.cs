@@ -1,6 +1,6 @@
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// A small window for one meeting: it renders the tested Core <see cref="MeetingFormView"/>

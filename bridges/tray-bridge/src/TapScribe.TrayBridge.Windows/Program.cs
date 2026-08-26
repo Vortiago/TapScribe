@@ -1,4 +1,4 @@
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 internal static class Program
 {

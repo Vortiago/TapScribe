@@ -3,14 +3,14 @@
     <Project Path="src/TapScribe.Bridge.Core/TapScribe.Bridge.Core.csproj" />
     <Project Path="src/TapScribe.Bridge.MacOS/TapScribe.Bridge.MacOS.csproj" />
     <Project Path="src/TapScribe.Bridge.Windows/TapScribe.Bridge.Windows.csproj" />
-    <Project Path="src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj" />
+    <Project Path="src/TapScribe.TrayBridge.Windows/TapScribe.TrayBridge.Windows.csproj" />
     <Project Path="src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj" />
     <Project Path="tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj" />
     <Project Path="tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj" />
-    <Project Path="tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj" />
+    <Project Path="tests/TapScribe.TrayBridge.Windows.Tests/TapScribe.TrayBridge.Windows.Tests.csproj" />
     <Project Path="tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj" />
   </Folder>
 </Solution>

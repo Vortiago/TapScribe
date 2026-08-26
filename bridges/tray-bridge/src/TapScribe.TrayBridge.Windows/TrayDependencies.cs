@@ -1,7 +1,7 @@
 using TapScribe.Bridge.Core;
 using TapScribe.Bridge.Windows;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// Everything outside the tray SHELL that it needs: the meeting runtime's own outside world

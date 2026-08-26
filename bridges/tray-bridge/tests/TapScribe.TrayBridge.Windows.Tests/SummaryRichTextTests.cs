@@ -2,7 +2,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge.Tests;
+namespace TapScribe.TrayBridge.Windows.Tests;
 
 /// <summary>
 /// What the summary pane actually paints. Core's <see cref="SummaryLayout"/> decides the runs

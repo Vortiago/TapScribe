@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 using TapScribe.Bridge.Windows;
 
-namespace TapScribe.TrayBridge;
+namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// The modal settings dialog, in four tabs (issue #106):
