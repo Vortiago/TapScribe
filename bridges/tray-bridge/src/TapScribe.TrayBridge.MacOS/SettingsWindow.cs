@@ -1,5 +1,6 @@
 using System.Globalization;
 using AppKit;
+using AVFoundation;
 using CoreGraphics;
 using TapScribe.Bridge.Core;
 
@@ -206,6 +207,9 @@ internal sealed class SettingsWindow : IDisposable
 
         Section(content, "Meetings");
         _processOnEnd = Check(content, "Transcribe and summarize when the meeting ends", _draft.ProcessOnEnd);
+
+        Section(content, "Permissions");
+        PermissionRows(content);
 
         _save = Button(content, "Save", Width - Padding - 100, 100);
         _save.Activated += OnSave;
@@ -613,6 +617,14 @@ internal sealed class SettingsWindow : IDisposable
         };
         check.SetButtonType(NSButtonType.Switch);
         check.State = on ? NSCellStateValue.On : NSCellStateValue.Off;
+        // A switch does not shrink its title to fit: ControlWidth clipped the longest of these to
+        // "…when the meeting e…". Take what the text needs, and when the control column cannot
+        // hold it, start at the left margin instead: a checkbox has no caption beside it, so that
+        // space is free, and one row out of alignment beats a sentence cut in half.
+        check.SizeToFit();
+        nfloat needed = check.Frame.Width;
+        nfloat left = needed <= Width - ControlLeft - Padding ? ControlLeft : Padding;
+        check.Frame = new CGRect(left, y, Math.Min(needed, Width - left - Padding), RowHeight);
         content.AddSubview(check);
         return check;
     }
@@ -631,6 +643,69 @@ internal sealed class SettingsWindow : IDisposable
         };
         content.AddSubview(slider);
         return slider;
+    }
+
+    /// <summary>The two grants a meeting needs, and what can still be done about each.
+    ///
+    /// Here rather than left to the first Start because that is where the prompts land today,
+    /// mid-meeting, and a dismissed one records a silent microphone with nothing anywhere saying
+    /// so. What each state MEANS is Core's <see cref="PermissionRow"/>; this renders it.</summary>
+    private void PermissionRows(NSView content)
+    {
+        Row(PermissionRow.For(MicrophoneTitle, MicrophoneState()), Privacy.Microphone);
+        // macOS 14.4 gained the process tap and no API for its consent, so this row can only ever
+        // report Unknown. Shown anyway: half the operators who meet the silent-far-end failure
+        // are looking for exactly this row, and the button still reaches the place that fixes it.
+        Row(PermissionRow.For(SystemAudioTitle, PermissionState.Unknown), Privacy.AudioCapture);
+
+        void Row(PermissionRow row, string privacyPane)
+        {
+            // One line where one is enough: the detail runs from a short "Granted." to a
+            // sentence, and a fixed two left a blank row above every button.
+            string text = $"{row.Title}: {row.Detail}";
+            Note(content, text, lines: text.Length > 64 ? 2 : 1);
+            if (row.ActionLabel is not { } label)
+                return;
+
+            NSButton button = Button(content, label, ControlLeft, 190);
+            button.Activated += (_, _) =>
+            {
+                if (row.Action == PermissionAction.Request)
+                    AVCaptureDevice.RequestAccessForMediaType(AVAuthorizationMediaType.Audio, _ => { });
+                else
+                    NSWorkspace.SharedWorkspace.OpenUrl(new NSUrl(privacyPane));
+            };
+        }
+    }
+
+    // What macOS says about the microphone right now. Asking does NOT prompt: only
+    // RequestAccessForMediaType does, and only from NotDetermined.
+    private static PermissionState MicrophoneState() =>
+        AVCaptureDevice.GetAuthorizationStatus(AVAuthorizationMediaType.Audio) switch
+        {
+            AVAuthorizationStatus.Authorized => PermissionState.Granted,
+            AVAuthorizationStatus.NotDetermined => PermissionState.NotDetermined,
+            // Restricted is a policy the operator cannot lift either, so it reads the same to them.
+            AVAuthorizationStatus.Denied or AVAuthorizationStatus.Restricted => PermissionState.Denied,
+            _ => PermissionState.Unknown,
+        };
+
+    // The system's own names for these, so the row matches what the operator will be looking at
+    // once the button has sent them there.
+    private const string MicrophoneTitle = "Microphone";
+    private const string SystemAudioTitle = "System Audio Recording";
+
+    /// <summary>Deep links into System Settings' privacy panes. An anchor macOS does not know
+    /// falls back to the Privacy root rather than failing, so the worst case is one more click.
+    /// </summary>
+    private static class Privacy
+    {
+        private const string Pane = "x-apple.systempreferences:com.apple.preference.security?";
+
+        internal const string Microphone = Pane + "Privacy_Microphone";
+
+        // Named after kTCCServiceAudioCapture, the service this grant belongs to.
+        internal const string AudioCapture = Pane + "Privacy_AudioCapture";
     }
 
     private NSTextField Note(NSView content, string text, int lines)
