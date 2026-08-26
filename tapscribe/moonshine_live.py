@@ -19,10 +19,15 @@ Consequence: this module touches nothing downstream — selecting Moonshine
 is purely a matter of which concrete `LiveChannel` the Recorder holds
 (see `tapscribe.live_control.plan_live`, which resolves the family swap
 from the requested model's catalog family; `/api/live/start` is a
-parse-and-delegate shim over it — ADR-0014). What was generalized
-downstream to make that swap seamless is documented in CONTEXT.md's
-`MoonshineLiveChannel` section — the single home for that architectural
-note.
+parse-and-delegate shim over it — ADR-0014).
+
+Two downstream pieces are GENERALIZED rather than forked, which is what
+makes the swap seamless. `WlKRelay.close()` sends the end-of-audio empty
+binary frame and drains until `ready_to_stop` — the same wire signal real
+WhisperLiveKit speaks — so close-time tail lines survive either engine.
+And `TapRelay`/`TapFanOut` hold the live channel through a resolver rather
+than a captured reference, so an already-open tap follows a family swap
+mid-stream.
 
 No subprocess here — unlike `WhisperLiveKitChannel`, there is no child
 process to spawn/supervise/pump logs from. Instead `start()` spins up a
