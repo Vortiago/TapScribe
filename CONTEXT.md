@@ -1297,7 +1297,9 @@ operations:
 - **`sessions`** — the dashboard read model: `gather_sessions` (the poll-path
   listing, memoised on cheap stat signatures), `read_session_meta` /
   `write_session_meta`, and the lazy full-transcript reads the slim poll
-  markers point at. Read-path only.
+  markers point at. It writes only its own sidecars — session meta and the
+  summary. `repoint_voice_person` is the one verb that crosses sessions,
+  rewriting Voice→Person pointers when a Person is merged away.
 - **`session_maintenance`** — destructive, infrequent operator operations:
   `absorb_session`, `delete_session_audio` / `delete_session_wav`,
   `prune_empty_sessions`, `session_is_empty`. Resolves via `session_paths`,

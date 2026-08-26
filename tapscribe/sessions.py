@@ -3,8 +3,9 @@
 Walks `recordings/<session>/` to build the per-session listing the dashboard
 polls (`gather_sessions`, memoised on cheap stat signatures), reads/writes the
 per-session `session-meta.json` (label, aliases, prompt/hotwords overrides),
-and lazily reads the full merged + per-WAV transcripts that the slim poll
-markers point at.
+lazily reads the full merged + per-WAV transcripts that the slim poll markers
+point at, and holds the cross-session Voice→Person repoint the merge route
+runs.
 
 The neighbouring concerns live in their own modules so this one stays the
 once-per-second read path: path resolution + the path-safety guard are in
