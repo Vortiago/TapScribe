@@ -1,4 +1,4 @@
-namespace TapScribe.TrayBridge.MacOS.Tests;
+namespace TapScribe.Bridge.Core.Tests;
 
 /// <summary>
 /// Reading a number back out of a Settings text field (#419). Three fields on the Mac

@@ -38,6 +38,9 @@ internal sealed class SettingsWindow : IDisposable
 
     private readonly NSWindow _window;
     private readonly IDispatcher _dispatcher;
+
+    // Why the pin grid is empty, or null if it is empty because there is nothing to pin.
+    private readonly string? _deviceError;
     private readonly Action<BridgeSettings> _apply;
     private readonly SettingsDraft _draft;
 
@@ -118,7 +121,9 @@ internal sealed class SettingsWindow : IDisposable
         ArgumentNullException.ThrowIfNull(dispatcher);
         _apply = apply;
         _dispatcher = dispatcher;
-        _draft = SettingsSeed.From(current, listDevices);
+        DeviceListing listing = SettingsSeed.Listing(listDevices);
+        _deviceError = listing.Error;
+        _draft = SettingsSeed.From(current, listing.Devices);
         // CaptureDevice.DefaultFor, not a comparison written here: the meter must sample the
         // endpoint the gate it is tuning will tap, and re-deriving that rule is how they drift.
         _micProbe = new MeterProbe(
@@ -567,15 +572,16 @@ internal sealed class SettingsWindow : IDisposable
     {
         if (_draft.DeviceRows.Count == 0)
         {
-            // The empty case is a REPORT, not a blank space. SettingsSeed swallows a CoreAudio
-            // enumeration failure so a wrong host or a rejected token stays fixable, and this is
-            // where the operator learns that is why the grid is empty. A saved pin is carried
-            // forward untouched by a Save made from this state.
+            // The empty case is a REPORT, not a blank space, and its two reasons are different
+            // answers. A saved pin survives a Save made from either.
             Note(
                 content,
-                "No audio devices could be listed, so there is nothing to pin. Any device you "
-                + "pinned before is kept.",
-                lines: 2);
+                _deviceError is { } why
+                    ? $"Audio devices could not be listed ({why}), so there is nothing to pin. "
+                        + "Any device you pinned before is kept."
+                    : "No audio devices are present, so there is nothing to pin. Any device you "
+                        + "pinned before is kept.",
+                lines: 3);
             return;
         }
 

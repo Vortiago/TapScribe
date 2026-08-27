@@ -1,19 +1,18 @@
-using TapScribe.Bridge.Core;
-
-namespace TapScribe.TrayBridge.MacOS;
+namespace TapScribe.Bridge.Core;
 
 /// <summary>
 /// One level meter's plumbing: an enumerator, a throwaway capture, and the
 /// <see cref="InputLevelMeter"/> reading it (#421). Its own class because the lifecycle is the
-/// difficulty and Settings has two. Not on the tap path, so every failure ends in a still bar.
+/// difficulty and each Settings dialog has two. Off the tap path, so a failure ends in a still
+/// bar, never a lost meeting.
 ///
-/// Started ON DEMAND. A system-audio meter is a second process tap and reading one needs the
-/// Screen and System Audio Recording grant, so an eager meter would fire that prompt at someone
-/// who came to fix a hostname. Two taps at once are fine (#420); the timing is the point.
+/// WHEN to start is the caller's, and the shells differ on purpose: Windows on open, macOS on
+/// demand, where an eager system-audio meter would fire the Screen and System Audio Recording
+/// prompt at someone who came to fix a hostname.
 /// </summary>
 /// <param name="openEnumerator">Opens an enumerator. Outlives the capture it produced.</param>
 /// <param name="pick">Which listed device to meter, or null when it is not present.</param>
-internal sealed class MeterProbe(
+public sealed class MeterProbe(
     Func<IAudioDeviceEnumerator> openEnumerator,
     Func<IReadOnlyList<CaptureDevice>, CaptureDevice?> pick) : IDisposable
 {
@@ -22,14 +21,14 @@ internal sealed class MeterProbe(
 
     /// <summary>Why the meter is not running, or null. A still bar and a denied grant look
     /// identical without it.</summary>
-    internal string? Error { get; private set; }
+    public string? Error { get; private set; }
 
     /// <summary>The current RMS, or 0 when nothing is running.</summary>
-    internal double Level => _meter?.Level ?? 0;
+    public double Level => _meter?.Level ?? 0;
 
-    internal bool Running => _meter is not null;
+    public bool Running => _meter is not null;
 
-    internal void Start()
+    public void Start()
     {
         if (_meter is not null)
             return;
@@ -61,25 +60,23 @@ internal sealed class MeterProbe(
                 throw;
             }
 
-            // Published BEFORE the start, so every way the start can fail has an owner for what
-            // Open already built. Assigned after it, a refused start left Stop with a null meter,
-            // an undisposed capture and an enumerator disposed under it. It is the likeliest
-            // failure of the whole feature: macOS asks for the System Audio Recording grant when
-            // the IOProc starts, so a declined prompt lands exactly here.
+            // Published BEFORE the start, so a failed start has an owner for what Open built.
+            // Assigned after it, a refusal left Stop with a null meter, an undisposed capture and
+            // an enumerator disposed under it. macOS answers the System Audio Recording prompt at
+            // IOProc start, so a declined grant lands exactly here.
             _meter = meter;
             meter.Start();
         }
         catch (Exception ex) when (CaptureSeam.IsDeclaredOpenFailure(ex))
         {
-            // The seam's whole set, named once in Core: a subset lets the rest escape an
-            // NSButton handler, which on AppKit ends the tray. Not a catch-all: that would
-            // report a bug as a bar that will not move.
+            // The whole open set: a subset lets the rest escape into a UI event handler, which
+            // on AppKit ends the tray. Not a catch-all, which would report a bug as a dead bar.
             Error = ex.Message;
             Stop();
         }
     }
 
-    internal void Stop()
+    public void Stop()
     {
         // Meter first: it owns the capture, and a live capture over a disposed enumerator is the
         // ownership mistake the seam's disposal contract exists to prevent.

@@ -1,12 +1,11 @@
 using System.Runtime.InteropServices;
-using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge.MacOS.Tests;
+namespace TapScribe.Bridge.Core.Tests;
 
 /// <summary>
-/// How the Mac Settings window seeds its draft (#419). The window is AppKit and cannot be
-/// tested; the seeding is not, and it is the half that can silently destroy an operator's
-/// saved selection.
+/// How a Settings dialog seeds its draft, and how it reports a device list it could not get
+/// (#419, #421). Both dialogs are untestable UI; the seeding is not, and it is the half that
+/// can silently destroy a saved selection.
 ///
 /// <see cref="SettingsDraft.ToSettings"/> collects the pin grid and the pins whose device is
 /// absent, and both of those are populated by <see cref="SettingsDraft.SetAvailableDevices"/>.
@@ -24,7 +23,7 @@ public class SettingsSeedTests
     {
         var current = new BridgeSettings { Host = "recorder.local", Port = 9443, Tls = true, Token = "tap-token" };
 
-        SettingsDraft draft = SettingsSeed.From(current, static () => []);
+        SettingsDraft draft = SettingsSeed.From(current, []);
 
         Assert.Equal("recorder.local", draft.Host);
         Assert.Equal(9443, draft.Port);
@@ -41,7 +40,7 @@ public class SettingsSeedTests
         };
 
         SettingsDraft draft = SettingsSeed.From(
-            current, static () => [new CaptureDevice("uid-1", "Desk mic", DeviceFlow.Capture, IsDefault: true)]);
+            current, [new CaptureDevice("uid-1", "Desk mic", DeviceFlow.Capture, IsDefault: true)]);
 
         DeviceSelection.Pinned saved = Assert.Single(draft.ToSettings().Devices.OfType<DeviceSelection.Pinned>());
         Assert.Equal("uid-1", saved.DeviceId);
@@ -56,7 +55,7 @@ public class SettingsSeedTests
             Devices = [new DeviceSelection.Pinned("uid-gone", "Desk mic", "Desk mic", SavedGate)],
         };
 
-        SettingsDraft draft = SettingsSeed.From(current, static () => []);
+        SettingsDraft draft = SettingsSeed.From(current, []);
 
         DeviceSelection.Pinned saved = Assert.Single(draft.ToSettings().Devices.OfType<DeviceSelection.Pinned>());
         Assert.Equal("uid-gone", saved.DeviceId);
@@ -75,7 +74,8 @@ public class SettingsSeedTests
         };
 
         SettingsDraft draft = SettingsSeed.From(
-            current, static IReadOnlyList<CaptureDevice> () => throw new ExternalException("no audio service"));
+            current, SettingsSeed.Listing(
+                static IReadOnlyList<CaptureDevice> () => throw new ExternalException("no audio service")).Devices);
 
         DeviceSelection.Pinned saved = Assert.Single(draft.ToSettings().Devices.OfType<DeviceSelection.Pinned>());
         Assert.Equal("uid-1", saved.DeviceId);
@@ -93,9 +93,44 @@ public class SettingsSeedTests
         };
 
         SettingsDraft draft = SettingsSeed.From(
-            current, static () => [new CaptureDevice("uid-1", "Desk mic", DeviceFlow.Capture, IsDefault: false)]);
+            current, [new CaptureDevice("uid-1", "Desk mic", DeviceFlow.Capture, IsDefault: false)]);
 
         DeviceSelection.Pinned saved = Assert.Single(draft.ToSettings().Devices.OfType<DeviceSelection.Pinned>());
         Assert.Equal(SavedGate.Sensitivity, saved.Gate!.Sensitivity);
+    }
+
+
+    [Fact]
+    public void Listing_WhenTheDeviceTreeCannotBeWalked_ReportsItRatherThanAnEmptyList()
+    {
+        // IAudioDeviceEnumerator.List's own contract: an empty list means "no endpoints",
+        // never "the question could not be asked".
+        DeviceListing listing = SettingsSeed.Listing(
+            static IReadOnlyList<CaptureDevice> () => throw new ExternalException("no audio service"));
+
+        Assert.Empty(listing.Devices);
+        Assert.NotNull(listing.Error);
+        Assert.Contains("no audio service", listing.Error);
+    }
+
+    [Fact]
+    public void Listing_WhenThereAreGenuinelyNoDevices_ReportsNoFailure()
+    {
+        // The other side of it, and why Error is nullable: an empty grid here is the truth.
+        DeviceListing listing = SettingsSeed.Listing(static () => []);
+
+        Assert.Empty(listing.Devices);
+        Assert.Null(listing.Error);
+    }
+
+    [Fact]
+    public void Listing_PassesTheDevicesStraightThrough()
+    {
+        CaptureDevice mic = new("mic-1", "Desk mic", DeviceFlow.Capture, true);
+
+        DeviceListing listing = SettingsSeed.Listing(() => [mic]);
+
+        Assert.Equal([mic], listing.Devices);
+        Assert.Null(listing.Error);
     }
 }

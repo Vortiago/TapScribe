@@ -264,15 +264,13 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         // pipelines is the runtime's business (connection and device changes bind at the next
         // Start; the per-device level-gate knobs re-tune in place). This owns the dialog only.
         //
-        // The dialog's live level meters (#152) open a second, display-only shared-mode capture
-        // per device; this enumerator opens them and outlives those captures (the form disposes
-        // them on close). Declared before the form so it disposes AFTER it, captures first.
         // Before the loop's first turn there is no runtime and so no settings to edit; the
         // dialog would seed itself from nothing.
         if (_runtime is not { } runtime)
             return;
-        using IAudioDeviceEnumerator meterEnumerator = _deps.Bridge.OpenEnumerator();
-        using var form = new SettingsForm(runtime.Settings, ListDevices, meterEnumerator.Open);
+        // The factory, not an open enumerator: each meter (#152) opens and releases its own,
+        // so the disposal ordering has one owner.
+        using var form = new SettingsForm(runtime.Settings, ListDevices, _deps.Bridge.OpenEnumerator);
         if (form.ShowDialog() != DialogResult.OK)
             return;
         OnRuntime(r => r.ApplySettings(form.Result));

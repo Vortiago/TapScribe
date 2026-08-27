@@ -1,5 +1,4 @@
 using System.Drawing;
-using System.Runtime.InteropServices;
 using TapScribe.Bridge.Core;
 using TapScribe.Bridge.Windows;
 
@@ -27,8 +26,6 @@ namespace TapScribe.TrayBridge.Windows;
 internal sealed class SettingsForm : Form
 {
     private readonly Func<IReadOnlyList<CaptureDevice>> _listDevices;
-    // Opens a device as a second, display-only capture for the live level meters (#152).
-    private readonly Func<CaptureDevice, IAudioCapture> _openCapture;
     // All the editing logic lives in this pure, unit-tested view-model; the form is a thin
     // two-way binding of controls onto it (seeded on build, synced back on Save).
     private readonly SettingsDraft _draft;
@@ -73,17 +70,14 @@ internal sealed class SettingsForm : Form
     private readonly TrackBar _systemSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
     private readonly Label _systemSensitivityValue = new() { AutoSize = true };
 
-    // Live per-device input-level meters (#152): a bar under each sensitivity slider, fed on
-    // a UI-thread timer from a display-only InputLevelMeter so the operator tunes against the
-    // level they actually see. Display only — these never touch the tap/gate pipeline.
+    // Live per-device input-level meters (#152): a bar under each sensitivity slider, fed on a
+    // UI-thread timer so the operator tunes against the level they see. Display only, never on
+    // the tap/gate pipeline.
     private readonly LevelMeterBar _micMeter = new();
     private readonly LevelMeterBar _systemMeter = new();
     private readonly System.Windows.Forms.Timer _meterTimer = new() { Interval = 50 };
-    private InputLevelMeter? _micLevel;
-    private InputLevelMeter? _systemLevel;
-    // The most recent device enumeration (from PopulateDevices), reused by StartMeters so a
-    // dialog open / Refresh walks the WASAPI device tree once, not twice.
-    private IReadOnlyList<CaptureDevice> _listedDevices = [];
+    private readonly MeterProbe _micProbe;
+    private readonly MeterProbe _systemProbe;
 
     // Level-gate tab — the shared knobs.
     private readonly NumericUpDown _hangover =
@@ -104,11 +98,16 @@ internal sealed class SettingsForm : Form
     public SettingsForm(
         BridgeSettings current,
         Func<IReadOnlyList<CaptureDevice>> listDevices,
-        Func<CaptureDevice, IAudioCapture> openCapture)
+        Func<IAudioDeviceEnumerator> openEnumerator)
     {
         _listDevices = listDevices;
-        _openCapture = openCapture;
         _draft = SettingsDraft.Seed(current);
+        // CaptureDevice.DefaultFor, not a comparison written here: the meter must sample the
+        // endpoint the gate it is tuning will tap, and re-deriving that rule is how they drift.
+        _micProbe = new MeterProbe(
+            openEnumerator, devices => CaptureDevice.DefaultFor(devices, DeviceFlow.Capture));
+        _systemProbe = new MeterProbe(
+            openEnumerator, devices => CaptureDevice.DefaultFor(devices, DeviceFlow.Render));
         Result = current;
 
         Text = "TapScribe — Settings";
@@ -423,22 +422,12 @@ internal sealed class SettingsForm : Form
     {
         _devices.Rows.Clear();
 
-        IReadOnlyList<CaptureDevice> available;
-        try
-        {
-            available = _listDevices();
-            _deviceStatus.Text = "";
-        }
-        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
-        {
-            // Enumeration failed (no audio service, a native error): the two follow-default
-            // checkboxes still work (they resolve at Start), so just show no pin rows. The
-            // filter names the enumerator seam's declared failure.
-            available = [];
-            _deviceStatus.Text = $"Could not list devices: {ex.Message}";
-        }
-
-        _listedDevices = available; // reused by StartMeters; this is the one enumeration
+        // The follow-default checkboxes resolve at Start, so a dialog that could not list
+        // stays usable and simply shows no pin rows.
+        DeviceListing listing = SettingsSeed.Listing(_listDevices);
+        IReadOnlyList<CaptureDevice> available = listing.Devices;
+        _deviceStatus.Text =
+            listing.Error is { } why ? $"Could not list devices: {why}" : "";
 
         // The draft computes the pin rows (pre-ticked/named from saved pins) and the
         // absent-pin carry-forward; the form just renders the rows into the grid.
@@ -452,51 +441,39 @@ internal sealed class SettingsForm : Form
 
     // --- Live input-level meters (#152) ----------------------------------------------
 
-    // Open a display-only meter on the default mic and the default loopback endpoint (the
-    // two follow-default rows), and drive the bars from a UI-thread timer. Works off the
-    // device list PopulateDevices already enumerated. Best-effort: a device that's absent or
-    // won't open just leaves its bar flat — the meter is a tuning aid, never required to edit.
+    // Both meters on open, driven from a UI-thread timer. Best-effort: an absent or refused
+    // device leaves its bar flat and says why rather than failing the dialog.
     private void StartMeters()
     {
-        _micLevel = TryOpenMeter(CaptureDevice.DefaultFor(_listedDevices, DeviceFlow.Capture));
-        _systemLevel = TryOpenMeter(CaptureDevice.DefaultFor(_listedDevices, DeviceFlow.Render));
-        if (_micLevel is null && _systemLevel is null)
+        _micProbe.Start();
+        _systemProbe.Start();
+        ReportMeterErrors();
+        if (!_micProbe.Running && !_systemProbe.Running)
             return;
 
         _meterTimer.Tick += OnMeterTick;
         _meterTimer.Start();
     }
 
-    // Pull each meter's latest level (a torn-read-safe atomic updated on the capture thread)
-    // into its bar. Cheap and non-blocking — exactly what belongs on a UI timer tick.
-    private void OnMeterTick(object? sender, EventArgs e)
+    // A dead bar and a denied device look identical without this. Yields to an enumeration
+    // failure, which causes both when it happens.
+    private void ReportMeterErrors()
     {
-        _micMeter.Level = _micLevel?.Level ?? 0;
-        _systemMeter.Level = _systemLevel?.Level ?? 0;
+        if (_deviceStatus.Text.Length > 0)
+            return;
+
+        (string Label, string? Error)[] meters =
+            [("Microphone", _micProbe.Error), ("System audio", _systemProbe.Error)];
+        _deviceStatus.Text = string.Join(
+            "  ", meters.Where(m => m.Error is not null).Select(m => $"{m.Label} meter: {m.Error}"));
     }
 
-    private InputLevelMeter? TryOpenMeter(CaptureDevice? device)
+    // Pull each meter's latest level (a torn-read-safe atomic updated on the capture thread)
+    // into its bar. Cheap and non-blocking, which is what belongs on a UI timer tick.
+    private void OnMeterTick(object? sender, EventArgs e)
     {
-        if (device is null)
-            return null;
-        IAudioCapture? capture = null;
-        try
-        {
-            capture = _openCapture(device);
-            var meter = new InputLevelMeter(capture);
-            meter.Start();
-            return meter;
-        }
-        catch (Exception ex) when (
-            ex is ExternalException or NotSupportedException or ArgumentException or InvalidOperationException)
-        {
-            // Device in use / invalidated / unsupported format: leave the bar flat rather
-            // than fail the dialog — the same best-effort open as the meeting capture path.
-            // If Start (or the meter ctor) threw after the capture opened, dispose it so a
-            // failed open never leaks a subscribed WASAPI client (mirrors CaptureOrchestrator).
-            capture?.Dispose();
-            return null;
-        }
+        _micMeter.Level = _micProbe.Level;
+        _systemMeter.Level = _systemProbe.Level;
     }
 
     // Re-open the meters against the devices present now — wired to Refresh devices so that
@@ -514,10 +491,8 @@ internal sealed class SettingsForm : Form
     {
         _meterTimer.Stop();
         _meterTimer.Tick -= OnMeterTick;
-        _micLevel?.Dispose();
-        _systemLevel?.Dispose();
-        _micLevel = null;
-        _systemLevel = null;
+        _micProbe.Stop();
+        _systemProbe.Stop();
         // Drop both bars to empty: if a Refresh loses a device, no meter reopens and the
         // timer won't tick, so without this the bar would stay frozen at its last level.
         _micMeter.Level = 0;
@@ -529,6 +504,8 @@ internal sealed class SettingsForm : Form
         if (disposing)
         {
             StopMeters(); // backstop for the FormClosing teardown; releases the captures
+            _micProbe.Dispose();
+            _systemProbe.Dispose();
             _meterTimer.Dispose();
         }
         base.Dispose(disposing);

@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
-using TapScribe.Bridge.Core;
 
-namespace TapScribe.TrayBridge.MacOS.Tests;
+namespace TapScribe.Bridge.Core.Tests;
 
 /// <summary>
 /// The Settings level meter's capture lifecycle (#421). The window around it is AppKit and cannot be

@@ -145,13 +145,10 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                 }
                 catch (Exception ex) when (CaptureSeam.IsDeclaredCaptureFailure(ex))
                 {
-                    // A device that failed to OPEN is skipped, not fatal: the remaining ones
-                    // still start, so one dead device doesn't sink the whole meeting.
-                    // TapSession.Begin rethrows WITHOUT disposing the capture (it only
-                    // unsubscribes), so release it here and surface the failure tagged by
-                    // identity. Anything outside the seam's capture set is NOT a skippable
-                    // device failure and goes to the unwind below, which owns that rule.
-                    // Dispose is contract-bound not to throw.
+                    // A device that failed to OPEN is skipped, not fatal: one dead device must
+                    // not sink the meeting. TapSession.Begin rethrows WITHOUT disposing the
+                    // capture, so release it here and tag the failure by identity. Anything
+                    // outside the capture set goes to the unwind below, which owns that rule.
                     spec.Capture.Dispose();
                     skipped = ex;
                 }

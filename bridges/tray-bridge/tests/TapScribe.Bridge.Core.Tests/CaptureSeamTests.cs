@@ -43,9 +43,8 @@ public class CaptureSeamTests
     [InlineData(typeof(InvalidOperationException))]
     public void IsDeclaredCaptureFailure_AcceptsEveryTypeStartAndStopDocument(Type declared)
     {
-        // One case per <exception> tag on IAudioCapture.Start and .Stop, which declare the
-        // same pair. Start's ExternalException is a refused endpoint; Stop's is one that went
-        // away mid-capture.
+        // One case per <exception> tag on IAudioCapture.Start and .Stop: the list IS the
+        // contract, the way the open set's is.
         Assert.True(CaptureSeam.IsDeclaredCaptureFailure((Exception)Activator.CreateInstance(declared)!));
     }
 
@@ -54,10 +53,9 @@ public class CaptureSeamTests
     [InlineData(typeof(ArgumentException))]
     public void IsDeclaredCaptureFailure_RejectsWhatOnlyOpeningADeviceCanRaise(Type openOnly)
     {
-        // The whole reason this is a second predicate rather than a reuse of the first. Opening
-        // a device can answer "no format I can take" or "no such endpoint"; a capture already
-        // holding one cannot. A release path that filtered on the OPEN set would swallow both,
-        // and each of them arriving here is a bug in the backend, not a device failure.
+        // Why this is a second predicate and not a reuse of the first: a capture already
+        // holding an endpoint cannot raise these, so either one arriving is a backend bug, and
+        // a teardown filtering on the OPEN set would swallow it.
         Assert.False(CaptureSeam.IsDeclaredCaptureFailure((Exception)Activator.CreateInstance(openOnly)!));
     }
 
