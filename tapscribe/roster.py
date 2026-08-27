@@ -32,10 +32,12 @@ can't interleave it (cooperative scheduling runs the sync body to completion).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .session_paths import FILENAME_ROSTER_JSON
+from .tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE, is_mode
 from .text import atomic_write_text, parse_wav_speaker_slug
 
 _VALID_SOURCES = ("recorded", "live")
@@ -89,11 +91,16 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
         return None
     source = value.get("source")
     wavs = value.get("wavs")
+    mode = value.get("mode")
     return {
         "name": value["name"] if isinstance(value.get("name"), str) else "",
         "source": source if source in _VALID_SOURCES else "live",
         "slug": value["slug"] if isinstance(value.get("slug"), str) else "",
         "wavs": [w for w in wavs if isinstance(w, str)] if isinstance(wavs, list) else [],
+        # `multi` once any tap for this identity opened multi-person, so
+        # diarization is a property of the recording rather than of whatever the
+        # setting says later (ADR-0021). A pre-feature entry reads as single.
+        "mode": mode if is_mode(mode) else TAP_MODE_SINGLE,
     }
 
 
@@ -111,6 +118,24 @@ def coerce_roster(raw: Any) -> dict[str, dict[str, Any]]:
         if isinstance(identity, str) and coerced is not None:
             out[identity] = coerced
     return out
+
+
+def slug_owners(roster: Mapping[str, Any]) -> dict[str, set[str]]:
+    """`{speaker slug: identities recording under it}`.
+
+    A slug is `safe_name(<bridge display name>)`, so it is NOT identity-unique:
+    two tray machines both streaming "System audio" share one. Every consumer of
+    the slug↔identity bridge needs the same answer to "is this slug ambiguous?",
+    so it is derived here once rather than per caller (#440).
+
+    `slug` is written only on the recorded path (`record_occurrence`), so a
+    live-only tap contributes nothing and cannot make a slug look shared.
+    """
+    owners: dict[str, set[str]] = {}
+    for identity, entry in roster.items():
+        if slug := (entry or {}).get("slug"):
+            owners.setdefault(slug, set()).add(identity)
+    return owners
 
 
 def read_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
@@ -134,6 +159,7 @@ def record_occurrence(
     name: str = "",
     recorded: bool,
     wav: str | None = None,
+    mode: str | None = None,
 ) -> None:
     """Upsert one Identity's presence in this session. Idempotent and
     merge-on-write: a reconnect or a later utterance accrues WAVs (deduped)
@@ -146,9 +172,27 @@ def record_occurrence(
     if not identity:
         return
     roster = read_roster(session_dir)
-    entry = roster.get(identity) or {"name": "", "source": "live", "slug": "", "wavs": []}
+    entry = roster.get(identity) or {
+        "name": "",
+        "source": "live",
+        "slug": "",
+        "wavs": [],
+        "mode": TAP_MODE_SINGLE,
+    }
     if clean_name := sanitise_name(name):
         entry["name"] = clean_name
+    # Upgrade-only, like `source` below. This runs per utterance and the tap
+    # path always passes a RESOLVED mode (never None), so last-write-wins would
+    # let one late tap — a reconnect, a cleared override, a live-only WS —
+    # retroactively mark a session's already-recorded multi-person WAVs single.
+    # Diarization is a property of the recording: if any tap for this identity
+    # carried several humans, this session's audio for it does. That does strand
+    # a mid-session multi->single correction until the next session (the Roster
+    # is per-session), which the asymmetry justifies: diarizing single-person
+    # audio costs one wasted pass and finds one Voice, while skipping
+    # multi-person audio loses the attribution entirely.
+    if mode == TAP_MODE_MULTI:
+        entry["mode"] = mode
     if recorded:
         entry["source"] = "recorded"
         if wav:

@@ -210,7 +210,8 @@ export function build(ctx) {
   // exactly those literals).
   /**
    * @typedef {"idle_ttl_s" | "parakeet_chunk_s" | "parakeet_overlap_s"
-   *   | "summarize_timeout_s" | "summarize_gguf_ctx"} KnobField
+   *   | "summarize_timeout_s" | "summarize_gguf_ctx"
+   *   | "diarize_threshold" | "diarize_max_speakers"} KnobField
    */
   /**
    * @param {string} key the /api/config/{key} this row saves through
@@ -262,6 +263,14 @@ export function build(ctx) {
       /** @type {HTMLInputElement} */ (pick(frag, "setGgufCtx")),
       /** @type {HTMLButtonElement} */ (pick(frag, "setGgufCtxSave")),
       pick(frag, "setGgufCtxStatus")),
+    knobRow("diarize-threshold", "diarize_threshold",
+      /** @type {HTMLInputElement} */ (pick(frag, "setDiarizeThreshold")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setDiarizeThresholdSave")),
+      pick(frag, "setDiarizeThresholdStatus")),
+    knobRow("diarize-max-speakers", "diarize_max_speakers",
+      /** @type {HTMLInputElement} */ (pick(frag, "setDiarizeMaxSpeakers")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setDiarizeMaxSpeakersSave")),
+      pick(frag, "setDiarizeMaxSpeakersStatus")),
   ];
   const specialistsEl = pick(frag, "setSpecialists");
 

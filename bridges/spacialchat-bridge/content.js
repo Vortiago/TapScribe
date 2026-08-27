@@ -31,7 +31,7 @@
 //     "streaming", yellow "reconnecting", red "refresh needed", etc.
 //
 // Wire contract (see bridges/README.md):
-//   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>
+//   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>&tap_mode=<single|multi>
 //   Binary frames, 20 ms each (320 samples = 640 bytes), int16 LE mono.
 //   No JSON, no HTTP, no WhisperLiveKit awareness — the Recorder fans
 //   audio out internally to its supervised WlK child and to disk.
@@ -204,11 +204,17 @@
     publishStatus();
   }
 
+  // Reserved `tap_mode` value. A SpatialChat tap is per-participant, so it
+  // always carries one human. Stamped from the Recorder by
+  // tools/stamp_tap_wire.py; never hand-edit.
+  const TAP_MODE_SINGLE = "single";
+
   const tapWsUrl = (identity, name, utteranceId, sessionId) => {
     const qp = new URLSearchParams({
       identity,
       name: name || "",
       utterance_id: utteranceId,
+      tap_mode: TAP_MODE_SINGLE,
     });
     // Route into the meeting's detached Session when this utterance was
     // affiliated to one (snapshotted at utterance start; see ensureUtterance).

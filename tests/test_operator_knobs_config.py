@@ -51,13 +51,15 @@ from wav_builders import seed_wav  # type: ignore[import-not-found]  # tests/ on
 
 from tapscribe import config
 from tapscribe.config_store import read_config, write_config
+from tapscribe.diarizers.knobs import resolve_max_speakers, resolve_threshold
 from tapscribe.summarizers.catalog import default_gguf_ctx
 from tapscribe.summarizers.command import _default_timeout_s
 from tapscribe.transcribers._chunked import ChunkedTranscriber
 
 # --------------------------------------------------------------------------------
-# The knob table. Every uniform case below is parametrized over ALL FOUR rows — a
-# sweep that pins only the headline knob ships the other three unguarded.
+# The knob table: every dashboard-tunable numeric knob. Each uniform case below
+# is parametrized over ALL rows — a sweep that pins only the headline knob ships
+# the rest unguarded.
 # --------------------------------------------------------------------------------
 
 
@@ -111,6 +113,24 @@ KNOBS = [
         8192,
         16384,
         1_000_000,
+    ),
+    (
+        "diarize-threshold",
+        "TAPSCRIBE_DIARIZE_THRESHOLD",
+        "diarize-threshold.txt",
+        resolve_threshold,
+        0.7,
+        0.55,
+        5.0,
+    ),
+    (
+        "diarize-max-speakers",
+        "TAPSCRIBE_DIARIZE_MAX_SPEAKERS",
+        "diarize-max-speakers.txt",
+        resolve_max_speakers,
+        8,
+        4,
+        500,
     ),
 ]
 

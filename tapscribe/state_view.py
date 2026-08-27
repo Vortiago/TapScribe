@@ -37,9 +37,15 @@ from typing import Any
 
 from fastapi.encoders import jsonable_encoder
 
-from . import config
+from . import config, tap_mode
 from . import hallucinations as hallucinations_mod
 from .batch_transcribe import resolve_batch_model
+from .diarizers.knobs import (
+    ENV_MAX_SPEAKERS,
+    ENV_THRESHOLD,
+    resolve_max_speakers,
+    resolve_threshold,
+)
 from .live import LiveSnapshot
 from .name_resolution import attach_people_view
 from .people import PeopleRegistry
@@ -81,6 +87,8 @@ _KNOB_SOURCES: tuple[tuple[str, str], ...] = (
     ("PARAKEET_OVERLAP_S_FILE", ENV_OVERLAP_S),
     ("SUMMARIZE_TIMEOUT_S_FILE", ENV_TIMEOUT_S),
     ("SUMMARIZE_GGUF_CTX_FILE", ENV_GGUF_CTX),
+    ("DIARIZE_THRESHOLD_FILE", ENV_THRESHOLD),
+    ("DIARIZE_MAX_SPEAKERS_FILE", ENV_MAX_SPEAKERS),
 )
 # Same single-(key, value)-slot shape as hallucinations._RULES_CACHE /
 # people._PEOPLE_CACHE / config_store._CONFIG_TEXT_CACHE: a mutated dict rather
@@ -111,6 +119,8 @@ def _knob_values() -> dict[str, float | int]:
         "parakeet_overlap_s": current_parakeet_overlap_s(),
         "summarize_timeout_s": current_summarize_timeout_s(),
         "summarize_gguf_ctx": default_gguf_ctx(),
+        "diarize_threshold": resolve_threshold(),
+        "diarize_max_speakers": resolve_max_speakers(),
     }
     _KNOB_CACHE["_slot"] = (key, values)
     return values
@@ -148,6 +158,7 @@ def compute_inputs_support() -> dict[str, bool]:
 def active_rows(
     active_streams: list[ActiveStream],
     tap_setting_for: Callable[[str], TapSetting],
+    mode_overrides: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """One /api/state row per open tap: the ActiveStream as a dict, with the
     operator's CURRENT per-identity record/live preference overlaid (the
@@ -158,12 +169,19 @@ def active_rows(
     `tap_setting_for` is `recorder.tap_settings.get`, passed in rather than
     reached for, so this stays a pure function of its snapshots.
     """
+    mode_overrides = mode_overrides or {}
     rows = []
     for stream in active_streams:
         row = asdict(stream)
         pref = tap_setting_for(stream.identity)
         row["record"] = pref.record
         row["live"] = pref.live
+        # Effective NOW, not at WS open: an operator who flips a tap to
+        # multi-person should see it, even though the change only affects the
+        # next tap's Roster entry (ADR-0021).
+        row["mode"] = tap_mode.resolve(
+            declared=stream.declared_mode, override=mode_overrides.get(stream.identity)
+        )
         row["level"] = round(row["level"], 2)
         row["bytes_received"] = (
             (row["bytes_received"] + TAP_BYTES_BUCKET // 2) // TAP_BYTES_BUCKET * TAP_BYTES_BUCKET

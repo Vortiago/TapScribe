@@ -21,6 +21,7 @@ from tapscribe.people import (
     InvalidMergeRequest,
     PeopleRegistry,
     PersonNotFound,
+    _coerce_people,
 )
 
 
@@ -173,3 +174,67 @@ def test_detach_sole_identity_is_a_no_op_and_keeps_the_name(recordings_dir: Path
     assert result["identities"] == ["solo"]
     assert len(reg.as_list()) == 1
     assert reg.person_for_identity("solo")["name"] == "Alice Havso"
+
+
+# ---- A Person can own no Identity (ADR-0021) -------------------------------
+
+
+def test_a_named_person_with_no_identities_survives_a_round_trip() -> None:
+    """Mapping a Voice by typing a name creates one. The load path used to drop
+    identity-less rows, so the Person vanished on the next read."""
+    people = _coerce_people({"people": [{"id": "p1", "name": "Alice", "identities": []}]})
+
+    assert [(x["id"], x["name"]) for x in people] == [("p1", "Alice")]
+
+
+def test_an_unnamed_person_with_no_identities_is_still_dropped() -> None:
+    """Nothing reaches it and nothing names it — junk, not a Person."""
+    assert _coerce_people({"people": [{"id": "p1", "name": "", "identities": []}]}) == []
+
+
+def test_create_mints_one_named_person_reachable_by_id() -> None:
+    reg = PeopleRegistry([])
+
+    person = reg.create("Alice Andersen")
+
+    assert person["identities"] == []
+    assert reg.get(person["id"])["name"] == "Alice Andersen"
+
+
+def test_create_does_not_put_the_person_in_the_identity_index() -> None:
+    """It owns no Identity, so voice mapping must resolve through
+    `get(person_id)` rather than the identity index."""
+    reg = PeopleRegistry([])
+    person = reg.create("Alice")
+
+    assert reg.person_for_identity(person["id"]) is None
+
+
+def test_rename_and_merge_still_work_on_an_identity_less_person() -> None:
+    reg = PeopleRegistry([])
+    voice_person = reg.create("Alice")
+    reg.sync(["tray-mic-1"])
+    owner = reg.person_for_identity("tray-mic-1")
+
+    reg.rename(voice_person["id"], "Alice A")
+    assert reg.get(voice_person["id"])["name"] == "Alice A"
+
+    reg.merge(owner["id"], voice_person["id"])
+    assert reg.get(voice_person["id"]) is None
+    assert reg.person_for_identity("tray-mic-1")["id"] == owner["id"]
+
+
+def test_a_duplicate_identity_row_is_still_dropped_rather_than_kept_as_a_ghost() -> None:
+    """The widening is for a Person that never owned an Identity. A row the
+    dedup EMPTIED is a torn-file repair — keeping it as a named, identity-less
+    Person makes it indistinguishable from a Voice mapping, and nothing prunes."""
+    people = _coerce_people(
+        {
+            "people": [
+                {"id": "p1", "name": "Alice", "identities": ["tray-mic-1"]},
+                {"id": "p2", "name": "Alicia", "identities": ["tray-mic-1"]},
+            ]
+        }
+    )
+
+    assert [p["id"] for p in people] == ["p1"]

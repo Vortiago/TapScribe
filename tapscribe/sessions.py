@@ -3,8 +3,9 @@
 Walks `recordings/<session>/` to build the per-session listing the dashboard
 polls (`gather_sessions`, memoised on cheap stat signatures), reads/writes the
 per-session `session-meta.json` (label, aliases, prompt/hotwords overrides),
-and lazily reads the full merged + per-WAV transcripts that the slim poll
-markers point at.
+lazily reads the full merged + per-WAV transcripts that the slim poll markers
+point at, and holds the cross-session Voice→Person repoint the merge route
+runs.
 
 The neighbouring concerns live in their own modules so this one stays the
 once-per-second read path: path resolution + the path-safety guard are in
@@ -24,15 +25,17 @@ import json
 import os
 import os.path
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import tapscribe.strip_meta as strip_meta
+import tapscribe.voices as voices
 
 from . import config
 from .audio import wav_duration_s
-from .name_resolution import known_names
+from .name_resolution import DEFAULT_KNOWN_NAMES_LIMIT, known_names_from, resolve_session_names
 from .people import PeopleRegistry
 from .roster import coerce_roster, read_roster
 from .session_paths import (
@@ -42,6 +45,7 @@ from .session_paths import (
     FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
+    FILENAME_VOICES_JSON,
     SessionPathError,
     create_session_dir,
     resolve_session_dir,
@@ -105,6 +109,21 @@ def _coerce_languages(value: Any) -> list[str]:
     return list(dict.fromkeys(v.strip().lower() for v in value if isinstance(v, str) and v.strip()))
 
 
+def _coerce_voices(value: Any) -> dict[str, dict[str, str]]:
+    """The operator's Voice→Person map (ADR-0021):
+    `identity#<voice> → {person_id, run_id}`. Junk entries drop."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for key, entry in value.items():
+        if not isinstance(key, str) or not key or not isinstance(entry, dict):
+            continue
+        person_id, run_id = entry.get("person_id"), entry.get("run_id")
+        if isinstance(person_id, str) and person_id:
+            out[key] = {"person_id": person_id, "run_id": run_id if isinstance(run_id, str) else ""}
+    return out
+
+
 def _coerce_session_meta(raw: Any) -> dict[str, Any]:
     """Coerce a raw session-meta dict into the standard shape: string-field
     projection, alias coercion, language normalisation. Shared by
@@ -118,6 +137,12 @@ def _coerce_session_meta(raw: Any) -> dict[str, Any]:
     langs = _coerce_languages(raw.get("languages"))
     if langs:
         out["languages"] = langs
+    # Must mirror `write_session_meta`'s allowlist: this projection is what the
+    # READ path emits, so widening only the writer stores a `voices` map that is
+    # then stripped on every read — silently, with nothing failing.
+    voices_map = _coerce_voices(raw.get("voices"))
+    if voices_map:
+        out["voices"] = voices_map
     return out
 
 
@@ -151,10 +176,13 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     losing the operator's label + aliases + overrides all at once)."""
     session_dir = create_session_dir(session)
     existing = read_session_meta(session)
-    allowed = {"aliases", "languages", *_META_STRING_FIELDS}
+    allowed = {"aliases", "languages", "voices", *_META_STRING_FIELDS}
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
     sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
+    voices_map = _coerce_voices(merged.get("voices"))
+    if voices_map:
+        sanitized["voices"] = voices_map
     # The per-meeting candidate-language override (ADR-0010) is a list, not a
     # string field. Validate every code against the catalog at WRITE time (like
     # the global config/languages writer) so a junk code can't reach the
@@ -183,36 +211,113 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     )
 
 
-def known_names_for_session(session: str) -> list[str]:
-    """The known-people display names to hint a summarize of `session` (the
-    `tapscribe.summarizers.build_names_hint` input): this session's participants
-    first, then people the People Registry has learned across previous meetings.
+def repoint_voice_person(old_person_id: str, new_person_id: str) -> list[str]:
+    """Rewrite every session's Voice→Person map from `old_person_id` to
+    `new_person_id`. Returns the sessions touched, in walk order.
 
-    The I/O wrapper around the pure `name_resolution.known_names` — reads the
-    session's roster + alias overrides + the registry, the same roster→Person
-    join `resolve_session_names` runs at `/api/state` build time. (It does not
-    replay the dashboard's ADR-0009 F1 slug backfill for old rosterless
-    recordings — that needs the WAV-derived speaker list `attach_people` has on
-    hand and this cold path does not; a named Person still surfaces via the
-    registry tail, only its participants-first priority is lost.)
+    A Voice-mapped Person owns no Identity (ADR-0021), so
+    `voices[key].person_id` is the only route to them: remove that Person
+    without this walk and every Voice it named reverts to `Speaker A` — pane,
+    exports and summarizer input alike. `POST /api/people/merge` runs it before
+    the registry write.
 
-    Best-effort: names are a quality boost, not a correctness requirement, so a
-    missing session dir (a concurrent delete after the transcript read) degrades
-    to no hint — the pre-feature behaviour — rather than failing the summarize.
-    The underlying reads already swallow torn/missing sidecars (`read_roster` /
-    `read_session_meta` → `{}`, `PeopleRegistry.load` → empty)."""
+    Only a session whose map names the old id is written. The read goes off the
+    walked path, not `read_session_meta`, so one junk directory name can't abort
+    the walk; the write still crosses `session_paths` via `write_session_meta`.
+    """
+    touched: list[str] = []
+    for sd in sorted(config.RECORDINGS_DIR.glob("*")):
+        if not sd.is_dir():
+            continue
+        raw = _read_json_or_none(sd / FILENAME_META_JSON)
+        mapping = _coerce_voices(raw.get("voices") if isinstance(raw, dict) else None)
+        if not any(entry["person_id"] == old_person_id for entry in mapping.values()):
+            continue
+        write_session_meta(
+            sd.name,
+            {
+                "voices": {
+                    key: {**entry, "person_id": new_person_id}
+                    if entry["person_id"] == old_person_id
+                    else entry
+                    for key, entry in mapping.items()
+                }
+            },
+        )
+        touched.append(sd.name)
+    return touched
+
+
+def _resolution_inputs(session: str) -> dict[str, Any] | None:
+    """The reads both name-resolution wrappers below need, done once and in one
+    place so they cannot drift on WHICH inputs they pass (a wrapper that forgets
+    `voices` silently stops naming mapped Voices). `None` when the session dir
+    has vanished — a concurrent delete after the transcript read.
+
+    Named `voices`/`voice_runs` per ADR-0021: the operator's mapping off
+    session-meta, and each identity's current run from the sidecar. They must
+    agree or the mapping predates a re-diarize; `resolve_session_names` owns
+    that rule."""
     try:
         session_dir = resolve_session_dir(session)
     except SessionPathError:
-        # The only raiser here: the session dir vanished between the merged-
-        # transcript read and now. No names to inject; the summarize proceeds
-        # unhinted rather than 404-ing on an optional enrichment.
-        return []
-    return known_names(
-        roster=read_roster(session_dir),
-        aliases=read_session_meta(session).get("aliases") or {},
-        registry=PeopleRegistry.load(),
-    )
+        return None
+    meta = read_session_meta(session)
+    return {
+        "roster": read_roster(session_dir),
+        "aliases": meta.get("aliases") or {},
+        "registry": PeopleRegistry.load(),
+        "voices": meta.get("voices") or {},
+        "voice_runs": voices.run_ids(_read_json_or_none(session_dir / FILENAME_VOICES_JSON)),
+    }
+
+
+def summarize_names_for_session(
+    session: str,
+    *,
+    speaker_keys: Iterable[str] = (),
+    limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
+) -> tuple[dict[str, str], list[str]]:
+    """Both answers the summarize path needs, off ONE snapshot of the session's
+    files: `(speaker key -> display name, known-people hint)`.
+
+    Together rather than as two calls because they are two products of one
+    resolution — `known_names` is a projection of the same map. Resolving twice
+    reads roster / meta / people / voices twice and can straddle a rename, so the
+    hint and the rendered transcript would disagree inside one summarize.
+
+    The map is what makes a Voice→Person mapping reach the summary: the stored
+    `plain_text` carries raw keys (`Them#A`) by design, so summarizing it
+    unresolved names nobody the operator mapped. The hint is the canonical
+    spellings the model should prefer for names it mis-heard.
+
+    One rung short of the poll's map, deliberately: `/api/state` resolves against
+    `session_occurrences`, whose ADR-0009 F1 backfill mints an occurrence for a
+    recorded slug no roster entry covers. Not applied here because it also feeds
+    the hint, where a slug-derived name is not a canonical spelling. A ROSTERLESS
+    session therefore reads `Alice_Smith` in the summary input where the pane
+    says `Alice Smith`; every rostered one — every recording since ADR-0009 —
+    agrees.
+
+    Best-effort: a vanished session dir (a concurrent delete after the merged-
+    transcript read) degrades to raw keys and no hint, never a failed summarize.
+    """
+    inputs = _resolution_inputs(session)
+    if inputs is None:
+        return {}, []
+    resolved = resolve_session_names(**inputs, speaker_keys=speaker_keys)
+    return resolved, known_names_from(resolved, registry=inputs["registry"], limit=limit)
+
+
+def known_names_for_session(
+    session: str,
+    *,
+    speaker_keys: Iterable[str] = (),
+    limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
+) -> list[str]:
+    """The known-people display names alone — `summarize_names_for_session`'s
+    second product, for a caller that does not need the map."""
+    return summarize_names_for_session(session, speaker_keys=speaker_keys, limit=limit)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +836,11 @@ def _describe_session(
         # (name_resolution.attach_people, called by /api/state). Empty {} for a
         # pre-feature session, which resolves purely via its retained aliases.
         "roster": _read_roster_cached(sd),
+        # Each identity's CURRENT diarization `run_id`. Name resolution compares
+        # it against the run each mapping was stamped with, so a mapping made
+        # before a re-diarize stops being applied (ADR-0021). Spans stay out of
+        # the poll — the pane fetches those lazily.
+        "voice_runs": voices.run_ids(_read_session_json_cached(sd / FILENAME_VOICES_JSON)),
         "stripped": stripped,
     }
 
@@ -769,6 +879,7 @@ def gather_sessions(
         visited_session_jsons.add(str(sd / DIRNAME_STRIPPED / FILENAME_STRIP_META_JSON))
         visited_session_jsons.add(str(sd / FILENAME_META_JSON))
         visited_session_jsons.add(str(sd / FILENAME_ROSTER_JSON))
+        visited_session_jsons.add(str(sd / FILENAME_VOICES_JSON))
         out.append(
             _describe_session(
                 sd,

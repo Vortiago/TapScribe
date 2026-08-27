@@ -39,6 +39,8 @@ KNOB_ROUTES = [
     ("parakeet-overlap-s", "parakeet_overlap_s", "20", 20.0, "abc"),
     ("summarize-timeout-s", "summarize_timeout_s", "600", 600.0, "abc"),
     ("summarize-gguf-ctx", "summarize_gguf_ctx", "16384", 16384, "abc"),
+    ("diarize-threshold", "diarize_threshold", "0.55", 0.55, "abc"),
+    ("diarize-max-speakers", "diarize_max_speakers", "4", 4, "abc"),
 ]
 _IDS = [k[0] for k in KNOB_ROUTES]
 

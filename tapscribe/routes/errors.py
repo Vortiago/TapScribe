@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from ..batch_strip import StrippedDirUnclearable
 from ..batch_summarize import NoMergedTranscript
 from ..batch_transcribe import WavTooQuiet, WavUnreadable
+from ..diarizers.base import DiarizerFailed, DiarizerUnavailable
 from ..live_control import GateKindUnsupported, LiveModelUnknown, LiveStartFailed
 from ..people import IdentityNotAMember, InvalidMergeRequest, PersonNotFound
 from ..recorder import SessionBusy
@@ -51,6 +52,11 @@ DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     LiveModelUnknown: 400,
     GateKindUnsupported: 400,
     LiveStartFailed: 500,
+    # Diarization (ADR-0021). Registered as the CONCRETE classes, like the
+    # live-channel block above: `domain_error_handler` looks up `type(exc)`
+    # exactly, so a base class alone lets both fall through as a 500.
+    DiarizerUnavailable: 400,
+    DiarizerFailed: 502,
     # People registry (#368)
     PersonNotFound: 404,
     InvalidMergeRequest: 400,

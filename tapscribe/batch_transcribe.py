@@ -19,7 +19,6 @@ re-implementing the chain.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -29,16 +28,20 @@ from . import hallucinations as hallucinations_mod
 from .audio import wav_duration_s, wav_rms_dbfs
 from .language_select import default_language_selector
 from .recorder import Recorder
-from .session_merge import InvalidRange, NoUsableWavs, merge_session, select_session_wavs
+from .session_merge import (
+    InvalidRange,
+    NoUsableWavs,
+    merge_session,
+    select_session_wavs,
+    write_merged_transcript,
+)
 from .session_paths import (
-    FILENAME_TRANSCRIPT_JSON,
-    FILENAME_TRANSCRIPT_TXT,
     resolve_original_wav,
     resolve_session_dir,
     resolve_wav,
 )
 from .sessions import read_session_meta
-from .text import atomic_write_text, read_config, read_languages
+from .text import read_config, read_languages
 from .transcribers import lease_transcriber, run_on_model_thread
 from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, cover_models
 from .wav_cache import CachedTranscription, cached_transcribe, read_primary_payload, set_primary_transcript
@@ -518,14 +521,6 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
         merged transcript is then `json.dumps`'d and written twice — pure
         disk/CPU work (issue #214), run in one `asyncio.to_thread` call so
         the tail doesn't stall the loop right after the model loop ends."""
-        transcript = merge_session(selection)
-        merged = transcript.to_dict()
-        if not merged.get("model"):
-            merged["model"] = req.model
-
-        out_path = session_dir / FILENAME_TRANSCRIPT_JSON
-        atomic_write_text(out_path, json.dumps(merged, indent=2, ensure_ascii=False))
-        atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
-        return merged
+        return write_merged_transcript(session_dir, merge_session(selection), model=req.model)
 
     return await asyncio.to_thread(_merge_and_write)

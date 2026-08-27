@@ -1,0 +1,137 @@
+# Diarizer reference vectors
+
+`reference.npz` (147 KB) is the numeric oracle for `tapscribe/diarizers/`. Per
+audio fixture it holds:
+
+- `fbank__<name>` / `fbank_tail__<name>` — the first and last **100 frames**
+  of the 80-bin log-mel fbank, float32. Both ends, because `snip_edges=False`
+  mirrors at each and a head-only slice never compares the right edge.
+- `fbank__short` — a 120-sample signal, shorter than its own padding, so the
+  repeated reflection is covered.
+- `emb__<name>` — the L2-normalised 512-d speaker embedding, float32.
+
+## Why it is committed
+
+The frontend is part of the model's contract: a subtly wrong window, mel edge
+or log floor still yields 512 plausible numbers, so every mocked test passes and
+the clustering quietly degrades. Committing the reference means the check runs
+in the ordinary suite, not only where the upstream packages happen to be
+installed. Same reasoning as `tapscribe/vad/PROVENANCE.md` — a hand port needs
+an oracle it cannot drift from.
+
+`tests/test_diarize_fbank.py` checks against this file everywhere;
+`tests/test_diarize_fbank_upstream.py` re-derives it live in the
+`upstream-contract` CI lane, so the committed copy itself cannot rot unnoticed.
+
+## What produced it
+
+| | |
+|---|---|
+| fbank | `kaldi-native-fbank` 1.22.3 (Apache-2.0) — the frontend sherpa-onnx feeds these models with, not a reimplementation |
+| model | `3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx`, sha256 `357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b` |
+| source | `k2-fsa/sherpa-onnx` release `speaker-recongition-models` (upstream's spelling) |
+| licence | Apache-2.0 (3D-Speaker, WeSpeaker and sherpa-onnx all verified) — the code/redistribution licence; the weights derive from VoxCeleb |
+
+### Settings the reference pins
+
+```
+FbankOptions: dither=0.0, samp_freq=16000, snip_edges=False, num_bins=80
+samples scaled to [-1, 1)          # the model's normalize_samples=1
+features centred by global-mean CMN before the model                # 3D-Speaker
+```
+
+`snip_edges=False` is load-bearing: the `True` variant yields fewer frames *and*
+shifts every one of them by half a window, so it changes which audio each frame
+describes rather than just how many there are.
+
+## Regenerating
+
+```bash
+pip install kaldi-native-fbank
+python3 -m tapscribe.diarizers.model      # fetches + verifies the model
+python3 tools/gen_diarize_reference.py
+```
+
+`--fbank-only` skips the embeddings, so no model is needed. Must leave
+`tests/test_diarize_fbank.py` green afterwards, or the port needs the matching
+change.
+
+**Generate on a runtime that passes the coherence check below** — the
+embeddings were once regenerated on 1.27.0 and silently encoded its bug, which
+made the comparison test pass for the wrong reason.
+
+## The engine's operating point (measured)
+
+Three scenarios through the SHIPPED engine — `marlene-nb` and `solen-da` in 3 s
+turns alternating with a 0.5 s pause, the same alternating with no pause, and
+one speaker in that shape. Both directions have to hold at one threshold: the
+two-speaker clips must split and the one-speaker clip must not.
+
+Thresholds that recover the right number of Voices:
+
+| window / hop | turns with a pause | turns with none | one speaker |
+|---|---|---|---|
+| 1.0 / 0.50 s | 0.6-0.9 | 0.65-0.9 | 0.6-0.9 |
+| **1.5 / 0.75 s** | **0.5-0.9** | **0.65-0.9** | **0.5-0.9** |
+| 2.0 / 1.00 s | 0.5-0.9 | 0.55-0.9 | 0.5-0.9 |
+| 3.0 / 1.50 s | 0.5-0.9 | 0.5-0.75 | 0.5-0.9 |
+
+The plateau does not pick the window — 2 s has a wider one. Short turns do.
+Share of audio on the right Voice, no pause, threshold 0.7:
+
+| turn | 1.0 s | 1.5 s | 2.0 s | 3.0 s |
+|---|---|---|---|---|
+| 2.2 s | 0.90 | **0.91** | 0.67 (1 Voice) | 0.58 (1 Voice) |
+| 3.0 s | 0.94 | **0.92** | 0.89 | 0.83 |
+| 4.0 s | 0.96 | **0.98** | 0.92 | 0.67 (1 Voice) |
+
+A window longer than a turn hides the change inside it and the tap comes back as
+one Voice. 1 s matches 1.5 s on accuracy but halves the one-speaker margin (it
+starts splitting her below 0.6, against 0.5) and doubles the window count.
+
+**1.5 s windows at a 0.75 s hop, threshold 0.7** — inside every row's
+intersection above. The HOP is a resolution/cost trade rather than a pinned
+number: with no overlap the 2.2 s-turn clip reads 0.79 against 0.75 s's 0.91,
+but on turns that happen to be a whole number of windows it reads 0.99, so no
+fixture here pins it and no test asserts it.
+
+Recovered turn boundaries land within 50 ms of the truth when the turns are
+separated by a pause, which is the ordinary case: the tap's level gate and the
+VAD both cut there. `tests/test_diarize_engine.py` asserts the spans, not just
+the Voice count — a wrong fbank still yields "2 Voices" on channel-matched audio.
+
+## onnxruntime miscomputes this model on long inputs (measured)
+
+**`onnxruntime` 1.27.0 and 1.28.0 return incoherent embeddings for inputs
+longer than ~1000 frames (10 s); 1.29.0 is the fix.** Measured on `marlene-nb`,
+cosine of the clip against its own first 600 frames (1.27 and 1.28 agree to
+every digit shown):
+
+| frames | 1.27.0 / 1.28.0 | 1.29.0 |
+|---|---|---|
+| 1000 | 0.943 | 0.943 |
+| 1100 | **0.451** | 0.934 |
+| 1234 | **0.254** | 0.933 |
+| 1400 | 0.931 | 0.931 |
+| 1500 | **0.549** | 0.925 |
+
+Discrimination goes with it: at 1500 frames `marlene-nb` vs `solen-da` reads
+**0.566** on 1.27 against 0.057 on 1.29 — under 1.27 a speaker resembles a
+stranger more than herself, which is clustering noise, not a threshold to tune.
+1.29 degrades smoothly with length, which is what a correct model does.
+
+Two consequences the engine must respect:
+
+1. **Embed in bounded windows**, never one pass over a whole tap. That is the
+   right shape anyway — speaker embedding is a short-window operation — and at
+   the shipped 1.5 s window every call is 150 frames, far below the threshold.
+2. **The failure is silent.** Nothing raises; the vectors stay unit-norm and
+   plausible. `test_the_runtime_embeds_long_input_coherently` is what turns it
+   into a failure — it embeds 1500 frames and asserts a speaker still resembles
+   herself. On 1.27.0 it fails at 0.549.
+
+`pyproject.toml` therefore floors `onnxruntime>=1.29`. The VAD does not need
+it, but one dependency gets one stated requirement — a second floor hidden in a
+consumer would be a shadow source of truth. No platform cost: macOS has been
+arm64-only since 1.26, and `>=1.17` was already fictional on py3.13/3.14, which
+have no 1.17 wheels.

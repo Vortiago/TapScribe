@@ -43,6 +43,11 @@ SAMPLE_RATE = 16000
 FRAME_SAMPLES = 320
 FRAME_BYTES = FRAME_SAMPLES * 2
 
+# Reserved `tap_mode` values — does this tap carry one human or several?
+# Only a multi-person tap is diarized. Stamped from the Recorder by
+# tools/stamp_tap_wire.py; never hand-edit.
+TAP_MODE_SINGLE = "single"
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers (testable without a mic or a WS server)
@@ -71,7 +76,8 @@ def build_tap_url(
     utterance_id: str | None = None,
     session: str | None = None,
 ) -> str:
-    params: dict[str, str] = {"identity": identity, "name": name}
+    # This bridge taps the local mic, so it is always one human.
+    params: dict[str, str] = {"identity": identity, "name": name, "tap_mode": TAP_MODE_SINGLE}
     if utterance_id:
         params["utterance_id"] = utterance_id
     if session:

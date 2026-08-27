@@ -10,6 +10,7 @@ Resolution precedence: per-session Override (session_meta.aliases) > Person name
 from __future__ import annotations
 
 from tapscribe.name_resolution import (
+    attach_people_view,
     build_people_view,
     known_names,
     resolve_session_names,
@@ -230,3 +231,230 @@ def test_known_names_sorts_participants_for_reproducible_output() -> None:
         ]
     )
     assert known_names(roster=roster, aliases={}, registry=reg) == ["Ann A", "Zoe Z"]
+
+
+# ---- Voice keys must never reach the registry (ADR-0021) -------------------
+
+
+def test_backfill_skips_voice_keys() -> None:
+    """`attach_people_mutation` runs on every /api/state poll and PERSISTS an
+    auto-bound Person per unknown occurrence. A `slug#<voice>` key reaching the
+    backfill would mint a blank Person twice a second, forever."""
+    session = {
+        "roster": {"tray-sysaudio-001": _entry("System audio", slug="sysaudio")},
+        "speakers": ["sysaudio#A", "sysaudio#B"],
+    }
+
+    occ = session_occurrences(session)
+
+    assert set(occ) == {"tray-sysaudio-001"}
+
+
+def test_backfill_still_covers_a_rosterless_plain_slug() -> None:
+    """The guard must not disable ADR-0009's F1 backfill for old recordings."""
+    occ = session_occurrences({"roster": {}, "speakers": ["Alice_Andersen"]})
+
+    assert set(occ) == {"Alice_Andersen"}
+
+
+# ---- Voice -> Person resolution (ADR-0021) ---------------------------------
+
+_SYS = "tray-sysaudio-001"
+_ROSTER = {_SYS: _entry("System audio", slug="sysaudio")}
+_KEYS = ["sysaudio#A", "sysaudio#B"]
+
+
+def _resolve(*, aliases=None, voices=None, voice_runs=None, people=None):
+    return resolve_session_names(
+        roster=_ROSTER,
+        aliases=aliases or {},
+        registry=_reg(people or [{"id": "p1", "name": "Alice Andersen", "identities": []}]),
+        voices=voices or {},
+        voice_runs=voice_runs or {},
+        speaker_keys=_KEYS,
+    )
+
+
+def test_mapped_voice_resolves_to_its_person() -> None:
+    names = _resolve(voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}})
+
+    assert names["sysaudio#A"] == "Alice Andersen"
+
+
+def test_a_voice_mapped_to_an_auto_bound_person_takes_that_person_s_roster_name() -> None:
+    """Every auto-bound Person carries a BLANK `name`, and the People view — which
+    is what fills the operator's picker — shows its roster name instead. Reading
+    the raw field would put `Speaker A` on a Voice that view counts as named."""
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p9", "run_id": "r1"}},
+        people=[{"id": "p9", "name": "", "identities": [_SYS]}],
+    )
+
+    assert names["sysaudio#A"] == "System audio"
+
+
+def test_a_mapped_person_this_session_cannot_name_still_reads_as_the_placeholder() -> None:
+    """The floor is `Speaker A`, never the raw Identity token: a Person auto-bound
+    in an EARLIER meeting has no entry in this session's roster, and a
+    `tray-macbook-a1b2…:` transcript line would also reach the summarizer's hint,
+    which only filters the placeholder."""
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p9", "run_id": "r1"}},
+        people=[{"id": "p9", "name": "", "identities": ["tray-other-box-999"]}],
+    )
+
+    assert names["sysaudio#A"] == "Speaker A"
+
+
+def test_unmapped_voice_renders_a_readable_speaker_label() -> None:
+    """Not the raw `sysaudio#A` — the operator has to recognise the row to map it."""
+    assert _resolve()["sysaudio#B"] == "Speaker B"
+
+
+def test_an_unmapped_voice_is_not_a_known_name_for_the_summarizer() -> None:
+    """`Speaker A` is a placeholder for the operator to click, not a spelling the
+    model should correct a transcribed name toward."""
+    hint = known_names(
+        roster=_ROSTER,
+        aliases={},
+        registry=_reg([{"id": "p1", "name": "Alice Andersen", "identities": []}]),
+        speaker_keys=_KEYS,
+    )
+
+    assert not [n for n in hint if n.startswith("Speaker ")]
+
+
+def test_override_on_a_voice_key_beats_the_person() -> None:
+    names = _resolve(
+        aliases={"sysaudio#A": "Chair"},
+        voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}},
+    )
+
+    assert names["sysaudio#A"] == "Chair"
+
+
+def test_override_on_the_bare_slug_does_not_fan_out_to_its_voices() -> None:
+    names = _resolve(aliases={"sysaudio": "The room"})
+
+    assert names["sysaudio"] == "The room"
+    assert names["sysaudio#A"] == "Speaker A"
+
+
+def test_a_mapping_stamped_with_a_superseded_run_is_not_applied() -> None:
+    """Carrying it over would put a named human on whatever the NEW run calls A."""
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "old"}},
+        voice_runs={_SYS: "new"},
+    )
+
+    assert names["sysaudio#A"] == "Speaker A"
+
+
+def test_a_mapping_matching_the_current_run_is_applied() -> None:
+    names = _resolve(
+        voices={f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}},
+        voice_runs={_SYS: "r1"},
+    )
+
+    assert names["sysaudio#A"] == "Alice Andersen"
+
+
+def test_attach_people_view_feeds_voice_keys_from_the_TRANSCRIPT_not_the_wav_slugs() -> None:
+    """`session["speakers"]` is WAV-filename slugs, which `safe_name` makes
+    `#`-free — a voice key can never appear there. Reading that list left the
+    whole voice branch dead on the /api/state path with every unit test still
+    green, because they all passed `speaker_keys` by hand."""
+    reg = _reg([{"id": "p1", "name": "Alice Andersen", "identities": []}])
+    session = {
+        "roster": _ROSTER,
+        "speakers": ["sysaudio"],  # WAV slugs: no `#`, ever
+        "session_transcript": {"speakers": ["sysaudio#A"]},
+        "session_meta": {"voices": {f"{_SYS}#A": {"person_id": "p1", "run_id": "r1"}}},
+        "voice_runs": {_SYS: "r1"},
+    }
+
+    attach_people_view([session], reg, [session_occurrences(session)], live_identities=set())
+
+    assert session["names"]["sysaudio#A"] == "Alice Andersen"
+
+
+def test_attach_people_view_survives_a_session_with_no_transcript() -> None:
+    """The synthetic current-session entry carries `session_transcript: None`."""
+    session = {"roster": _ROSTER, "speakers": [], "session_transcript": None, "session_meta": {}}
+
+    attach_people_view([session], _reg([]), [session_occurrences(session)], live_identities=set())
+
+    # Resolves normally (the roster default), and no voice keys to resolve.
+    assert session["names"] == {"sysaudio": "System audio"}
+
+
+def test_an_ambiguous_slug_is_not_named_through_either_person() -> None:
+    """Two taps under one display name: the roster default still applies, but
+    neither identity's Person may claim the slug (#440)."""
+    roster = {
+        "tray-a": _entry("System audio", slug="sysaudio"),
+        "tray-b": _entry("System audio", slug="sysaudio"),
+    }
+    reg = _reg([{"id": "p1", "name": "Machine A", "identities": ["tray-a"]}])
+
+    names = resolve_session_names(roster=roster, aliases={}, registry=reg)
+
+    assert names["sysaudio"] == "System audio", "the shared roster name, not a Person"
+
+
+# ---- build_people_view · Voice-mapped Persons (ADR-0021) -------------------
+
+
+def _mapped_session(sid: str, *, key: str, person_id: str, run_id: str, current: str) -> dict:
+    """A diarized session with one Voice→Person mapping on its meta."""
+    return {
+        "session": sid,
+        "roster": {"sysaudio": _entry("Them", slug="Them")},
+        "session_meta": {"voices": {key: {"person_id": person_id, "run_id": run_id}}},
+        "voice_runs": {"sysaudio": current},
+    }
+
+
+def test_a_person_reached_only_by_a_voice_pointer_counts_its_session() -> None:
+    """Mapping a Voice by typing a name creates a Person with NO Identity, so
+    the identity join finds nothing for it — and the People stage would show the
+    operator's brand-new Person against zero sessions."""
+    reg = _reg([{"id": "p1", "name": "Dana", "identities": []}])
+
+    rows = build_people_view(
+        sessions=[_mapped_session("s1", key="sysaudio#A", person_id="p1", run_id="r1", current="r1")],
+        registry=reg,
+        live_identities=set(),
+    )
+
+    dana = next(r for r in rows if r["id"] == "p1")
+    assert dana["sessions"] == ["s1"]
+    assert dana["recorded"] is True
+
+
+def test_a_mapping_from_a_superseded_run_counts_no_session() -> None:
+    """It is not applied to the transcript either — counting it would tell the
+    operator a Person appears in a meeting where their name shows nowhere."""
+    reg = _reg([{"id": "p1", "name": "Dana", "identities": []}])
+
+    rows = build_people_view(
+        sessions=[_mapped_session("s1", key="sysaudio#A", person_id="p1", run_id="old", current="r2")],
+        registry=reg,
+        live_identities=set(),
+    )
+
+    assert next(r for r in rows if r["id"] == "p1")["sessions"] == []
+
+
+def test_a_voice_session_merges_with_the_identity_join() -> None:
+    """A Person can be reached both ways — an Identity in one meeting, a mapped
+    Voice in another — and the count is the union, not either half."""
+    reg = _reg([{"id": "p1", "name": "Dana", "identities": ["mic-dana"]}])
+    sessions = [
+        {"session": "s1", "roster": {"mic-dana": _entry("Dana", slug="Dana")}},
+        _mapped_session("s2", key="sysaudio#A", person_id="p1", run_id="r1", current="r1"),
+    ]
+
+    rows = build_people_view(sessions=sessions, registry=reg, live_identities=set())
+
+    assert next(r for r in rows if r["id"] == "p1")["sessions"] == ["s1", "s2"]

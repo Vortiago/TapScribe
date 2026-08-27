@@ -25,7 +25,7 @@ the audio out internally to live captioning AND per-utterance WAV
 recording — bridges don't talk to WhisperLiveKit themselves and don't
 POST settled lines back (ADR-0002).
 
-**Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>`
+**Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>&tap_mode=<single|multi>`
 (or `wss://...` when the recorder was started with `--tls`).
 
 **Audio format:** PCM signed 16-bit little-endian, 16 kHz mono, raw
@@ -85,6 +85,16 @@ sees no errors — there's nothing it could do about WlK state anyway.
   the same WAV instead of producing a second file. Clear on mute; mint
   fresh on the next unmute. Omitting it still works (each WS gets its
   own WAV) but forfeits blip resilience.
+- `tap_mode` (recommended): does this tap carry **one** human or
+  **several**? Exactly **`single`** or **`multi`**; absent or unrecognised
+  reads as `single`. Only a multi-person tap is diarized into Voices, so a
+  bridge that mixes several speakers into one stream (a system-audio /
+  loopback capture, a room mic, a mixed NDI feed) should declare `multi`;
+  a per-participant tap declares `single`. The declaration is only a
+  DEFAULT — the operator can override it per identity, and that override
+  wins. Never send a guess as `multi`: a diarizer splits one human across
+  a channel or noise change, manufacturing Voices to clean up.
+  `tapscribe/tap_mode.py` is the source of truth (ADR-0021).
 - `session` (optional): a session id to direct this tap into — normally
   a **detached session** minted via the control endpoint below. Present,
   the WAV and the tap's live-feed lines land there; absent, the global

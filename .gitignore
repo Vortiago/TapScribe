@@ -15,6 +15,9 @@ htmlcov/
 
 # Recorder state — gitignored entirely; created at runtime.
 recordings/
+# Fetched at bring-up with its sha256 verified, never committed
+# (tapscribe/diarizers/model.py).
+models/
 .auth-password
 .tap-token
 .tapscribe-cert.pem

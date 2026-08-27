@@ -129,4 +129,26 @@ public class TapConnectionOptionsTests
         Assert.Contains("identity=a%26b%3Dc", query);
         Assert.DoesNotContain("identity=a&b=c", query);
     }
+
+    [Fact]
+    public void BuildTapUri_AlwaysDeclaresTapMode_DefaultingToSingle()
+    {
+        Assert.Contains("tap_mode=single", new TapConnectionOptions().BuildTapUri().Query);
+    }
+
+    [Fact]
+    public void BuildTapUri_CarriesAMultiPersonDeclaration()
+    {
+        var options = new TapConnectionOptions { Mode = TapConnectionOptions.TapModeMulti };
+
+        Assert.Contains("tap_mode=multi", options.BuildTapUri().Query);
+    }
+
+    [Fact]
+    public void TapModeForFlow_TreatsLoopbackAsMultiPersonAndTheMicAsSingle()
+    {
+        // A Render device is the far end of the meeting; Capture is the operator.
+        Assert.Equal(TapConnectionOptions.TapModeMulti, TapConnectionOptions.TapModeForFlow(DeviceFlow.Render));
+        Assert.Equal(TapConnectionOptions.TapModeSingle, TapConnectionOptions.TapModeForFlow(DeviceFlow.Capture));
+    }
 }

@@ -163,7 +163,13 @@ public sealed record ResolveResult(
                 // ran on. A blank display name falls back to it so the dashboard never shows
                 // an empty label.
                 string name = string.IsNullOrEmpty(r.Name) ? r.StreamingIdentity : r.Name;
-                return baseOptions with { Identity = r.StreamingIdentity, Name = name, Session = session };
+                return baseOptions with
+                {
+                    Identity = r.StreamingIdentity,
+                    Name = name,
+                    Session = session,
+                    Mode = TapConnectionOptions.TapModeForFlow(r.Device.Flow),
+                };
             })
             .ToList();
     }

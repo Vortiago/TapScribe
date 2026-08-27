@@ -25,6 +25,7 @@ import graph rather than the app's.
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +39,15 @@ _BOOTSTRAP = {"install_picker", "cuda_torch", "preflight", "install_target"}
 #: What a bootstrap module may import beyond the standard library. Nothing
 #: third-party — `install_target` is the one intra-package exception, and it is
 #: itself stdlib-only (its own import list is checked by this same test).
-_ALLOWED_NON_STDLIB = {"tapscribe", "tapscribe.install_target", "tapscribe.cuda_torch"}
+# Each of these is itself importable from a pip-only venv.
+# `tapscribe.diarizers` earns its place through the runtime check below, not by
+# assertion: the AST scan cannot see numpy behind its relative imports.
+_ALLOWED_NON_STDLIB = {
+    "tapscribe",
+    "tapscribe.install_target",
+    "tapscribe.cuda_torch",
+    "tapscribe.diarizers",
+}
 
 
 def _module_files() -> list[Path]:
@@ -80,6 +89,17 @@ def _imported_roots(path: Path, *, skip_probes: bool = False) -> set[str]:
     return roots
 
 
+def test_the_diarize_model_probe_imports_no_third_party():
+    """preflight probes `diarizers.model` for the fetched embedding model, and a
+    numpy import behind that would crash the bring-up repair on exactly the
+    incomplete venv it exists to fix. A subprocess, because this one has numpy
+    loaded ten times over."""
+    probe = "import sys, tapscribe.diarizers.model; print(sorted(m for m in ('numpy', 'onnxruntime') if m in sys.modules))"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert out.stdout.strip() == "[]", f"importing the probe pulled {out.stdout.strip()}"
+
+
 def test_no_app_module_imports_the_bootstrap_scripts():
     offenders: list[str] = []
     for path in _module_files():
@@ -108,4 +128,24 @@ def test_bootstrap_modules_are_stdlib_only(name):
     assert not third_party, (
         f"tapscribe/{name}.py runs before TapScribe's dependencies exist "
         f"(a venv with only pip in it) — it cannot import: {sorted(third_party)}"
+    )
+
+
+def test_the_state_view_imports_no_model_runtime():
+    """`/api/state` is built ~2 Hz per connected client, and it reads the diarize
+    knobs. Those resolvers live in `diarizers/knobs.py` rather than beside the
+    engine in `standalone.py` precisely so the poll never imports numpy or
+    onnxruntime — a broken diarization install must leave a multi-person tap
+    undiarized, not take the dashboard down with it.
+
+    Pins the general invariant, not that one knob: any heavy import added to the
+    poll path fails here."""
+    probe = (
+        "import sys, tapscribe.state_view; "
+        "print(sorted(m for m in ('numpy', 'onnxruntime', 'torch') if m in sys.modules))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert out.stdout.strip() == "[]", (
+        f"importing tapscribe.state_view pulled {out.stdout.strip()} onto the poll path"
     )

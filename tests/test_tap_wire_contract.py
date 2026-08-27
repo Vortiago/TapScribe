@@ -400,6 +400,7 @@ _SOURCE_MODULES = {
     "tapscribe/speech_gate.py",
     "tapscribe/config.py",
     "tapscribe/tap_fan_out.py",
+    "tapscribe/tap_mode.py",
 }
 
 #: Names that would make a private copy of a wire constant — DERIVED from the
@@ -413,6 +414,11 @@ _DERIVED_ONLY = frozenset(
         # and are deliberately never a Site, so no table row can supply them.
         "FRAME_BYTES",
         "FrameBytes",
+        # Every Python/JS bridge today taps ONE human, so only the C# tray
+        # declares the multi spelling and no `Site` row supplies the snake-case
+        # name. The sweep must still catch the next bridge that hand-writes it —
+        # the `Channels` drift the comment above describes, one release early.
+        "TAP_MODE_MULTI",
     }
 )
 _CONTRACT_SYMBOLS = sorted(

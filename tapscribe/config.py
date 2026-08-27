@@ -79,6 +79,8 @@ PARAKEET_CHUNK_S_FILE: Path = CONFIG_DIR / "parakeet-chunk-s.txt"
 PARAKEET_OVERLAP_S_FILE: Path = CONFIG_DIR / "parakeet-overlap-s.txt"
 SUMMARIZE_TIMEOUT_S_FILE: Path = CONFIG_DIR / "summarize-timeout-s.txt"
 SUMMARIZE_GGUF_CTX_FILE: Path = CONFIG_DIR / "summarize-gguf-ctx.txt"
+DIARIZE_THRESHOLD_FILE: Path = CONFIG_DIR / "diarize-threshold.txt"
+DIARIZE_MAX_SPEAKERS_FILE: Path = CONFIG_DIR / "diarize-max-speakers.txt"
 
 # Top-level dirs are created lazily on first use rather than at import
 # time, so unit tests and offline tooling don't litter the worktree
@@ -306,6 +308,14 @@ _SUMMARIZE_TIMEOUT_S_BOUNDS = (1.0, 3600.0)
 # GGUF n_ctx: under 512 tokens no transcript fits, and the ceiling is bounded by
 # host RAM long before it is by the format.
 _SUMMARIZE_GGUF_CTX_BOUNDS = (512, 131_072)
+# Voice-clustering cut, a cosine DISTANCE: larger merges more, so it errs
+# towards too few Voices. Below 0.3 a speaker splits on her own loudest and
+# quietest window; at 1.0 every pair is closer than the cut and a tap is one
+# Voice. The measured plateau is 0.6-0.85 (tapscribe/diarizers/standalone.py).
+_DIARIZE_THRESHOLD_BOUNDS = (0.3, 1.0)
+# A hard cap on Voices per tap. One is "don't split this tap"; past a couple of
+# dozen the operator is mapping noise, not people.
+_DIARIZE_MAX_SPEAKERS_BOUNDS = (1, 24)
 
 
 def _parse_parakeet_chunk(raw: str) -> float | None:
@@ -322,6 +332,14 @@ def _parse_summarize_timeout(raw: str) -> float | None:
 
 def _parse_summarize_gguf_ctx(raw: str) -> int | None:
     return _parse_bounded_knob(raw, *_SUMMARIZE_GGUF_CTX_BOUNDS, cast=int)
+
+
+def _parse_diarize_threshold(raw: str) -> float | None:
+    return _parse_bounded_knob(raw, *_DIARIZE_THRESHOLD_BOUNDS)
+
+
+def _parse_diarize_max_speakers(raw: str) -> int | None:
+    return _parse_bounded_knob(raw, *_DIARIZE_MAX_SPEAKERS_BOUNDS, cast=int)
 
 
 # ---------------------------------------------------------------------------

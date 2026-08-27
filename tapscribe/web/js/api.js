@@ -111,6 +111,35 @@ export const sessionSummary = createResource(
 );
 
 /**
+ * The Voices a diarization run found, cached per (session, voicesSig).
+ * `voicesSig` is /api/state's projection of each identity's run stamp, so a
+ * re-diarize refetches and an idle poll fires nothing.
+ *
+ * Deliberately does NOT carry the operator's Voice-to-Person mapping: this body
+ * changes only when a diarize runs, which is what makes `voicesSig` a valid key,
+ * while a mapping changes on a click. The mapping rides session_meta on the
+ * poll, and the panel joins the two.
+ *
+ * Held per SESSION: re-diarizing one tap flips the sig for the whole session, so
+ * without the hold a second tap's rows would blank to "loading..." for a round
+ * trip (#266's shape). `knownValue` answers the empty sig from the args alone --
+ * an undiarized session has no body to fetch, and a later non-empty flip must
+ * not resurrect pre-diarization rows as ghosts.
+ */
+export const sessionVoices = createResource(
+  (/** @type {string} */ session, /** @type {string} */ voicesSig) => `${session}@${voicesSig}`,
+  (session) =>
+    /** @type {Promise<import('./types.js').SessionVoices>} */ (
+      fetch(`/api/sessions/${encodeURIComponent(session)}/voices`, { cache: "no-store" }).then(_unwrap)
+    ),
+  {
+    holdKeyOf: (/** @type {string} */ session) => session,
+    knownValue: (/** @type {string} */ session, /** @type {string} */ voicesSig) =>
+      voicesSig ? undefined : { session, identities: [] },
+  },
+);
+
+/**
  * Full per-WAV transcript, cached per (session, name, source, transcribedAt).
  * Resolves null when the WAV has no cached transcript. Read through `fetch` from
  * a row's expand handler rather than a per-tick `resolve`, so it needs neither a

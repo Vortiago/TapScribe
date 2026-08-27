@@ -25,6 +25,13 @@ from pathlib import Path
 
 import tapscribe
 
+# Submodule import, not just the package: `tapscribe/__init__.py` does not pull
+# `session_paths` in, so the attribute accesses below only resolved when some
+# OTHER test module happened to import it first. That made this file pass in a
+# full run and fail under `pytest tests/test_session_layout.py` — an import-order
+# accident, not a real signal.
+import tapscribe.session_paths  # noqa: F401  (imported for its attributes below)
+
 # The literals whose single owner is session_paths.py. Each is unambiguous —
 # it never legitimately appears as a non-path string elsewhere.
 OWNED_FILENAMES = {
@@ -32,6 +39,7 @@ OWNED_FILENAMES = {
     tapscribe.session_paths.FILENAME_TRANSCRIPT_TXT,
     tapscribe.session_paths.FILENAME_SUMMARY_JSON,
     tapscribe.session_paths.FILENAME_META_JSON,
+    tapscribe.session_paths.FILENAME_VOICES_JSON,
     tapscribe.session_paths.FILENAME_STRIP_META_JSON,
 }
 

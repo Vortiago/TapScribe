@@ -59,6 +59,27 @@ public sealed record TapConnectionOptions
     /// <summary>Tap token. Empty = no subprotocol offered (Recorder under --no-auth).</summary>
     public string Token { get; init; } = "";
 
+    // Reserved `tap_mode` values — does this tap carry one human or several?
+    // Only a multi-person tap is diarized. Stamped from the Recorder by
+    // tools/stamp_tap_wire.py; never hand-edit.
+    public const string TapModeSingle = "single";
+    public const string TapModeMulti = "multi";
+
+    /// <summary>
+    /// Single- vs multi-person. A mic is the operator; a Render (loopback)
+    /// device is the far end of the meeting. The operator can override it, so
+    /// this is only ever a default.
+    /// </summary>
+    public string Mode { get; init; } = TapModeSingle;
+
+    /// <summary>
+    /// The single/multi default for a device flow: a Capture device is the
+    /// operator's mic, a Render device is loopback carrying the far end of the
+    /// meeting. Mirrors GateSettings.DefaultForFlow.
+    /// </summary>
+    public static string TapModeForFlow(DeviceFlow flow) =>
+        flow == DeviceFlow.Render ? TapModeMulti : TapModeSingle;
+
     /// <summary>
     /// Build the `/tap` WebSocket URI with query params. utterance_id and session
     /// are only sent when set (the Recorder 404s an unknown session id).
@@ -68,6 +89,7 @@ public sealed record TapConnectionOptions
         var query = new StringBuilder();
         query.Append("identity=").Append(Uri.EscapeDataString(Identity));
         query.Append("&name=").Append(Uri.EscapeDataString(Name));
+        query.Append("&tap_mode=").Append(Uri.EscapeDataString(Mode));
         if (!string.IsNullOrEmpty(UtteranceId))
             query.Append("&utterance_id=").Append(Uri.EscapeDataString(UtteranceId));
         if (!string.IsNullOrEmpty(Session))

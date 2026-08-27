@@ -60,43 +60,28 @@
 
     <div class="spacer"></div>
 
-    <!-- ============ NET-NEW Tap model — MOCK, not wired ============ -->
+    <!-- Single vs multi-person, per identity (ADR-0021). The Bridge DECLARES it
+         on the wire — the tray's loopback capture is multi by construction, a
+         per-participant tap is single — and the operator overrides it durably
+         here, because a declaration is only ever a default: an NDI bridge (#54)
+         cannot tell a room mic from a per-participant feed.
+
+         This stage holds the control and NOT the voice list: mode is a property
+         of a live source, the Voices belong to a finished recording and live on
+         Transcript.
+
+         One delegated click listener on the rows host, `renderList` for the rows
+         — a per-row listener would be re-bound on every poll tick. -->
     <div class="panel">
       <div class="panel__head">
-        <div class="panel__title"><span class="ic">🧩</span>Tap model · people</div>
-        <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+        <div class="panel__title"><span class="ic">&#129513;</span>Tap model &middot; people</div>
+        <span class="panel__hint">who is on each tap</span>
       </div>
       <div class="panel__body">
-        <!-- single vs multi (mock) -->
-        <div class="mockblk">
-          <span class="cfgblk__k">Mode</span>
-          <span class="segctl">
-            <button class="segctl__opt is-on" type="button" disabled>👤 single</button>
-            <button class="segctl__opt segctl__opt--multi" type="button" disabled>👥 multi</button>
-          </span>
-        </div>
-
-        <!-- diarized voices → Person (mock) -->
-        <div class="mockblk mockblk--col">
-          <span class="cfgblk__k">Diarized voices → Person</span>
-          <div class="voicemap">
-            <div class="voicerow">
-              <span class="voicerow__v mono">Speaker A</span>
-              <span class="voicerow__bar"><span class="voicerow__fill" style="width:62%"></span></span>
-              <span class="voicerow__pct mono">62%</span>
-              <span class="voicerow__arrow">→</span>
-              <span class="pick"><span class="pick__av">AB</span>mapped Person<span class="pick__chev">⌄</span></span>
-            </div>
-            <div class="voicerow">
-              <span class="voicerow__v mono">Speaker B</span>
-              <span class="voicerow__bar"><span class="voicerow__fill" style="width:38%"></span></span>
-              <span class="voicerow__pct mono">38%</span>
-              <span class="voicerow__arrow">→</span>
-              <span class="pick pick--unid"><span class="pick__av pick__av--unid">?</span>Unidentified<span class="pick__chev">⌄</span></span>
-            </div>
-          </div>
-        </div>
-
+        <!-- Placeholder SIBLING of the rows host, toggled in place. -->
+        <div class="empty" data-slot="modeEmpty" hidden></div>
+        <div class="modelist" data-slot="modeList"></div>
+        <div class="dim mono ovr-note">A multi-person tap is split into Voices after the meeting &mdash; map them to People on the Transcript stage.</div>
       </div>
     </div>
   </div>

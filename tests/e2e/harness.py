@@ -35,6 +35,7 @@ import websockets
 
 from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
 from tapscribe.recorder import Recorder
+from tapscribe.tap_mode import TAP_MODE_PARAM
 
 _WORD_TOKENS_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
@@ -336,6 +337,7 @@ async def stream_wav_via_tap(
     utterance_id: str | None = None,
     tap_token: str = "",
     session: str | None = None,
+    tap_mode: str = "",
     frame_interval_s: float = 0.0,
 ) -> BridgeRun:
     """Open one /tap WS, stream `wav_path` as 20 ms PCM frames, close.
@@ -349,6 +351,10 @@ async def stream_wav_via_tap(
     detached-session routing (the SpatialChat Bridge does this on every
     open while a meeting is active). Absent → the recorder's global
     current session, exactly as an un-bracketing bridge behaves.
+
+    `tap_mode` declares single vs multi-person (ADR-0021), the way the tray
+    bridge's loopback capture does. The param NAME is imported, never
+    respelled here — `test_tap_wire_contract.py` sweeps for a second copy.
     """
     pcm = read_wav_as_pcm_bytes(wav_path)
     frames = frame_pcm(pcm)
@@ -360,6 +366,8 @@ async def stream_wav_via_tap(
     # session, send no param", never an empty `session=` the recorder rejects.
     if session:
         params["session"] = session
+    if tap_mode:
+        params[TAP_MODE_PARAM] = tap_mode
     qs = urlencode(params)
     url = f"{ws_base_url}/tap?{qs}"
     subprotocols = [f"{TAP_SUBPROTOCOL_PREFIX}{tap_token}"] if tap_token else None

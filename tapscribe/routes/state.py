@@ -26,6 +26,7 @@ from fastapi.responses import Response
 
 # `tapscribe.live`, not `routes.live`: a level-2 relative import reaches the
 # package, so this is not the sibling-router import `test_route_surface` forbids.
+from .. import tap_mode
 from ..live import LiveSnapshot
 from ..name_resolution import attach_people_mutation
 from ..recorder import Recorder, open_wav_names
@@ -49,7 +50,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     open_wavs = open_wav_names(active_streams)
 
     # Active rows with the tap_settings overlay: cheap, stays on the event loop.
-    active = active_rows(active_streams, recorder.tap_settings.get)
+    active = active_rows(active_streams, recorder.tap_settings.get, tap_mode.overrides())
     # The People mutation below needs the live-identity set before the projection
     # object exists, so it comes off the same rows the payload ships —
     # `StateInputs.live_identities` derives its own through this same function,

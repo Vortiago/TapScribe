@@ -70,6 +70,10 @@ class ActiveStream:
     # Session this tap was writing to at open time. None for test fixtures
     # that don't simulate a real tap; production TapFanOut always sets it.
     session: str | None = None
+    # What the BRIDGE declared on the wire at open ("" = nothing), NOT the
+    # resolved mode: `active_rows` applies the current override on top, so
+    # clearing one must fall back to the declaration (ADR-0021).
+    declared_mode: str = ""
 
 
 _ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
@@ -246,20 +250,20 @@ class SessionBusy(Exception):
 
 @dataclass
 class JobState:
-    """State for an in-flight session-scoped job (transcribe, strip,
-    summarize, the end-of-meeting pipeline chaining all three, or an
+    """State for an in-flight session-scoped job (transcribe, strip, diarize,
+    summarize, the end-of-meeting pipeline chaining all four, or an
     audio-reclaim delete holding the slot so nothing runs mid-walk)."""
 
     session: str
-    kind: Literal["transcribe", "strip", "summarize", "pipeline", "delete"]
+    kind: Literal["transcribe", "strip", "diarize", "summarize", "pipeline", "delete"]
     current: int
     total: int
     started_at: datetime
     status: str = "running"
     current_file: str | None = None
     model: str | None = None
-    # Which stage a `kind="pipeline"` job is in ("strip" / "transcribe" /
-    # "summarize"); None for single-stage jobs.
+    # Which stage a `kind="pipeline"` job is in ("strip" / "diarize" /
+    # "transcribe" / "summarize"); None for single-stage jobs.
     stage: str | None = None
 
 
@@ -323,7 +327,7 @@ class JobTracker:
         self,
         session: str,
         *,
-        kind: Literal["transcribe", "strip", "summarize", "pipeline", "delete"],
+        kind: Literal["transcribe", "strip", "diarize", "summarize", "pipeline", "delete"],
         total: int,
         model: str | None = None,
         status: str = "running",

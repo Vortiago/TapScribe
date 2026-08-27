@@ -51,6 +51,10 @@ __all__ = [
     "parse_wav_speaker_slug",
     "parse_wav_speaker_ident",
     "build_recorder_wav_name",
+    "VOICE_SEP",
+    "voice_key",
+    "is_voice_key",
+    "split_voice_key",
     # re-exported from config_store (operator-config persistence layer)
     "CONFIG_KEYS",
     "MAX_CONFIG_TEXT_LEN",
@@ -154,6 +158,34 @@ def parse_wav_speaker_slug(name: str) -> str:
     if len(parts) < 4:
         return ""
     return "_".join(parts[1:-2])
+
+
+# ---------------------------------------------------------------------------
+# Voice keys — `<base>#<voice>` (ADR-0021). ONE owner for the separator, since
+# the format is built against TWO bases: the merged transcript keys a segment
+# `slug#<voice>`, while the operator's mapping keys `identity#<voice>`. The
+# split is `rsplit`, not `split`: `safe_name` makes a slug `#`-free, but a raw
+# bridge identity is not.
+# ---------------------------------------------------------------------------
+
+VOICE_SEP = "#"
+
+
+def voice_key(base: str, label: str) -> str:
+    """`<base>#<label>`, for either base."""
+    return f"{base}{VOICE_SEP}{label}"
+
+
+def is_voice_key(key: str | None) -> bool:
+    return VOICE_SEP in (key or "")
+
+
+def split_voice_key(key: str) -> tuple[str, str | None]:
+    """`(base, label)`, or `(key, None)` when it carries no voice."""
+    if not is_voice_key(key):
+        return key, None
+    base, label = key.rsplit(VOICE_SEP, 1)
+    return base, label
 
 
 def parse_wav_speaker_ident(name: str) -> tuple[str, str]:

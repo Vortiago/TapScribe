@@ -25,15 +25,15 @@
 import { tpl, pick, renderRegion, markRegionStale, renderList, markListStale, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import {
-  postJson, putJson, sessionTranscript, errText,
+  mutateButton, postJson, putJson, sessionTranscript, sessionVoices, errText,
 } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
 import { resolveSeekTarget } from "../seek-target.js";
-import { wireSave } from "../../save-status.js";
+import { wireSave, runSaveWithStatus, statusTarget } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, setSourcePick, sessionLabel } from "../shell.js";
-import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile, setText, showTextForManualCopy } from "../ui.js";
 import { toSRT, toVTT } from "../subtitles.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
@@ -238,6 +238,13 @@ export function build(ctx) {
    * the rows host's children belong to renderList alone (views.html). */
   const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
 
+  const dzBtn = /** @type {HTMLButtonElement} */ (pick(frag, "dzBtn"));
+  const dzHint = pick(frag, "dzHint");
+  const dzNote = pick(frag, "dzNote");
+  const voiceList = pick(frag, "voiceList");
+  /** Placeholder SIBLING of `voiceList`, hidden-toggled in place. */
+  const voiceEmpty = /** @type {HTMLElement} */ (pick(frag, "voiceEmpty"));
+
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
@@ -325,6 +332,78 @@ export function build(ctx) {
       afterMutate();
     },
   });
+
+  /** The Voices a diarization run found, for the OPEN session. Keyed on the
+   * poll's `voices_sig`, so it crosses the wire once per re-diarize. The
+   * operator's MAPPING is deliberately not in this body — it changes on a click
+   * where the body changes only on a re-diarize — so it is joined in from
+   * `session_meta.voices` below. */
+  const voicesBody = sessionVoices.watch(() => { markListStale(voiceList); afterMutate(); });
+
+  /** True from the click until the diarize POST settles — the window before the
+   * job appears on the poll. Past that `sess.progress` carries it: the session
+   * holds ONE job slot, so anything in flight would 409 a second diarize. */
+  let diarizing = false;
+
+  /**
+   * PUT one Voice's mapping and narrate it into that row's status cell.
+   * The cell is re-resolved from the LIST by key on every write, never captured:
+   * a re-diarize can retire the row between the click and the response, and a
+   * `failed: …` written into a detached node reads to the operator as saved.
+   * @param {string} key
+   * @param {Record<string, string>} body
+   */
+  const saveMapping = async (key, body) => {
+    // Read at WRITE time, like every other handler here: a row built for one
+    // session must never PUT against another.
+    const sid = session?.session;
+    if (!sid) return;
+    await runSaveWithStatus(
+      statusTarget(() => voiceList.querySelectorAll(`[data-key="${CSS.escape(key)}"] [data-slot="vStatus"]`)),
+      () => putJson(`/api/sessions/${encodeURIComponent(sid)}/voices`, { key, ...body }),
+      { onSuccess: afterMutate },
+    );
+  };
+
+  /** Build one Voice row's shell. `create` runs once per row in a keyed list,
+   * so the two listeners here are bound once per row lifetime and die with its
+   * subtree — not re-bound per tick.
+   * @returns {Element} */
+  const buildVoiceRow = () => {
+    const node = /** @type {Element} */ (tpl("tpl-next-voicerow").firstElementChild);
+    const sel = /** @type {HTMLSelectElement} */ (pick(node, "vPerson"));
+    const nameInput = /** @type {HTMLInputElement} */ (pick(node, "vName"));
+    const keyOf = () => /** @type {HTMLElement} */ (node).dataset.key || "";
+
+    sel.addEventListener("change", () => {
+      if (sel.value === NEW_PERSON) {
+        nameInput.hidden = false;
+        nameInput.value = "";
+        nameInput.focus();
+        return;
+      }
+      nameInput.hidden = true;
+      saveMapping(keyOf(), sel.value ? { person_id: sel.value } : {});
+    });
+    // `change`, not keydown+blur: it fires once on Enter AND on a modified blur,
+    // so the two paths cannot double-PUT.
+    nameInput.addEventListener("change", () => {
+      const name = nameInput.value.trim();
+      nameInput.hidden = true;
+      if (name) saveMapping(keyOf(), { name });
+    });
+    // Abandoning the box PUTs nothing, so no row value moves and the row's
+    // `itemSig` never does either — `paintVoiceRow`, the only thing that would
+    // put the picker back, is skipped forever. The picker then reads
+    // `+ new person…` for an unmapped Voice, and re-choosing that option fires
+    // no `change`, so the operator cannot even reopen it.
+    nameInput.addEventListener("blur", () => {
+      if (nameInput.value.trim()) return;
+      nameInput.hidden = true;
+      sel.value = /** @type {HTMLElement} */ (node).dataset.personId || "";
+    });
+    return node;
+  };
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -483,6 +562,16 @@ export function build(ctx) {
   txOneBtn.addEventListener("click", () => {
     const sel = selectedFor();
     if (sel) transcribeWav(sel.name, effectiveSource(session));
+  });
+
+  dzBtn.addEventListener("click", () => {
+    if (!session) return;
+    const sid = session.session;
+    diarizing = true;
+    mutateButton(dzBtn, () => postJson(`/api/sessions/${encodeURIComponent(sid)}/diarize`, {}), {
+      afterMutate: () => { diarizing = false; afterMutate(); },
+      failMessage: (e) => `Diarize failed: ${e}`,
+    });
   });
 
   txRangeBtn.addEventListener("click", async () => {
@@ -893,6 +982,8 @@ export function build(ctx) {
         sig: [pickState, sid, src, filesTerm, inflightSig, pickSelName].join("§"),
       },
     );
+    renderVoices(j, sess, sid);
+
     if (pickRendered) {
       wavEmpty.hidden = pickState === "rows";
       if (pickState !== "rows") {
@@ -905,5 +996,153 @@ export function build(ctx) {
     }
   };
 
+  /**
+   * The Voices panel: the lazy body joined with the poll's mapping.
+   * @param {import('../../types.js').AppState} j
+   * @param {import('../../types.js').Session | null} sess
+   * @param {string} sid
+   */
+  function renderVoices(j, sess, sid) {
+    // The in-flight term is not optional: this runs every tick and would
+    // otherwise re-enable the button half a second into `mutateButton`'s
+    // disable, and a second POST 409s on the session's job slot. Same shape as
+    // summary.js' `genBtn` and recordings.js' `stripBtn`.
+    dzBtn.disabled = !sid || diarizing || !!sess?.progress;
+    const voicesSig = sess?.voices_sig || "";
+    const answer = sid ? voicesBody.resolve([sid, voicesSig]) : null;
+    const taps = answer?.value?.identities || [];
+    const mapping = sess?.session_meta?.voices || {};
+    const people = j.people || [];
+    // Every value a row DISPLAYS that does not come from the body: the picker's
+    // option set mirrors every Person's name, so a rename must reflow the rows.
+    const peopleSig = people.map((pp) => `${pp.id}:${pp.name}`).join(",");
+    const mapSig = Object.entries(mapping).map(([k, m]) => `${k}=${m.person_id}@${m.run_id}`).sort().join(",");
+
+    // Counted, not materialised: the row models are O(voices) allocations and
+    // this runs every 500 ms tick, almost always to be thrown away at the gate.
+    let count = 0;
+    let staleCount = 0;
+    for (const tap of taps) {
+      for (const v of tap.voices) {
+        count += 1;
+        if (isStaleMapping(mapping[v.key], tap)) staleCount += 1;
+      }
+    }
+    const state = listState({ hasSession: !!sess, loading: !!answer?.loading, count });
+
+    // A THUNK — rule 1 skips before it is called, so a quiet tick costs nothing.
+    const rendered = renderList(voiceList, () => voiceRows(taps, { mapping }), {
+      key: (r) => r.key,
+      create: buildVoiceRow,
+      update: (node, r) => paintVoiceRow(node, r, people, peopleSig),
+      itemSig: (r) => `${r.label}§${r.pct}§${r.personId}§${r.stale ? 1 : 0}§${peopleSig}`,
+      sig: [state, sid, voicesSig, answer?.stale ? 1 : 0, mapSig, peopleSig].join("§"),
+    });
+    if (rendered) {
+      voiceEmpty.hidden = state === "rows";
+      if (state !== "rows") {
+        voiceEmpty.textContent = answer?.loading
+          ? "loading voices…"
+          : sess
+            ? "No voices yet. Diarize splits every multi-person tap in this session."
+            : "Pick a session from the spine.";
+      }
+    }
+    // DERIVED, non-interactive cues, written in place rather than from inside
+    // the sig-gated list — the sig-drift dual of CLAUDE.md's render hygiene.
+    setText(dzHint, count ? `${count} voice${count === 1 ? "" : "s"} · ${taps.length} tap${taps.length === 1 ? "" : "s"}` : "");
+    setText(
+      dzNote,
+      staleCount
+        ? `${staleCount} mapping${staleCount === 1 ? "" : "s"} predate the current run and are not applied — re-map them.`
+        : "",
+    );
+  }
+
   return { node: frag, update };
+}
+
+/**
+ * The body's Voices joined with the operator's mapping — pure, so the join is
+ * unit-testable without a DOM. The tap NAME rides the label only when a session
+ * has more than one diarized tap; with one it is noise on every row.
+ * @param {import('../../types.js').VoiceIdentity[]} taps
+ * @param {{ mapping: Record<string, import('../../types.js').VoiceMapping> }} ctx
+ */
+export function voiceRows(taps, { mapping }) {
+  const rows = [];
+  for (const tap of taps) {
+    const total = tap.voices.reduce((a, v) => a + v.seconds, 0);
+    for (const v of tap.voices) {
+      const mapped = mapping[v.key];
+      rows.push({
+        key: v.key,
+        label: taps.length > 1 ? `${tap.name} · Speaker ${v.label}` : `Speaker ${v.label}`,
+        pct: total > 0 ? Math.round((100 * v.seconds) / total) : 0,
+        personId: mapped?.person_id || "",
+        stale: isStaleMapping(mapped, tap),
+      });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Whether a mapping is stamped against a run the sidecar has superseded — so
+ * the server is NOT applying it and the row has to say so, or `Speaker A` comes
+ * back with no explanation and no reason to re-map.
+ *
+ * The tap naming NO run (a torn or hand-edited sidecar) leaves its mappings
+ * applied — nothing superseded them. That half is not decoration: it is the
+ * server's rule (`name_resolution._mapping_applies`), and spelling it
+ * differently here tells the operator to re-map a mapping the transcript is
+ * honouring. One predicate, so the panel's badge and the row's chip cannot
+ * disagree either.
+ * @param {import('../../types.js').VoiceMapping | undefined} mapped
+ * @param {import('../../types.js').VoiceIdentity} tap
+ */
+function isStaleMapping(mapped, tap) {
+  return !!mapped && !!tap.run_id && mapped.run_id !== tap.run_id;
+}
+
+/** The picker option that reveals the name input. A typed name always CREATES a
+ * Person, even when one already has it (ADR-0021) — two people share a name more
+ * often than one is typed twice, and folding a Voice into a namesake puts their
+ * words under a stranger. */
+const NEW_PERSON = "__new__";
+
+/** Paint one Voice row in place.
+ * @param {Element} node
+ * @param {ReturnType<typeof voiceRows>[number]} r
+ * @param {import('../../types.js').Person[]} people
+ * @param {string} peopleSig */
+function paintVoiceRow(node, r, people, peopleSig) {
+  const row = /** @type {HTMLElement} */ (node);
+  row.dataset.key = r.key;
+  // What the picker returns to when a `+ new person…` box is abandoned — the
+  // row's own listener reads it, since it has no view of the row model.
+  row.dataset.personId = r.personId;
+  pick(row, "vLabel").textContent = r.label;
+  /** @type {HTMLElement} */ (pick(row, "vFill")).style.width = `${r.pct}%`;
+  pick(row, "vPct").textContent = `${r.pct}%`;
+  /** @type {HTMLElement} */ (pick(row, "vStale")).hidden = !r.stale;
+
+  // The name input belongs to a picker sitting on `__new__`. Deriving it here
+  // (rather than only hiding it on commit) is what retires a box the operator
+  // opened and then clicked away from: renderList holds a row whose control has
+  // focus, so this can never clear a name mid-type.
+  /** @type {HTMLInputElement} */ (pick(row, "vName")).hidden = true;
+
+  const sel = /** @type {HTMLSelectElement} */ (pick(row, "vPerson"));
+  // Rebuild the options only when the Person set actually moved: the row's
+  // itemSig also fires on a share change, and re-adding every option then would
+  // drop a half-open dropdown for nothing.
+  if (sel.dataset.peopleSig !== peopleSig) {
+    sel.dataset.peopleSig = peopleSig;
+    sel.length = 0; // the <select> idiom for "drop every option" — no markup, no raw swap
+    sel.add(new Option("— unmapped —", ""));
+    for (const p of people) sel.add(new Option(p.name || p.id, p.id));
+    sel.add(new Option("+ new person…", NEW_PERSON));
+  }
+  sel.value = r.personId;
 }

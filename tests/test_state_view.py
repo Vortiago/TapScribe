@@ -115,6 +115,8 @@ _PAYLOAD_KEYS = [
     "parakeet_overlap_s",
     "summarize_timeout_s",
     "summarize_gguf_ctx",
+    "diarize_threshold",
+    "diarize_max_speakers",
     "specialists",
 ]
 

@@ -15,8 +15,8 @@ legacy file into the new layout so the two formats never coexist.
 The on-disk JSON wire shape inside each sidecar is unchanged: a
 TranscriptionResult flattened with the write-time envelope (when this
 WAV was transcribed, source folder, parsed speaker, absolute UTC start
-time) and the on-disk WAV fingerprint (size + mtime). See
-CONTEXT.md "Per-WAV transcript cache" for the layout.
+time) and the on-disk WAV fingerprint (size + mtime). This module owns
+the layout; CONTEXT.md "Per-WAV transcript cache" is the term.
 """
 
 from __future__ import annotations

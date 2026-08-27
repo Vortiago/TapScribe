@@ -134,3 +134,12 @@ export function setDimmable(el, value) {
   el.textContent = value;
   el.classList.toggle("is-empty", value === "" || value === "—");
 }
+
+/** Write `text` only when it differs. Per-tick updaters call this because
+ * assigning `textContent` replaces the node's children whether or not anything
+ * changed — which drops a selection a viewer is mid-copy on.
+ * @param {Element} el
+ * @param {string} text */
+export function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
+}

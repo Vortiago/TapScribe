@@ -18,17 +18,29 @@ through a Transcriber.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import tapscribe.strip_meta as strip_meta
+import tapscribe.voices as voices
 
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
-from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, SessionPathError, _safe_part
-from .text import parse_iso, parse_wav_start
+from .roster import read_roster
+from .session_paths import (
+    DIRNAME_STRIPPED,
+    FILENAME_STRIP_META_JSON,
+    FILENAME_TRANSCRIPT_JSON,
+    FILENAME_TRANSCRIPT_TXT,
+    SessionPathError,
+    _safe_part,
+)
+from .text import atomic_write_text, parse_iso, parse_wav_start
+from .voice_join import VoiceSpan, attribute_segment, spans_by_slug
 from .wav_cache import read_cached
 
 # ---------------------------------------------------------------------------
@@ -294,6 +306,54 @@ class SessionTranscript:
 _LOW_CONFIDENCE_LOGPROB_THRESHOLD = -0.5
 
 
+def _clock(abs_start: Any) -> str:
+    """`HH:MM:SS` from either a datetime (mid-merge) or its ISO string (read
+    back off `session-transcript.json`).
+
+    An unreadable stamp renders `??:??:??` rather than raising: `parse_iso`
+    raises on malformed input, and this runs over a file on disk, so one bad
+    segment would fail a whole summarize instead of costing one line its clock.
+    """
+    if isinstance(abs_start, datetime):
+        return abs_start.strftime("%H:%M:%S")
+    try:
+        dt = parse_iso(str(abs_start or ""))
+    except ValueError:
+        return "??:??:??"
+    return dt.strftime("%H:%M:%S") if dt else "??:??:??"
+
+
+def render_transcript_text(
+    segments: Iterable[Mapping[str, Any]],
+    *,
+    names: Mapping[str, str] | None = None,
+) -> str:
+    """The merged transcript as `[HH:MM:SS] Speaker: text` lines.
+
+    The ONE spelling of that format on this side of the wire: `merge_session`
+    builds `plain_text` through it, and `batch_summarize` re-renders the stored
+    body through it with `names` applied. Segments are the wire shape, whose
+    `abs_start` may be a datetime or its ISO string.
+
+    `names` is the live `speaker key -> display name` map (ADR-0009, ADR-0021).
+    Deliberately NOT baked into the stored body: resolution is a read-time
+    concern everywhere else — a Person rename has to reach a transcript merged
+    last week — so the file keeps raw keys and every reader resolves.
+    """
+    resolved = names or {}
+    lines: list[str] = []
+    for seg in segments:
+        text = seg.get("text") or ""
+        if not text:
+            continue
+        speaker = seg.get("speaker") or ""
+        line = f"[{_clock(seg.get('abs_start'))}] {resolved.get(speaker, speaker)}: {text}"
+        if seg.get("low_confidence"):
+            line += " [uncertain]"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def merge_session(selection: SessionSelection) -> SessionTranscript:
     """Read each WAV's cached sidecar from `selection.wavs` and build a
     merged session transcript. WAVs without a cached sidecar are recorded
@@ -309,6 +369,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     segments: list[SessionSegment] = []
     suppressed: list[SuppressedSessionSegment] = []
     skipped_no_cache: list[str] = []
+    low_confidence_count = 0
 
     # Track which Transcriber + model produced each WAV's result. They
     # *should* be uniform across a session; we surface the first non-empty
@@ -322,6 +383,24 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     # oversimplification, but the per-WAV JSON still carries the real
     # value — the session-level field is just a display hint.
     source_language_label = ""
+
+    # Read once per merge, not per WAV. Empty for an undiarized session, which
+    # is the common case — and then the Roster is not read at all, since it can
+    # only ever contribute the slug join for a Voice that isn't there.
+    session_voices = voices.read_voices(selection.session_dir)
+    voice_spans: dict[str, list[VoiceSpan]] = {}
+    if session_voices:
+        voice_spans, ambiguous_slugs = spans_by_slug(session_voices, read_roster(selection.session_dir))
+        if ambiguous_slugs:
+            # Loud, because the operator sees an undiarized tap and has no other
+            # way to learn why: two identities are streaming under one display
+            # name, so no Voice can be attributed to either (#440).
+            print(
+                f"[tapscribe] merge {selection.session_dir.name}: "
+                f"{len(ambiguous_slugs)} speaker name(s) shared by two taps, left undiarized: "
+                + ", ".join(sorted(ambiguous_slugs)),
+                flush=True,
+            )
 
     for wav in selection.wavs:
         cached = read_cached(wav)
@@ -338,22 +417,27 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
 
         wav_start = cached.wav_start or datetime.fromtimestamp(wav.stat().st_mtime, tz=UTC)
         speaker = cached.speaker_name or "<anon>"
+        spans = voice_spans.get(speaker, ())
 
         for seg in cached.result.segments:
-            abs_start = wav_start + timedelta(seconds=seg.start)
-            abs_end = wav_start + timedelta(seconds=seg.end)
             low_conf = seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONFIDENCE_LOGPROB_THRESHOLD
-            segments.append(
-                SessionSegment(
-                    abs_start=abs_start,
-                    abs_end=abs_end,
-                    speaker=speaker,
-                    text=seg.text,
-                    source_wav=wav.name,
-                    avg_logprob=seg.avg_logprob,
-                    low_confidence=low_conf,
+            # Counted per DECODED segment, not per piece: one uncertain segment
+            # crossing three Voices is ONE uncertain decode. Per piece, the
+            # dashboard's quality badge would grow with how well diarization
+            # worked and move on a re-diarize that changed no audio (#441).
+            low_confidence_count += low_conf
+            for piece in attribute_segment(seg, wav_start=wav_start, slug=speaker, spans=spans):
+                segments.append(
+                    SessionSegment(
+                        abs_start=piece.abs_start,
+                        abs_end=piece.abs_end,
+                        speaker=piece.speaker,
+                        text=piece.text,
+                        source_wav=wav.name,
+                        avg_logprob=seg.avg_logprob,
+                        low_confidence=low_conf,
+                    )
                 )
-            )
         for sup in cached.result.suppressed_hallucinations:
             abs_start = wav_start + timedelta(seconds=sup.start)
             suppressed.append(
@@ -376,16 +460,18 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             speaking_seconds[s.speaker] += max(0.0, (s.abs_end - s.abs_start).total_seconds())
     speaking_seconds = {k: round(v, 2) for k, v in speaking_seconds.items()}
 
-    plain_lines: list[str] = []
-    for s in segments:
-        if not s.text:
-            continue
-        line = f"[{s.abs_start.strftime('%H:%M:%S')}] {s.speaker}: {s.text}"
-        if s.low_confidence:
-            line += " [uncertain]"
-        plain_lines.append(line)
-    plain_text = "\n".join(plain_lines)
-    low_confidence_count = sum(1 for s in segments if s.low_confidence)
+    # Raw keys on purpose — see `render_transcript_text`. Datetimes are passed
+    # through rather than round-tripped via ISO, so nothing re-parses what this
+    # function already holds.
+    plain_text = render_transcript_text(
+        {
+            "abs_start": s.abs_start,
+            "speaker": s.speaker,
+            "text": s.text,
+            "low_confidence": s.low_confidence,
+        }
+        for s in segments
+    )
 
     finished = datetime.now(UTC)
     return SessionTranscript(
@@ -435,3 +521,60 @@ def _suppressed_to_dict(sup: SuppressedSessionSegment) -> dict[str, Any]:
         "matched_rule": sup.matched_rule,
         "source_wav": sup.source_wav,
     }
+
+
+def write_merged_transcript(
+    session_dir: Path, transcript: SessionTranscript, *, model: str = ""
+) -> dict[str, Any]:
+    """Write both merged artifacts and return the JSON one.
+
+    `model` fills the field in when no per-WAV sidecar names one. Shared by the
+    transcribe stage and by a standalone re-diarize, which re-merges to pick up
+    the new speaker keys without re-transcribing anything.
+    """
+    merged = transcript.to_dict()
+    if not merged.get("model"):
+        merged["model"] = model
+    atomic_write_text(
+        session_dir / FILENAME_TRANSCRIPT_JSON, json.dumps(merged, indent=2, ensure_ascii=False)
+    )
+    atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
+    return merged
+
+
+def remerge_with_stored_selection(session_dir: Path, previous: Mapping[str, Any]) -> bool:
+    """Rebuild the merged transcript over the same WAVs the stored one names.
+
+    Costs no transcription — `merge_session` re-reads the per-WAV caches — so
+    this is how a stage that changed only ATTRIBUTION (a diarize run) gets its
+    new speaker keys onto disk. The selection comes off `previous` because the
+    fields that describe it (`from_iso` / `to_iso` / `source`) are this module's
+    own wire shape; a caller reconstructing them would be the fourth place that
+    knows them.
+
+    `transcribed_at` deliberately advances: the dashboard caches the merged body
+    keyed on it, so preserving it would leave the old keys on screen. False when
+    the stored transcript names a range that no longer parses — re-selecting
+    would merge a different set of WAVs than it claims to.
+
+    False, too, when the re-merge comes back EMPTY where the stored one had
+    segments. Re-attribution never removes speech, so an empty result means the
+    audio the stored selection names is gone — `source="stripped"` after the
+    stripped dir was reclaimed, or a re-strip that renamed every clip out from
+    under the per-WAV caches. Writing it would destroy the meeting's transcript
+    to record that its WAVs moved.
+    """
+    try:
+        selection = select_session_wavs(
+            session_dir,
+            from_iso=previous.get("from_iso"),
+            to_iso=previous.get("to_iso"),
+            source=previous.get("source") or "original",
+        )
+    except ValueError:
+        return False
+    transcript = merge_session(selection)
+    if not transcript.segments and previous.get("segments"):
+        return False
+    write_merged_transcript(session_dir, transcript, model=previous.get("model") or "")
+    return True

@@ -1,7 +1,7 @@
 """Direct tests for tapscribe.batch_pipeline — the end-of-meeting pipeline.
 
 Same deepening as the sibling orchestrator suites: the chain (one
-`kind="pipeline"` claim, strip → transcribe → summarize stage ordering,
+`kind="pipeline"` claim, strip → diarize → transcribe → summarize stage ordering,
 mid-chain failure verdicts, the poll record lifecycle) is testable WITHOUT
 HTTP or a real model. Tests fake the three STAGES (`run_*_stage`, the
 pipeline's per-stage seam) in `tapscribe.batch_pipeline`'s namespace — the
@@ -24,12 +24,15 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture
 def fake_stages(monkeypatch: pytest.MonkeyPatch):
-    """Swap the three stage functions for fakes that log their order.
+    """Swap the four stage functions for fakes that log their order.
     Returns the call log."""
     calls: list[str] = []
 
     async def _strip(req, *, job):  # noqa: ARG001
         calls.append("strip")
+
+    async def _diarize(req, *, job):  # noqa: ARG001
+        calls.append("diarize")
 
     async def _transcribe(req, *, job, model, backend):  # noqa: ARG001
         calls.append("transcribe")
@@ -38,6 +41,7 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch):
         calls.append("summarize")
 
     monkeypatch.setattr("tapscribe.batch_pipeline.run_strip_stage", _strip)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_diarize_stage", _diarize)
     monkeypatch.setattr("tapscribe.batch_pipeline.run_transcribe_stage", _transcribe)
     monkeypatch.setattr("tapscribe.batch_pipeline.run_summarize_stage", _summarize)
     return calls
@@ -58,7 +62,7 @@ async def test_pipeline_runs_stages_in_order_under_one_claim(recorder_under_test
     task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
     await task
 
-    assert fake_stages == ["strip", "transcribe", "summarize"]
+    assert fake_stages == ["strip", "diarize", "transcribe", "summarize"]
     assert len(claims) == 1 and claims[0].kind == "pipeline"
     assert recorder_under_test.jobs.get("s") is None  # slot released at the end
     record = recorder_under_test.pipelines.get("s")
@@ -131,6 +135,9 @@ async def test_pipeline_mid_chain_failure_records_stage_and_error_and_releases(
     async def _strip(req, *, job):  # noqa: ARG001
         calls.append("strip")
 
+    async def _diarize(req, *, job):  # noqa: ARG001
+        calls.append("diarize")
+
     async def _transcribe(req, *, job, model, backend):  # noqa: ARG001
         raise NoUsableWavs("no usable WAVs after stripping — no speech detected in this session")
 
@@ -138,13 +145,14 @@ async def test_pipeline_mid_chain_failure_records_stage_and_error_and_releases(
         calls.append("summarize")
 
     monkeypatch.setattr("tapscribe.batch_pipeline.run_strip_stage", _strip)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_diarize_stage", _diarize)
     monkeypatch.setattr("tapscribe.batch_pipeline.run_transcribe_stage", _transcribe)
     monkeypatch.setattr("tapscribe.batch_pipeline.run_summarize_stage", _summarize)
 
     task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
     await task
 
-    assert calls == ["strip"]  # summarize never ran
+    assert calls == ["strip", "diarize"]  # summarize never ran
     record = recorder_under_test.pipelines.get("s")
     assert record is not None
     assert record.state == "failed"
@@ -479,3 +487,97 @@ async def test_pipeline_summarize_stage_built_ins_when_nothing_configured(record
     assert seen["model"] == ""
     assert seen["max_tokens"] is None
     assert seen["prompt"] == DEFAULT_SUMMARY_PROMPT
+
+
+async def test_a_diarize_failure_does_not_cost_the_operator_their_transcript(
+    recorder_under_test, monkeypatch
+):
+    """The pipeline aborts on any stage exception, so the diarize stage has to
+    absorb its own: an unfetched model or one unreadable WAV would otherwise
+    take the transcript and the summary with it. What is lost is attribution on
+    this session, and a re-diarize recovers that."""
+    from tapscribe.diarizers.base import DiarizerUnavailable
+
+    calls: list[str] = []
+
+    async def _strip(req, *, job):  # noqa: ARG001
+        calls.append("strip")
+
+    async def _transcribe(req, *, job, model, backend):  # noqa: ARG001
+        calls.append("transcribe")
+
+    async def _summarize(req, *, job):  # noqa: ARG001
+        calls.append("summarize")
+
+    async def _locked(req, *, job=None):  # noqa: ARG001
+        raise DiarizerUnavailable("the speaker-embedding model is not at …")
+
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_strip_stage", _strip)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_transcribe_stage", _transcribe)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_summarize_stage", _summarize)
+    monkeypatch.setattr("tapscribe.batch_pipeline.diarize_session_locked", _locked)
+
+    task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
+    await task
+
+    assert calls == ["strip", "transcribe", "summarize"]
+    record = recorder_under_test.pipelines.get("s")
+    assert record is not None and record.state == "done"
+
+
+async def test_the_job_says_diarize_while_the_diarize_stage_runs(recorder_under_test, monkeypatch):
+    """The Bridge's meeting card and the dashboard both read `stage` off the job
+    to say what is happening; a stage that never sets it shows the previous one."""
+    seen: list[str | None] = []
+
+    async def _strip(req, *, job):  # noqa: ARG001
+        pass
+
+    async def _diarize(req, *, job):  # noqa: ARG001
+        seen.append(recorder_under_test.jobs.snapshot()["s"].stage)
+
+    async def _transcribe(req, *, job, model, backend):  # noqa: ARG001
+        pass
+
+    async def _summarize(req, *, job):  # noqa: ARG001
+        pass
+
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_strip_stage", _strip)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_diarize_stage", _diarize)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_transcribe_stage", _transcribe)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_summarize_stage", _summarize)
+
+    task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
+    await task
+
+    assert seen == ["diarize"]
+
+
+async def test_the_pipeline_diarizes_the_same_audio_it_transcribes(recorder_under_test, monkeypatch):
+    """Both stages read the strip's output. Diarizing the originals instead
+    would pay again for the silence the strip just removed, and would cover
+    audio no segment exists for."""
+    seen: list[str] = []
+
+    async def _strip(req, *, job):  # noqa: ARG001
+        pass
+
+    async def _transcribe(req, *, job, model, backend):  # noqa: ARG001
+        pass
+
+    async def _summarize(req, *, job):  # noqa: ARG001
+        pass
+
+    async def _locked(req, *, job=None):  # noqa: ARG001
+        seen.append(req.source)
+        return {"ok": True}
+
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_strip_stage", _strip)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_transcribe_stage", _transcribe)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_summarize_stage", _summarize)
+    monkeypatch.setattr("tapscribe.batch_pipeline.diarize_session_locked", _locked)
+
+    task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
+    await task
+
+    assert seen == ["stripped"]

@@ -170,6 +170,7 @@ export function inline(...parts) {
 export const JOB_LABELS = {
   transcribe: "Transcribing",
   strip: "Stripping silence",
+  diarize: "Finding voices",
   summarize: "Summarizing",
   pipeline: "Pipeline",
   delete: "Deleting audio",

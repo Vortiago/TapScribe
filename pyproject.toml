@@ -77,7 +77,18 @@ dependencies = [
     # and by the live channel's whisperlivekit — those declare it in their
     # own extras, so it installs when an operator picks a family that
     # needs it rather than unconditionally.
-    "onnxruntime>=1.17",
+    # 1.29 is the floor because DIARIZATION needs it: 1.27.0 and 1.28.0 return
+    # incoherent speaker embeddings above ~1000 frames — unit-norm vectors, but
+    # a speaker stops resembling herself (0.254 self-similarity at 1234 frames
+    # against 0.566 cross-speaker), so clustering degrades with nothing raised.
+    # Measured in tests/fixtures/diarize/PROVENANCE.md and enforced by the
+    # coherence test in the diarize-fbank upstream-contract lane.
+    #
+    # The VAD does not need it — Silero gets 512-sample windows — but one
+    # dependency gets one stated requirement rather than a second floor hidden
+    # in a consumer. No platform cost: macOS has been arm64-only since 1.26, and
+    # >=1.17 was already fictional on py3.13/3.14, which have no 1.17 wheels.
+    "onnxruntime>=1.29",
 ]
 
 [project.urls]

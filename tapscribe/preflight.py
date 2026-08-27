@@ -81,6 +81,14 @@ class Step:
             object.__setattr__(self, "provided_by", self.name)
 
 
+def _diarize_model_present() -> bool:
+    """Imported at call time so this module stays stdlib-only at import — the
+    venv it runs against may hold nothing but pip."""
+    from tapscribe.diarizers import model
+
+    return model.model_present()
+
+
 def _module_present(name: str) -> bool:
     """`find_spec`, not `import` — probing must not pay torch's multi-second
     import cost on every bring-up."""
@@ -111,12 +119,13 @@ def plan_steps(
     system: str | None = None,
     machine: str | None = None,
     module_present: Callable[[str], bool] = _module_present,
+    model_present: Callable[[], bool] = _diarize_model_present,
 ) -> list[Step]:
     """The bring-up steps this host needs, in execution order.
 
-    Pure: `system` / `machine` / `module_present` are injected, defaulting to
-    the real host. Returns `[]` on a warm venv — the common re-launch case must
-    be silent and must not re-run pip.
+    Pure: every probe is injected, defaulting to the real host. Returns `[]` on
+    a warm venv — the common re-launch case must be silent and must not re-run
+    pip.
     """
     system = system or platform.system()
     machine = machine or platform.machine()
@@ -163,6 +172,22 @@ def plan_steps(
                     "report the [summarize] extra missing on the first Generate."
                 ),
                 argv=argv,
+            )
+        )
+
+    if not model_present():
+        steps.append(
+            Step(
+                name="diarize-model",
+                reason=(
+                    "the speaker-embedding model isn't on disk, so diarization would "
+                    "leave every multi-person tap as one speaker in the transcript."
+                ),
+                # Unlike the llama_cpp step, retrying every launch is CORRECT
+                # here: an offline box fails in milliseconds, and the operator
+                # gets the model the first time it launches with connectivity.
+                # There is nothing to build and nothing to stamp.
+                argv=[python, "-m", "tapscribe.diarizers.model"],
             )
         )
 

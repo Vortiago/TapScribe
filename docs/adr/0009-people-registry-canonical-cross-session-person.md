@@ -32,10 +32,10 @@ A **canonical, global Person model**, recognised by the bridge-stamped
 3. **Auto-bind.** Every new Identity binds to its own Person on first
    sighting, default-named from the bridge-sent display `name`. The registry
    is never empty; the work is *rename + merge*, not *create from scratch*.
-4. **Diarization-ready atom.** The membership atom is a *speaker key* —
-   `identity` today, `identity#cluster` once diarization (#78) splits one
-   Identity into voices. Only key granularity changes then, not the schema;
-   diarized clusters are session-local and need manual merge. The
+4. **Identity is the only membership atom.** A Voice is session-local, so
+   `identity#<voice>` is not unique across sessions and never enters the
+   registry; a diarized segment resolves through the session's own `voices`
+   map (ADR-0021). Auto recognition joins stable Identities only. The
    one-`/tap`-WS-=-one-speaker invariant is unchanged.
 5. **Single source of truth (server-resolved).** Names live in one global
    `people.json`; the **server** resolves `identity → Person → name` when

@@ -25,8 +25,10 @@ from fastapi.testclient import TestClient
 from route_inventory import registered_routes  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
+from tapscribe import tap_mode
 from tapscribe.app import app, get_recorder
 from tapscribe.recorder import Recorder
+from tapscribe.roster import read_roster
 
 # ---------------------------------------------------------------------------
 # Fixtures (the `fake_wlk` fixture is shared via conftest.py so the
@@ -348,6 +350,17 @@ def _wait_for_transcript_text(recorder: Recorder, text: str, timeout: float = 5.
         lambda: any(e["text"] == text for e in recorder.transcripts.snapshot()),
         timeout=timeout,
     )
+
+
+def _wait_for_taps_closed(client: TestClient, timeout: float = 5.0) -> bool:
+    """Poll until no tap is open. Same root cause as `_wait_for_utterance_closed`
+    — TestClient's `websocket_connect` context does NOT await the server
+    handler's finally — but the consequence here is teardown, not a resume race:
+    a test that just leaves the block lets its fixtures tear the fake WlK down
+    while the tap's relay connection is still closing. The socket is then
+    collected later and lands as a PytestUnraisableExceptionWarning on whatever
+    unrelated test the GC happens to interrupt."""
+    return _wait_until(lambda: not client.get("/api/state").json()["active"], timeout=timeout)
 
 
 def _wait_for_relay_bytes(fake_wlk: FakeWlkThread, minimum: int, timeout: float = 5.0) -> bool:
@@ -1195,3 +1208,140 @@ def test_pick_tap_subprotocol_empty_token_always_rejects(arbitrary_offer: str):
     from tapscribe.auth import pick_tap_subprotocol
 
     assert pick_tap_subprotocol([arbitrary_offer], "") is None
+
+
+# ---------------------------------------------------------------------------
+# Single- vs multi-person declaration on the wire (ADR-0021). The Roster is
+# what remembers it, so diarization is a property of the RECORDING rather than
+# of whatever the per-identity setting says days later.
+# ---------------------------------------------------------------------------
+
+_FRAME = b"\x10\x00" * 320
+
+
+def _tap_then_roster(client, recorder, query: str):
+    with client.websocket_connect(f"/tap?identity=sysaudio&name=System+audio{query}") as ws:
+        ws.send_bytes(_FRAME)
+    _wait_for_taps_closed(client)
+    return read_roster(recorder.session_dir)["sysaudio"]
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("&tap_mode=multi", "multi"),
+        # A bridge predating this feature sends no declaration.
+        ("", "single"),
+        # Junk must never mean multi — that manufactures Voices from one human.
+        ("&tap_mode=sideways", "single"),
+    ],
+    ids=["multi", "absent", "junk"],
+)
+def test_the_roster_records_the_declared_mode(client, recorder_with_fake_wlk, fake_wlk, query, expected):
+    assert _tap_then_roster(client, recorder_with_fake_wlk, query)["mode"] == expected
+
+
+def test_the_operator_override_beats_the_declaration_at_tap_open(client, recorder_with_fake_wlk, fake_wlk):
+    tap_mode.set_override("sysaudio", "multi")
+
+    entry = _tap_then_roster(client, recorder_with_fake_wlk, "&tap_mode=single")
+
+    assert entry["mode"] == "multi"
+
+
+# ---------------------------------------------------------------------------
+# The per-identity single/multi override (ADR-0021)
+#
+# Strict where the wire is lenient: a bridge predating the feature legitimately
+# sends nothing, but an operator typing a bad value deserves a 400 rather than
+# a silent fall-through to single.
+
+
+def test_the_tap_mode_route_stores_an_override(client, recorder_with_fake_wlk) -> None:
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["mode"] == "multi"
+    assert tap_mode.overrides()["sysaudio"] == "multi"
+
+
+def test_the_tap_mode_route_clears_an_override_with_null(client, recorder_with_fake_wlk) -> None:
+    client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": None})
+
+    assert r.status_code == 200, r.text
+    assert tap_mode.overrides() == {}
+
+
+def test_the_tap_mode_route_rejects_a_value_that_is_not_a_mode(client, recorder_with_fake_wlk) -> None:
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "sideways"})
+
+    assert r.status_code == 400
+    assert tap_mode.overrides() == {}
+
+
+def test_the_tap_mode_route_requires_an_identity(client, recorder_with_fake_wlk) -> None:
+    assert client.put("/api/tap-mode", json={"mode": "multi"}).status_code == 400
+
+
+def test_the_tap_mode_route_rejects_an_omitted_mode_rather_than_clearing(client, recorder_with_fake_wlk):
+    """`None` already means CLEAR, so an omitted key cannot also mean "leave
+    unchanged" the way the sibling /api/tap-settings' fields do — accepting it
+    would let a body that merely lost a field destroy a durable setting."""
+    client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    r = client.put("/api/tap-mode", json={"identity": "sysaudio"})
+
+    assert r.status_code == 400
+    assert tap_mode.overrides()["sysaudio"] == "multi"
+
+
+def test_a_junk_declaration_never_reaches_the_api_state_row(client, recorder_with_fake_wlk):
+    """`declared_mode` rides the ActiveStream into every poll body, and a raw
+    query param is unbounded — narrow it at the boundary, like `?name=`."""
+    junk = "x" * 500
+    # Live off: this asserts on the ActiveStream row, so there is no reason to
+    # stand a relay connection up for it.
+    client.put("/api/tap-settings", json={"identity": "sysaudio", "live": False})
+    with client.websocket_connect(f"/tap?identity=sysaudio&name=System+audio&tap_mode={junk}") as ws:
+        ws.send_bytes(_FRAME)
+        rows = [r for r in client.get("/api/state").json()["active"] if r["identity"] == "sysaudio"]
+    _wait_for_taps_closed(client)
+
+    assert [r["declared_mode"] for r in rows] == [""]
+    assert [r["mode"] for r in rows] == ["single"]
+
+
+def test_api_state_reports_the_bridge_declaration_with_no_override(client, recorder_with_fake_wlk):
+    """The declaration path, unmasked. The sibling below sets an override, which
+    is exactly what hid `ActiveStream.mode` never being passed at all."""
+    with client.websocket_connect("/tap?identity=sysaudio&name=System+audio&tap_mode=multi") as ws:
+        ws.send_bytes(_FRAME)
+        rows = client.get("/api/state").json()["active"]
+        assert [r["mode"] for r in rows if r["identity"] == "sysaudio"] == ["multi"]
+    _wait_for_taps_closed(client)
+
+
+def test_api_state_falls_back_to_the_declaration_when_an_override_is_cleared(client, recorder_with_fake_wlk):
+    """Storing the RESOLVED value instead of the declaration would pin the row
+    to the overridden mode forever."""
+    tap_mode.set_override("sysaudio", "single")
+    with client.websocket_connect("/tap?identity=sysaudio&name=System+audio&tap_mode=multi") as ws:
+        ws.send_bytes(_FRAME)
+        client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": None})
+        rows = client.get("/api/state").json()["active"]
+        assert [r["mode"] for r in rows if r["identity"] == "sysaudio"] == ["multi"]
+    _wait_for_taps_closed(client)
+
+
+def test_the_effective_mode_shows_on_api_state(client, recorder_with_fake_wlk) -> None:
+    """The overlay reports what is effective NOW, so flipping a tap is visible
+    even though it only binds on the next WS."""
+    client.put("/api/tap-mode", json={"identity": "sysaudio", "mode": "multi"})
+
+    with client.websocket_connect("/tap?identity=sysaudio&name=System+audio") as ws:
+        ws.send_bytes(_FRAME)
+        rows = client.get("/api/state").json()["active"]
+        assert [row["mode"] for row in rows if row["identity"] == "sysaudio"] == ["multi"]
+    _wait_for_taps_closed(client)

@@ -7,6 +7,7 @@
   POST    /api/tap/sessions/{session}/pipeline    trigger the pipeline (tap bearer)
   GET     /api/tap/sessions/{session}/pipeline    poll the pipeline (tap bearer)
   PUT     /api/tap-settings                       per-identity record/live preferences
+  PUT     /api/tap-mode                           per-identity single/multi-person override
   POST    /api/recording/toggle                   the global recording pause
 
 The two auth schemes sit side by side on purpose (ADR-0018). Routes under
@@ -37,7 +38,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
-from .. import auth, config
+from .. import auth, config, tap_mode
 from ..batch_pipeline import PipelineRequest, start_pipeline
 from ..recorder import Recorder
 from ..session_maintenance import (
@@ -284,6 +285,35 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
     }
 
 
+@router.put("/api/tap-mode")
+async def api_tap_mode_put(req: Request):
+    """Override one identity's single/multi-person mode, or clear it. Body:
+    `{"identity": "...", "mode": "single" | "multi" | null}`.
+
+    Strict, unlike the wire: the `/tap` param is lenient because a bridge
+    predating the feature sends nothing, but an operator typing a bad value
+    deserves a 400 rather than a silent fall-through to `single`. Durable and
+    per identity, so it outlives a restart; takes effect on the NEXT /tap WS.
+
+    `mode` is REQUIRED, and an explicit `null` is the only way to clear: unlike
+    the sibling `/api/tap-settings`, an omitted field here cannot mean "leave
+    unchanged" — `None` is already spoken for — so accepting the omission would
+    let a body that simply lost a field destroy a durable operator setting.
+    """
+    body = await json_body(req)
+    identity = body.get("identity")
+    if not isinstance(identity, str) or not identity:
+        raise HTTPException(400, "identity required")
+    if "mode" not in body:
+        raise HTTPException(400, "mode required (null clears the override)")
+    mode = body.get("mode")
+    try:
+        tap_mode.set_override(identity, mode)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return {"ok": True, "identity": identity, "mode": mode}
+
+
 @router.post("/api/recording/toggle")
 async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Flip recorder.recording_enabled. Optional body {"enabled": bool} to
@@ -382,6 +412,18 @@ async def tap(ws: WebSocket):
     # them.
     tap_pref = recorder.tap_settings.get(identity)
 
+    # Single- vs multi-person, resolved operator override › bridge declaration ›
+    # default single (ADR-0021). Lenient like every other param here: absent or
+    # unrecognised means single, because junk meaning multi would manufacture
+    # Voices out of one human.
+    #
+    # Narrowed to the two reserved spellings HERE, not just where it is read:
+    # `declared_mode` rides the ActiveStream into every /api/state row, and a raw
+    # query param is unbounded. Same seam `?name=` crosses via `sanitise_name`.
+    declared = ws.query_params.get(tap_mode.TAP_MODE_PARAM) or ""
+    declared_mode = declared if tap_mode.is_mode(declared) else ""
+    mode = tap_mode.resolve(declared=declared_mode, override=tap_mode.overrides().get(identity))
+
     async with await TapFanOut.open(
         recorder,
         identity=identity,
@@ -389,6 +431,8 @@ async def tap(ws: WebSocket):
         utterance_id=utterance_id,
         do_record=tap_pref.record,
         do_live=tap_pref.live,
+        mode=mode,
+        declared_mode=declared_mode,
         session=tap_session,
         session_dir=tap_session_dir,
     ) as fan_out:

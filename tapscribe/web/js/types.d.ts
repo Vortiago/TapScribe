@@ -66,6 +66,8 @@ export interface AppState {
   parakeet_overlap_s: number;
   summarize_timeout_s: number;
   summarize_gguf_ctx: number;
+  diarize_threshold: number; // cosine cut; lower splits more
+  diarize_max_speakers: number;
   // Specialist language→model map (read-only, launch-time) — surfaced on /api/state.
   specialists: SpecialistMap;
   // The cross-session People Registry view (ADR-0009): one row per canonical
@@ -119,6 +121,10 @@ export interface ActiveStream {
   buffer_transcription: string; // in-flight (uncommitted) hypothesis
   gate_open: boolean;
   session: string | null;       // session this tap was writing to at open time
+  // EFFECTIVE single/multi-person mode (ADR-0021): operator override >
+  // the Bridge's declaration on the wire > single. Only a multi-person tap is
+  // diarized. Absent on a payload from before the feature.
+  mode?: "single" | "multi";
 }
 
 export interface LiveFeedEntry {
@@ -207,6 +213,11 @@ export interface Session {
   // global rename propagates to the transcript. Absent/empty for an old
   // rosterless session (which then resolves purely via its retained aliases).
   names?: Record<string, string>;
+  // Server-projected stamp over each identity's diarization run_id (ADR-0021).
+  // The runs themselves are a join input /api/state consumes and drops; this is
+  // the key the Voices panel's lazy body rides, and the only signal that a
+  // diarize landed. "" for a session that was never diarized.
+  voices_sig?: string;
   stripped: StrippedStats | null;
 }
 
@@ -223,6 +234,39 @@ export interface SessionMeta {
   // override → the global default applies.
   languages?: string[];
   aliases?: Record<string, string>;
+  // The operator's Voice->Person map (ADR-0021): `identity#<voice>` to a Person
+  // pointer stamped with the diarization run it was made against. A mapping
+  // whose stamp no longer matches the sidecar is NOT applied and shows as
+  // needing re-mapping. Rides the poll, not the lazy Voices body: it changes on
+  // a click, that body only on a re-diarize.
+  voices?: Record<string, VoiceMapping>;
+}
+
+export interface VoiceMapping {
+  person_id: string;
+  run_id: string;
+}
+
+// GET /api/sessions/{session}/voices — the lazy body behind `voices_sig`.
+// Span COUNTS and seconds, never the spans themselves: a long meeting is
+// thousands of them and the panel draws one row per Voice.
+export interface SessionVoices {
+  session: string;
+  identities: VoiceIdentity[];
+}
+
+export interface VoiceIdentity {
+  identity: string;
+  name: string;
+  run_id: string;
+  voices: VoiceRow[];
+}
+
+export interface VoiceRow {
+  key: string; // `identity#<label>`
+  label: string;
+  spans: number;
+  seconds: number;
 }
 
 export interface StrippedStats {
@@ -234,7 +278,7 @@ export interface StrippedStats {
 // dataclasses.asdict(JobState) — one in-flight job per session at a time.
 export interface JobStateSnapshot {
   session: string;
-  kind: "transcribe" | "strip" | "summarize" | "pipeline";
+  kind: "transcribe" | "strip" | "diarize" | "summarize" | "pipeline";
   current: number;
   total: number;
   started_at: string; // ISO 8601
@@ -242,7 +286,7 @@ export interface JobStateSnapshot {
   current_file: string | null;
   model: string | null;
   // Which stage a kind="pipeline" job is in; null for single-stage jobs.
-  stage: "strip" | "transcribe" | "summarize" | null;
+  stage: "strip" | "diarize" | "transcribe" | "summarize" | null;
 }
 
 // POST /api/sessions/{session}/summarize response — the persisted summary
