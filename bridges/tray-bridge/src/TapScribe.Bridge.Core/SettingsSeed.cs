@@ -2,22 +2,18 @@ using System.Runtime.InteropServices;
 
 namespace TapScribe.Bridge.Core;
 
-/// <summary>The endpoints a Settings dialog could list, and why it could not.</summary>
-/// <param name="Devices">What is present. Empty means "none" when <paramref name="Error"/> is
-/// null, and "unknown" when it is not.</param>
-/// <param name="Error">Why the walk failed, or null. The distinction
-/// <see cref="IAudioDeviceEnumerator.List"/> states in its own contract: a dialog that cannot
-/// tell the two empty lists apart shows "no devices" to an operator whose devices are all
-/// there.</param>
+/// <summary>The endpoints a Settings dialog could list, and why it could not. Empty
+/// <paramref name="Devices"/> means "none" when <paramref name="Error"/> is null and "unknown"
+/// when it is not: the distinction <see cref="IAudioDeviceEnumerator.List"/> draws in its own
+/// contract, and a dialog that cannot see it says "no devices" to an operator who has some.
+/// </summary>
 public readonly record struct DeviceListing(IReadOnlyList<CaptureDevice> Devices, string? Error);
 
 /// <summary>
-/// Seeding a Settings dialog's draft, which is the part of opening one that can lose an
-/// operator's saved selection.
-///
-/// <see cref="SettingsDraft.ToSettings"/> collects the pin grid and the absent pins, and BOTH
-/// come from <see cref="SettingsDraft.SetAvailableDevices"/>. A dialog that skips it saves a
-/// file with every pin gone, and that looks exactly like a Save that worked.
+/// Seeding a Settings dialog's draft: the part of opening one that can lose a saved selection.
+/// <see cref="SettingsDraft.ToSettings"/> collects the pin grid and the absent pins from
+/// <see cref="SettingsDraft.SetAvailableDevices"/>, so a dialog that skips it saves a file with
+/// every pin gone, and that looks exactly like a Save that worked.
 /// </summary>
 public static class SettingsSeed
 {

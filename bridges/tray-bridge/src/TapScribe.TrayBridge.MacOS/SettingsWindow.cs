@@ -411,15 +411,10 @@ internal sealed class SettingsWindow : IDisposable
         string outcome;
         try
         {
-            // Collect inside the try: the button is disabled and the status reads "Testing…"
-            // from here, so a throw out of Collect leaves both stuck that way. DescribeAsync
-            // guards the probe half; nothing guards this one.
-            //
-            // Collect at all, and BEFORE the probe, so the test asks about what is typed rather
-            // than what was last saved. A rejected entry is REPORTED rather than tested: Collect
-            // snapped it back to the value in force, so a green verdict would be about a
-            // connection nobody asked about, and the next Save would close over the discarded
-            // entry believing it was checked.
+            // Collect first, so the test asks about what is typed, not what was last saved.
+            // A rejected entry is REPORTED rather than tested: Collect snapped it back, so a
+            // green verdict would be about a connection nobody asked about. Inside the try
+            // because DescribeAsync guards the probe half and nothing guards this one.
             TapConnectionOptions options = Collect().ToConnectionOptions();
             outcome = EntryAccepted()
                 ? (await ConnectionTester.DescribeAsync(options).ConfigureAwait(false)).Text
@@ -427,9 +422,8 @@ internal sealed class SettingsWindow : IDisposable
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // The widest filter, like BridgeSettingsStore's token read: what reaches here is a
-            // malformed entry throwing inside Collect. Fire-and-forget from a click, so an
-            // escapee is swallowed by the scheduler and answers nothing at all.
+            // The widest filter, like BridgeSettingsStore's token read: only Collect throwing
+            // on a malformed entry reaches here, and an escapee answers nothing at all.
             outcome = $"Test failed: {ex.Message}";
         }
 
