@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 
 namespace TapScribe.Bridge.Core;
 
@@ -65,7 +64,7 @@ public sealed class InputLevelMeter : IDisposable
         {
             _capture.Stop();
         }
-        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
+        catch (Exception ex) when (CaptureSeam.IsDeclaredCaptureFailure(ex))
         {
             // The endpoint was invalidated while the meter ran: unplug the mic with Settings
             // open and stopping it raises the seam's declared native failure. There is nothing

@@ -69,7 +69,7 @@ internal sealed class MeterProbe(
             _meter = meter;
             meter.Start();
         }
-        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
+        catch (Exception ex) when (CaptureSeam.IsDeclaredOpenFailure(ex))
         {
             // The seam's whole set, named once in Core: a subset lets the rest escape an
             // NSButton handler, which on AppKit ends the tray. Not a catch-all: that would

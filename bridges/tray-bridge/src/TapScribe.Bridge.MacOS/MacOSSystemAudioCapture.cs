@@ -347,7 +347,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
         {
             next = Bind(moved);
         }
-        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
+        catch (Exception ex) when (CaptureSeam.IsDeclaredOpenFailure(ex))
         {
             // The endpoint moved somewhere this Mac will not tap. Bind released what it made, so
             // nothing is held here. The seam's WHOLE declared set: this runs from a CoreAudio
@@ -381,7 +381,7 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
                 _run.Start(next.Aggregate.DeviceId, Format);
             }
         }
-        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
+        catch (Exception ex) when (CaptureSeam.IsDeclaredOpenFailure(ex))
         {
             // The new tap's format is unreadable, or the endpoint refused the IOProc. Nothing is
             // left to record the far side with, so the pipeline is told rather than left with a

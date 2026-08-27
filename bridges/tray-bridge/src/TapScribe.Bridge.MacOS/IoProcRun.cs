@@ -107,7 +107,7 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
         {
             hal.StopIo(ioProc);
         }
-        catch (Exception ex) when (!propagate && ex is ExternalException or InvalidOperationException)
+        catch (Exception ex) when (!propagate && CaptureSeam.IsDeclaredCaptureFailure(ex))
         {
             // Abandon's half: no other owner, so the report goes to the counter. Stop lets it out.
             Interlocked.Increment(ref _teardownFaults);
@@ -125,16 +125,16 @@ internal sealed class IoProcRun(ICoreAudioHal hal, CaptureHandOff handOff)
     }
 
     // Two shapes: the platform refusing an object it no longer has, and the HAL refusing a
-    // handle its own Dispose swept first. Neither leaves anything to do. Filtered on the type
-    // the SEAM declares, not CoreAudioException, or a different ExternalException escapes a
-    // method documented never to throw.
+    // handle its own Dispose swept first. Neither leaves anything to do. Filtered on the set the
+    // SEAM declares, not CoreAudioException, or a different ExternalException escapes a method
+    // documented never to throw.
     private void Swallow(Action release)
     {
         try
         {
             release();
         }
-        catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
+        catch (Exception ex) when (CaptureSeam.IsDeclaredCaptureFailure(ex))
         {
             Interlocked.Increment(ref _teardownFaults);
         }

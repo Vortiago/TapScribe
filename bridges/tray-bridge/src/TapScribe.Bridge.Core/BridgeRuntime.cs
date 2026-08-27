@@ -312,7 +312,7 @@ public sealed class BridgeRuntime
             GateOptions gate = resolved.Gate.ToGateOptions();
             into.Add(new PipelineSpec(enumerator.Open(resolved.Device), options, gate));
         }
-        catch (Exception ex) when (CaptureSeam.IsDeclaredFailure(ex))
+        catch (Exception ex) when (CaptureSeam.IsDeclaredOpenFailure(ex))
         {
             _dispatcher.Post(() =>
                 _view.ShowNotice($"Could not open {resolved.Device.Name}", ex.Message, NoticeKind.Warning));
