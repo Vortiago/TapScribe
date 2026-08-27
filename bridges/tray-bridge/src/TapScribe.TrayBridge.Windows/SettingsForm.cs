@@ -518,11 +518,16 @@ internal sealed class SettingsForm : Form
         try
         {
             TapConnectionOptions options = Collect().ToConnectionOptions();
-            using var cts = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
             // No ConfigureAwait(false): resume on the UI thread to update controls.
-            ConnectionTestResult result =
-                await ConnectionTester.TestAsync(options, http: null, cts.Token);
-            SetTestStatus(result.Describe(), result.Ok ? Color.Green : Color.Firebrick);
+            ConnectionTestOutcome outcome = await ConnectionTester.DescribeAsync(options);
+            SetTestStatus(outcome.Text, outcome.Ok ? Color.Green : Color.Firebrick);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Collect throwing on a malformed entry. Fire-and-forget from a click, so an escapee
+            // is swallowed by the scheduler and strands the status line on "Testing…" for as
+            // long as the dialog is open. DescribeAsync guards the probe half.
+            SetTestStatus($"Test failed: {ex.Message}", Color.Firebrick);
         }
         finally
         {

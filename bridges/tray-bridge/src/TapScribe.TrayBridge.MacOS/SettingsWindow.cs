@@ -401,9 +401,8 @@ internal sealed class SettingsWindow : IDisposable
         return inForce;
     }
 
-    // The same probe the SpatialChat bridge's popup runs: reachability, then a /tap handshake
-    // under the reserved __probe__ identity that ConnectionTester owns. Collect() first, so
-    // the test asks about what is typed rather than about what was last saved.
+    // The same probe the SpatialChat bridge's popup runs, under the reserved __probe__ identity
+    // ConnectionTester owns.
     private async Task TestConnectionAsync()
     {
         _test.Enabled = false;
@@ -412,34 +411,25 @@ internal sealed class SettingsWindow : IDisposable
         string outcome;
         try
         {
-            // Inside the try, not before it: the button is disabled and the status reads
-            // "Testing…" from here, so anything that escapes leaves both stuck that way for as
-            // long as the window is open.
+            // Collect inside the try: the button is disabled and the status reads "Testing…"
+            // from here, so a throw out of Collect leaves both stuck that way. DescribeAsync
+            // guards the probe half; nothing guards this one.
+            //
+            // Collect at all, and BEFORE the probe, so the test asks about what is typed rather
+            // than what was last saved. A rejected entry is REPORTED rather than tested: Collect
+            // snapped it back to the value in force, so a green verdict would be about a
+            // connection nobody asked about, and the next Save would close over the discarded
+            // entry believing it was checked.
             TapConnectionOptions options = Collect().ToConnectionOptions();
-            if (!EntryAccepted())
-            {
-                // Reported rather than tested. That Collect snapped a rejected port back to the
-                // one in force, so testing would answer about a connection the operator never
-                // asked about - and a green verdict on it is what makes the next Save close over
-                // their discarded entry believing it was checked.
-                outcome = _rejectedAnEntry;
-            }
-            else
-            {
-                using var timeout = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
-                ConnectionTestResult result = await ConnectionTester
-                    .TestAsync(options, http: null, timeout.Token)
-                    .ConfigureAwait(false);
-                outcome = result.Describe();
-            }
+            outcome = EntryAccepted()
+                ? (await ConnectionTester.DescribeAsync(options).ConfigureAwait(false)).Text
+                : _rejectedAnEntry;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // Deliberately the widest filter here, like BridgeSettingsStore's token read.
-            // ConnectionTester answers a bad host, a refused token and a timeout as RESULTS, so
-            // what is left is a malformed entry throwing somewhere below. This runs
-            // fire-and-forget from a click, so anything escaping is swallowed by the scheduler and
-            // leaves the button dead with no answer at all. What is lost is the stack.
+            // The widest filter, like BridgeSettingsStore's token read: what reaches here is a
+            // malformed entry throwing inside Collect. Fire-and-forget from a click, so an
+            // escapee is swallowed by the scheduler and answers nothing at all.
             outcome = $"Test failed: {ex.Message}";
         }
 

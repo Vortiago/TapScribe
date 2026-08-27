@@ -169,4 +169,42 @@ public class ConnectionTesterTests
             await _app.DisposeAsync();
         }
     }
+
+
+    [Fact]
+    public async Task Describe_WhenTheProbeThrowsOutsideItsDeclaredSet_AnswersRatherThanEscaping()
+    {
+        // TestAsync answers a bad host, a refused token and a timeout as RESULTS, so what is
+        // left is a malformed entry throwing below it. Both dialogs run the test
+        // fire-and-forget from a click, where an escaping exception is swallowed by the
+        // scheduler and leaves the status reading "Testing..." for as long as the dialog is open.
+        using var http = new HttpClient(new ThrowingHandler());
+        var options = new TapConnectionOptions { Host = "127.0.0.1", Port = 9, Token = "tok" };
+
+        ConnectionTestOutcome outcome = await ConnectionTester.DescribeAsync(options, http);
+
+        Assert.False(outcome.Ok);
+        Assert.Contains("malformed on purpose", outcome.Text);
+    }
+
+    [Fact]
+    public async Task Describe_WhenTheRecorderAnswers_CarriesTheResultsOwnWording()
+    {
+        // The shells show Text verbatim, so the wording must stay ConnectionTestResult's.
+        await using FakeRecorder server = await FakeRecorder.StartAsync();
+        using var http = new HttpClient();
+        var options = new TapConnectionOptions { Host = "127.0.0.1", Port = server.Port, Token = "tok-abc" };
+
+        ConnectionTestOutcome outcome = await ConnectionTester.DescribeAsync(options, http);
+
+        Assert.True(outcome.Ok);
+        Assert.Equal("Recorder reachable; tap token accepted.", outcome.Text);
+    }
+
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new InvalidCastException("malformed on purpose");
+    }
 }
