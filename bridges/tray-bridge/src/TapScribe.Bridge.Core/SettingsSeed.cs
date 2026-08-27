@@ -17,6 +17,7 @@ public readonly record struct DeviceListing(IReadOnlyList<CaptureDevice> Devices
 /// </summary>
 public static class SettingsSeed
 {
+    /// <summary>Seed a draft from the settings in force, against the devices present now.</summary>
     /// <param name="current">The settings the runtime is running on.</param>
     /// <param name="devices">What <see cref="Listing"/> found. Empty is valid and safe.</param>
     public static SettingsDraft From(BridgeSettings current, IReadOnlyList<CaptureDevice> devices)

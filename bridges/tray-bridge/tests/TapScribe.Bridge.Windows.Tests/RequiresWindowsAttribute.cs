@@ -7,6 +7,7 @@ namespace TapScribe.Bridge.Windows.Tests;
 /// </summary>
 internal sealed class RequiresWindowsAttribute : FactAttribute
 {
+    /// <summary>Skip at discovery unless the host is Windows.</summary>
     /// <param name="capability">What the test needs Windows FOR, folded into the skip reason:
     /// a skip list is only useful if it names the capability that went unexercised.</param>
     public RequiresWindowsAttribute(string capability)
