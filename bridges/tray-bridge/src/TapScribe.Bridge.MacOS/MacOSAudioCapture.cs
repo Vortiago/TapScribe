@@ -32,7 +32,6 @@ internal sealed class MacOSAudioCapture : IAudioCapture
     // The IOProc and the ordering rules around it, shared with the system-audio capture.
     private readonly IoProcRun _run;
 
-
     // Everything behind DataAvailable runs off CoreAudio's realtime IO thread, which has a
     // buffer-period deadline this class may not spend. CaptureHandOff owns that rule for every
     // capture in this backend.
@@ -178,5 +177,4 @@ internal sealed class MacOSAudioCapture : IAudioCapture
         _lifeListener.Dispose();
         GC.SuppressFinalize(this);
     }
-
 }

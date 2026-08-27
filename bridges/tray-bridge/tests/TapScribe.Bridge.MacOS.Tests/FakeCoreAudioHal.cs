@@ -263,6 +263,12 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         Handle handle = Live(ioProc, nameof(StopIo));
         // Stopping a stopped IOProc is legal on real CoreAudio (it answers noErr), and the
         // seam documents Stop as safe to call when not started, so this does not refuse it.
+        //
+        // Cleared BEFORE the throw, so a scripted StopIoError still leaves DestroyIoProc able to
+        // succeed. Whether the real HAL agrees is UNKNOWN: a stop that fails because the endpoint
+        // is gone would likely refuse the destroy too, but nothing here can force a real stop to
+        // fail, so modelling that would be a guess dressed as a fixture. Left honest rather than
+        // plausible; the teardown-fault tests above it assert this fake's rule, not CoreAudio's.
         handle.Running = false;
         if (StopIoError is not null)
             throw StopIoError;

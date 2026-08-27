@@ -82,4 +82,3 @@ internal sealed class LevelMeterView : NSView
         NSBezierPath.FromRect(new CGRect(1 + marker, 1, 2, bounds.Height - 2)).Fill();
     }
 }
-

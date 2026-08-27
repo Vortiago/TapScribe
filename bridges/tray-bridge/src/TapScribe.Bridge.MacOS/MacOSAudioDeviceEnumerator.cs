@@ -33,9 +33,12 @@ public sealed class MacOSAudioDeviceEnumerator : IAudioDeviceEnumerator
     /// A UID rather than a real device's, because on macOS there is nothing to name: what the Mac
     /// plays is a process tap, and the tap follows whichever output is default. Listing the real
     /// outputs would offer rows that all open the same thing, so pinning "External Headphones"
-    /// would silently record the default output, and a follow-default row plus a pinned one would
-    /// run two taps over one mixdown under two identities, which DuplicateIdentity cannot catch
-    /// because the names differ. One row means a pin says exactly what following the default says.
+    /// would silently record the default output. One row means a pin says exactly what following
+    /// the default says.
+    ///
+    /// It does NOT stop the operator ticking both. That pair runs two taps over one mixdown under
+    /// two identities, which DuplicateIdentity cannot catch because the names differ, and
+    /// <see cref="SelectionVerdict.DuplicateDevice"/> is what refuses it before any device opens.
     /// </summary>
     internal const string SystemAudioId = "tapscribe:system-audio";
 

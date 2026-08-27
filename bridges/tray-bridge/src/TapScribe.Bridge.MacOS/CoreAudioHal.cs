@@ -530,7 +530,6 @@ public sealed unsafe partial class CoreAudioHal : ICoreAudioHal
 
     private const int NoError = 0;
 
-
     // kCFStringEncodingUTF8.
     private const uint EncodingUtf8 = 0x08000100;
 

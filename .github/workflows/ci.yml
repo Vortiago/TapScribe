@@ -471,6 +471,10 @@ jobs:
           dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge.Windows `
             -c Release -r win-x64 --self-contained `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          # Checked here, because a native command's exit code does not stop a pwsh block: a
+          # failed publish would otherwise run on and surface as Copy-Item complaining about a
+          # missing path, which reads as a drifted path rather than as code that will not build.
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $published = "bridges/tray-bridge/src/TapScribe.TrayBridge.Windows/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
           $alone = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-launch")).FullName
           Copy-Item $published $alone

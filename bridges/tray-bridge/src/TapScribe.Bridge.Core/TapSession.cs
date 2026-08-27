@@ -1,4 +1,3 @@
-
 namespace TapScribe.Bridge.Core;
 
 /// <summary>

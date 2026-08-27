@@ -407,8 +407,9 @@ internal sealed class SettingsWindow : IDisposable
     {
         _test.Enabled = false;
         _testStatus.StringValue = "Testing…";
+        _testStatus.TextColor = NSColor.SecondaryLabel;
 
-        string outcome;
+        ConnectionTestOutcome outcome;
         try
         {
             // Collect first, so the test asks about what is typed, not what was last saved.
@@ -417,14 +418,14 @@ internal sealed class SettingsWindow : IDisposable
             // because DescribeAsync guards the probe half and nothing guards this one.
             TapConnectionOptions options = Collect().ToConnectionOptions();
             outcome = EntryAccepted()
-                ? (await ConnectionTester.DescribeAsync(options).ConfigureAwait(false)).Text
-                : _rejectedAnEntry;
+                ? await ConnectionTester.DescribeAsync(options).ConfigureAwait(false)
+                : new ConnectionTestOutcome(_rejectedAnEntry, Ok: false);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             // The widest filter, like BridgeSettingsStore's token read: only Collect throwing
             // on a malformed entry reaches here, and an escapee answers nothing at all.
-            outcome = $"Test failed: {ex.Message}";
+            outcome = new ConnectionTestOutcome($"Test failed: {ex.Message}", Ok: false);
         }
 
         // Back to the main thread before touching either control: the await above resumed on a
@@ -434,7 +435,12 @@ internal sealed class SettingsWindow : IDisposable
         {
             if (_disposed)
                 return;
-            _testStatus.StringValue = outcome;
+            _testStatus.StringValue = outcome.Text;
+            // Coloured, like the WinForms sibling. Both verdicts are a paragraph of prose and
+            // the operator is scanning for pass or fail, so reading them is the slow way to find
+            // out which one it was. System colours rather than literals, so the pair stays
+            // legible in either appearance.
+            _testStatus.TextColor = outcome.Ok ? NSColor.SystemGreen : NSColor.SystemRed;
             _test.Enabled = true;
         });
     }

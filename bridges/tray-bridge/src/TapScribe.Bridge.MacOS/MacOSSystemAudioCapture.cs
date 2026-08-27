@@ -147,7 +147,6 @@ internal sealed class MacOSSystemAudioCapture : IAudioCapture
     /// <see cref="CaptureHandOff.IsPumping"/>.</summary>
     internal bool IsPumping => _handOff.IsPumping;
 
-
     public void Start()
     {
         lock (_binding)

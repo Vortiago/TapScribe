@@ -338,6 +338,9 @@ public sealed class BridgeRuntime
             "None of your selected devices are available. Check the Devices tab in Settings.",
         SelectionVerdict.DuplicateIdentity =>
             "Two devices share an identity. Give each a distinct identity in Settings.",
+        SelectionVerdict.DuplicateDevice =>
+            "Two of your selections are the same device, which would record it twice. "
+            + "Untick one of them, or unpin it, in the Devices tab in Settings.",
         _ => "Cannot start with the current device selection.",
     };
 

@@ -99,7 +99,6 @@ public class SettingsSeedTests
         Assert.Equal(SavedGate.Sensitivity, saved.Gate!.Sensitivity);
     }
 
-
     [Fact]
     public void Listing_WhenTheDeviceTreeCannotBeWalked_ReportsItRatherThanAnEmptyList()
     {

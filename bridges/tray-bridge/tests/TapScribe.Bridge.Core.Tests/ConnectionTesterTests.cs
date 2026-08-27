@@ -170,7 +170,6 @@ public class ConnectionTesterTests
         }
     }
 
-
     [Fact]
     public async Task Describe_WhenTheProbeThrowsOutsideItsDeclaredSet_AnswersRatherThanEscaping()
     {
