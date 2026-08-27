@@ -32,8 +32,25 @@ public interface ITrayView
     /// may apply this unconditionally.</summary>
     void ShowStatus(StatusView status);
 
-    /// <summary>Surface a transient message (a Windows balloon, an AppKit notification).</summary>
+    /// <summary>Surface a message: a Windows balloon, or a line under the macOS menu's status
+    /// header. A shell whose notice is transient shows it and forgets it; one that shows it in
+    /// place keeps it until <see cref="ClearNotice"/>.</summary>
     void ShowNotice(string title, string message, NoticeKind kind);
+
+    /// <summary>
+    /// Take down whatever notice is showing. Called when a meeting STARTS, which is the one
+    /// moment everything a notice could be about is stale.
+    ///
+    /// It exists for the shells that show a notice in place rather than as a balloon: without
+    /// it the Mac menu carries the last meeting's warning under its status header through idle
+    /// and into the next meeting, where it reads as something that just happened. Driven from
+    /// Start rather than from reaching idle, deliberately - idle is exactly where "Recording
+    /// saved" belongs, since the end-of-meeting pipeline posts it and then resets to idle, so
+    /// clearing there would swallow the one notice an operator is waiting for.
+    ///
+    /// A no-op for a shell whose notices go away on their own.
+    /// </summary>
+    void ClearNotice();
 
     /// <summary>Enable or disable the two meeting commands. Both false is a legitimate state:
     /// a meeting that is ending, or a pipeline in flight.</summary>

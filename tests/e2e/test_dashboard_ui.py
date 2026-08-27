@@ -5627,7 +5627,7 @@ async def test_settings_get_a_bridge_card_links_to_release_assets(running_record
     one-click path to the SpatialChat extension zip + Windows tray exe instead
     of a repo clone + manual build.
 
-    The two download anchors' hrefs are filled once from a single best-effort
+    The download anchors' hrefs are filled once from a single best-effort
     GET /api/bridges on render (no per-tick work), and point at the permanent
     `releases/latest/download/<asset>` URLs (ADR-0012) — the browser downloads
     straight from GitHub, so these are plain cross-origin hrefs, not
@@ -5657,25 +5657,28 @@ async def test_settings_get_a_bridge_card_links_to_release_assets(running_record
 
             spatial = page.locator('[data-slot="bridgeDlSpatial"]')
             tray = page.locator('[data-slot="bridgeDlTray"]')
+            mac = page.locator('[data-slot="bridgeDlMac"]')
             await spatial.wait_for(timeout=6000)
 
             # The hrefs are filled asynchronously from GET /api/bridges; wait for
-            # both to carry the composed release URL.
+            # every one of them to carry the composed release URL.
             await page.wait_for_function(
                 """() => {
-                  const s = document.querySelector('[data-slot="bridgeDlSpatial"]');
-                  const t = document.querySelector('[data-slot="bridgeDlTray"]');
-                  return s && t && s.href && t.href
-                    && s.href.includes('releases/latest/download/')
-                    && t.href.includes('releases/latest/download/');
+                  const slots = ["bridgeDlSpatial", "bridgeDlTray", "bridgeDlMac"];
+                  return slots.every((n) => {
+                    const a = document.querySelector(`[data-slot="${n}"]`);
+                    return a && a.href && a.href.includes('releases/latest/download/');
+                  });
                 }""",
                 timeout=8000,
             )
 
             spatial_href = await spatial.get_attribute("href")
             tray_href = await tray.get_attribute("href")
+            mac_href = await mac.get_attribute("href")
             assert "releases/latest/download/tapscribe-spacialchat-bridge.zip" in (spatial_href or "")
             assert "releases/latest/download/TapScribe.TrayBridge-win-x64.zip" in (tray_href or "")
+            assert "releases/latest/download/TapScribe.TrayBridge-osx-arm64.pkg" in (mac_href or "")
 
             # Static card: exactly one /api/bridges fetch on render.
             assert len(bridges_requests) == 1, (
@@ -7252,8 +7255,11 @@ async def test_next_waveform_click_seeks_and_draws_a_playhead(running_recorder: 
             await page.goto(base + "/#recordings", wait_until="domcontentloaded")
             await _focus_session(page, sid, stage="recordings")
 
-            # The hero canvas draws once the lazy peaks land.
-            canvas = page.locator('[data-slot="canvas"]')
+            # Mounted is not seekable: `onSeek` no-ops until the component holds
+            # peaks and a duration, and a click that beats them is lost with
+            # nothing to retry it. `data-duration-s` is that precondition,
+            # published by the component for exactly this (waveform.js).
+            canvas = page.locator('[data-slot="canvas"][data-duration-s]')
             await canvas.wait_for(state="visible", timeout=10000)
             box = await canvas.bounding_box()
             assert box and box["width"] > 40

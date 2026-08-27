@@ -43,6 +43,39 @@ public class MacOSAudioCaptureTests
     }
 
     [Fact]
+    public void Capture_DisposedTwice_ReleasesItsListenersOnce()
+    {
+        // The system-audio sibling guards this and the microphone did not, which is a
+        // difference in the two captures' disposal contracts rather than in their needs: both
+        // hand the same Registration objects back, and a Registration guards its pin with a
+        // plain bool, so a repeat is a race over freeing a GCHandle rather than a no-op.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        var capture = new MacOSAudioCapture(hal, device.ObjectId);
+
+        capture.Dispose();
+        Assert.Null(Record.Exception(capture.Dispose));
+
+        Assert.Equal(0, hal.LiveListeners);
+    }
+
+    [Fact]
+    public void Capture_StartedAfterDispose_IsRefusedRatherThanRegisteringAnIoProc()
+    {
+        // Its two listeners are gone by then, so a capture started here would deliver audio
+        // with nothing left to report a mute change or a vanished endpoint, and its IOProc
+        // would outlive the only Dispose anyone was going to call. The sibling refuses it; this
+        // one registered one.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"), mute: false);
+        var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        capture.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(capture.Start);
+        Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
     public void Capture_OnADeviceWithMuteSupport_RaisesMuteChangedOnEachTransition()
     {
         // Honouring the OS mute turns "muted" into a hard gate-closed, independent of level:
@@ -248,6 +281,44 @@ public class MacOSAudioCaptureTests
         // CoreAudio does, so reaching zero on both counters is also the teardown ORDER.
         Assert.Equal(0, hal.RunningIoProcs);
         Assert.Equal(0, hal.LiveIoProcs);
+    }
+
+    [Fact]
+    public void Capture_WhenTheDeviceGoesAwayMidStream_RaisesFailedWithTheReason()
+    {
+        // The mic was unplugged, disabled, or its interface went to sleep. CoreAudio simply
+        // stops calling the IOProc, so without this the meeting keeps running and records
+        // nothing under that speaker for the rest of the call, with the status line still
+        // saying it is streaming. Failed carries a non-null payload precisely to read as
+        // "microphone lost" rather than as the clean stop a null one means.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+        capture.Start();
+
+        hal.FireProperty(device.ObjectId, CoreAudioPropertyKind.DeviceIsAlive);
+
+        Assert.IsAssignableFrom<ExternalException>(Assert.Single(failures));
+    }
+
+    [Fact]
+    public void Capture_WhenTheDeviceGoesAwayBeforeAnythingStarted_RaisesNothing()
+    {
+        // The seam says Failed means capture ended unexpectedly MID-STREAM. A device that
+        // leaves while nothing is capturing has ended no stream: the next Start will fail on
+        // its own and the enumerator will not list it, which are the two places that fact
+        // belongs. Raising here would have the pipeline report a device that never ran.
+        var hal = new FakeCoreAudioHal();
+        CoreAudioDevice device = hal.AddDevice(Devices.Input(41, "Built-in Microphone"));
+        using var capture = new MacOSAudioCapture(hal, device.ObjectId);
+        List<Exception?> failures = [];
+        capture.Failed += (_, e) => failures.Add(e);
+
+        hal.FireProperty(device.ObjectId, CoreAudioPropertyKind.DeviceIsAlive);
+
+        Assert.Empty(failures);
     }
 
     [Fact]

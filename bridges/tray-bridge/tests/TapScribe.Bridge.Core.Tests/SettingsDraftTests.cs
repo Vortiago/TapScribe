@@ -160,6 +160,31 @@ public class SettingsDraftTests
     }
 
     [Fact]
+    public void ToSettings_WithoutTls_CannotPersistAnAcceptAnyCertificate()
+    {
+        // The one security knob in the dialog, scoped where it is decided rather than in each
+        // shell. Saving the pair unscoped arms the accept-any validator the moment TLS is
+        // ticked later, with no second consent, and the two shells did not agree: WinForms
+        // re-applied the pairing on collect, AppKit wrote the checkbox through.
+        var draft = SettingsDraft.Seed(new BridgeSettings());
+        draft.Tls = false;
+        draft.AllowSelfSignedCert = true;
+
+        Assert.False(draft.ToSettings().AllowSelfSignedCert);
+    }
+
+    [Fact]
+    public void ToSettings_WithTls_KeepsAnAcceptAnyCertificateTheOperatorAskedFor()
+    {
+        // The other half, so the scoping above cannot be "always false" and still pass.
+        var draft = SettingsDraft.Seed(new BridgeSettings());
+        draft.Tls = true;
+        draft.AllowSelfSignedCert = true;
+
+        Assert.True(draft.ToSettings().AllowSelfSignedCert);
+    }
+
+    [Fact]
     public void ToSettings_OmitsAnUntickedFollowDefault()
     {
         SettingsDraft draft = SettingsDraft.Seed(new BridgeSettings());

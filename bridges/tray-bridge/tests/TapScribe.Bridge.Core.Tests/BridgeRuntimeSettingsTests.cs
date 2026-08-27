@@ -38,7 +38,7 @@ public class BridgeRuntimeSettingsTests
         await using FakeRecorder recorder = await FakeRecorder.StartAsync();
         using var harness = new RuntimeHarness
         {
-            Recorder = recorder,
+            RealMint = true,
             Settings = WithMicSensitivity(recorder, sensitivity: 0), // deaf to quiet speech
         };
         FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
@@ -87,5 +87,32 @@ public class BridgeRuntimeSettingsTests
         (string title, _, NoticeKind kind) = Assert.Single(harness.View.Notices);
         Assert.Equal("Settings not saved", title);
         Assert.Equal(NoticeKind.Warning, kind);
+    }
+
+    [Fact]
+    public void ApplySettings_WhenTheSaveFailsWithABug_LetsItOutRatherThanBlamingTheDisk()
+    {
+        // The notice above is for what an operator can act on: a disk that will not take the file,
+        // or a secret store that refuses. Anything else is this program being wrong, and reporting
+        // a NullReferenceException as "Settings not saved" tells them to check their permissions
+        // over a bug in here. CaptureSeam states the same rule for the device seam.
+        using var harness = new RuntimeHarness { Tokens = new BuggyTapTokenStore() };
+        BridgeRuntime runtime = harness.Build();
+
+        // Carries a token, so the save reaches the token store: an empty one that was already
+        // empty is deliberately skipped (BridgeSettingsStore.Save).
+        Assert.Throws<InvalidOperationException>(
+            () => runtime.ApplySettings(
+                new BridgeSettings { Host = "recorder.example", Token = "tok-1", Devices = [] }));
+        Assert.Empty(harness.View.Notices);
+    }
+
+    /// <summary>A token store that fails the way a BUG does, which no temp directory can produce.
+    /// </summary>
+    private sealed class BuggyTapTokenStore : ITapTokenStore
+    {
+        public string? Write(string token) => throw new InvalidOperationException("a bug, not a disk");
+
+        public string Read(string? atRest) => "";
     }
 }

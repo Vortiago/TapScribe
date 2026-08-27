@@ -201,6 +201,15 @@ jobs:
   bridge-e2e:
     name: bridge popup E2E (playwright)
     runs-on: ubuntu-latest
+    # Chromium's download can WEDGE rather than fail, and it does so without
+    # GitHub reporting anything wrong. Unbounded, a browser job then holds a
+    # runner for the 6 hour default while the PR reads as 'still running', which
+    # is indistinguishable from slow. The slowest of the three has run 5 to 9
+    # minutes, and its span is mostly downloads (Chromium, then the ASR models),
+    # so the bound is set well clear of a slow network rather than snugly: a
+    # timeout that can fire on a bad day teaches people to re-run it, which is
+    # the habit that lets a real wedge through.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -234,6 +243,8 @@ jobs:
   bridge-meeting-e2e:
     name: bridge E2E (extension + meeting)
     runs-on: ubuntu-latest
+    # Bounded against a wedged Chromium download, as bridge-e2e above.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -435,10 +446,49 @@ jobs:
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj -c Release
 
       - name: Test the Windows tray shell
-        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj -c Release
+        run: dotnet test bridges/tray-bridge/tests/TapScribe.TrayBridge.Windows.Tests/TapScribe.TrayBridge.Windows.Tests.csproj -c Release
 
-      - name: Build the Windows tray shell
-        run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj -c Release
+      # The macOS job proves its .pkg installs and that the installed app launches. This
+      # is that gate for Windows, and on the same thing an operator downloads: the
+      # single-file self-contained exe. A build says the code compiles; a tray that dies
+      # on its first WinForms call is a green CI and a broken release.
+      #
+      # This publish also IS the build gate for the shell, which is why no plain build
+      # step precedes it: if the launch half is ever deleted (see below), leave a
+      # `dotnet build` of TapScribe.TrayBridge.Windows.csproj behind.
+      #
+      # The publish flags are release.yml's, minus the -p:Version it stamps from the tag.
+      # Copied out of its build tree rather than zipped: the property under test is that
+      # the exe runs on its own, and release.yml owns the zipping. A fresh APPDATA so the
+      # FIRST launch is what runs; nothing reaches a Recorder until Start meeting.
+      #
+      # If this ever fails for a reason that is about the runner rather than the code (a
+      # NotifyIcon in a session with no desktop, say), delete it. A launch gate that has
+      # to be retried is worse than none.
+      - name: Prove the published exe launches
+        timeout-minutes: 5
+        run: |
+          dotnet publish bridges/tray-bridge/src/TapScribe.TrayBridge.Windows `
+            -c Release -r win-x64 --self-contained `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          # Checked here, because a native command's exit code does not stop a pwsh block: a
+          # failed publish would otherwise run on and surface as Copy-Item complaining about a
+          # missing path, which reads as a drifted path rather than as code that will not build.
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $published = "bridges/tray-bridge/src/TapScribe.TrayBridge.Windows/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
+          $alone = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-launch")).FullName
+          Copy-Item $published $alone
+          $env:APPDATA = (New-Item -Force -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "tray-appdata")).FullName
+          $tray = Start-Process -PassThru -FilePath (Join-Path $alone "TapScribe.TrayBridge.exe")
+          # Ten seconds is the ceiling, not the wait: a crash on launch returns here at
+          # once, and the grace period only has to clear the tray icon, the menu and the
+          # first settings load.
+          if ($tray.WaitForExit(10000)) {
+            Write-Host "FAIL: the exe exited $($tray.ExitCode) within 10s of launching."
+            exit 1
+          }
+          Stop-Process -Id $tray.Id -Force
+          Write-Host "OK: the published exe launched and stayed up."
 
   # The compile gate for the two net10.0-macos projects, the shell and its tests
   # (ADR-0020): an app bundle needs Xcode and the macos workload, neither of
@@ -515,6 +565,107 @@ jobs:
 
       - name: Build the macOS tray shell
         run: dotnet build bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
+
+      # The claim the install story rests on, asserted rather than believed.
+      #
+      # Our bundle is ad-hoc signed (the .NET macOS SDK does that, and arm64 will
+      # not execute a wholly unsigned one), and a signature that fails to validate
+      # reads to Gatekeeper as tampering: a QUARANTINED ad-hoc bundle is reported
+      # as "damaged" with only Move to Trash, so the zip download has no in-UI way
+      # forward at all. Quarantine is applied by the downloading browser and
+      # propagated to a zip's contents when it is expanded, but `installer` writes
+      # payload outside that path. If that holds, shipping a .pkg moves the user
+      # from a dead end to the ordinary "unidentified developer" flow, for free.
+      #
+      # Apple documents none of this, so it is exactly the kind of claim that
+      # quietly stops being true. Here rather than in release.yml because a policy
+      # change should fail a PR, not a tag. Needs root, which is why it is a job
+      # step and not a test in TapScribe.TrayBridge.MacOS.Tests: the runners have
+      # passwordless sudo and a developer's Mac should not.
+      - name: Prove installer-written payload is not quarantined
+        run: |
+          set -euo pipefail
+          app=$(find bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release \
+            -maxdepth 3 -type d -name 'TapScribe.TrayBridge.MacOS.app' -not -path '*/publish/*')
+          # Exactly one match, and NO match fails: the build above guarantees the
+          # bundle, so an empty result means the path drifted rather than that
+          # there is nothing to check. `wc -l` alone would not catch it, since
+          # echoing an empty variable still counts as one line.
+          test -n "$app"
+          test "$(printf '%s' "$app" | grep -c '')" = 1
+          test -d "$app"
+          codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
+
+          # The SAME script release.yml ships with, so this gate cannot drift
+          # into testing a package nobody downloads.
+          bridges/tray-bridge/tools/build-macos-pkg.sh "$app" 0.0.0 probe.pkg
+          # What a browser stamps on a download. Asserted present before the
+          # install, so a silently unstamped pkg cannot make the check vacuous.
+          xattr -w com.apple.quarantine '0083;00000000;Safari;ci-probe' probe.pkg
+          xattr -p com.apple.quarantine probe.pkg
+
+          sudo installer -pkg probe.pkg -target /
+          installed=/Applications/TapScribe.TrayBridge.MacOS.app
+          # Named failures, not bare `test`: a silent one-line exit says only
+          # that the step failed, and this pair caught a real relocation bug
+          # whose diagnosis took a local repro it should not have needed.
+          if [ ! -d "$installed" ]; then
+            echo "FAIL: nothing at $installed after a successful install."
+            echo "The package's install-location was ignored, which is what a"
+            echo "<relocate> entry in its PackageInfo does. Check that"
+            echo "build-macos-pkg.sh still clears BundleIsRelocatable."
+            exit 1
+          fi
+          if [ ! -x "$installed/Contents/MacOS/TapScribe.TrayBridge.MacOS" ]; then
+            echo "FAIL: the installed bundle has no executable at Contents/MacOS/."
+            exit 1
+          fi
+
+          # The claim, spelled as an explicit failure branch rather than as a
+          # command whose non-zero exit happens to mean "clean": a grep that finds
+          # nothing and a grep that could not run look the same to `set -e`.
+          if xattr -lr "$installed" | grep -q com.apple.quarantine; then
+            echo "FAIL: installer propagated com.apple.quarantine to the payload."
+            echo "The .pkg buys nothing over the zip, and the install docs need the xattr step."
+            xattr -lr "$installed" | grep com.apple.quarantine
+            exit 1
+          fi
+          echo "OK: a quarantined unsigned .pkg installs an unquarantined bundle."
+
+      # Nothing else runs the shell. The AppKit half carries no unit tests by
+      # design (it cannot: the bindings fault under the VSTest host), so a
+      # delegate or a status item that throws on launch passes every gate above:
+      # they compile it, package it and install it without starting it once.
+      #
+      # The INSTALLED bundle, because that is what an operator double-clicks:
+      # ad-hoc signed, written by `installer`, running from /Applications.
+      #
+      # HOME is redirected for a reason, not for tidiness: a Keychain call that
+      # wants to prompt BLOCKS instead of failing, and a fresh HOME has no
+      # stored token, so the read answers errSecItemNotFound and returns.
+      #
+      # If this ever fails for a reason that is about the runner rather than the
+      # code (no window server for an LSUIElement app, say), delete it. A launch
+      # gate that has to be retried is worse than none.
+      - name: Prove the installed app launches
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          bin=/Applications/TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS
+          HOME=$(mktemp -d) "$bin" > launch.log 2>&1 &
+          pid=$!
+          # A crash on launch is immediate, so this is a grace period rather than
+          # a race: past the delegate, the status item and the first settings load.
+          sleep 10
+          if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            echo "FAIL: the app exited $status within 10s of launching."
+            cat launch.log
+            exit 1
+          fi
+          kill "$pid"
+          echo "OK: the installed bundle launched and stayed up."
 
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
@@ -640,6 +791,8 @@ jobs:
   playwright:
     name: browser UI E2E (synthetic only)
     runs-on: ubuntu-latest
+    # Bounded against a wedged Chromium download, as bridge-e2e above.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 

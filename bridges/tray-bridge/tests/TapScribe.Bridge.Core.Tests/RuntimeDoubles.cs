@@ -50,6 +50,21 @@ internal sealed class FakeTrayView : ITrayView
         lock (_lock) _notices.Add((title, message, kind));
     }
 
+    /// <summary>How many times the tray was told to take its notice down. Counted rather than
+    /// flagged, because "cleared once, when a meeting starts" and "cleared on every render"
+    /// are different behaviours and only one of them is wanted.</summary>
+    public int NoticesCleared
+    {
+        get { lock (_lock) return _cleared; }
+    }
+
+    private int _cleared;
+
+    public void ClearNotice()
+    {
+        lock (_lock) _cleared++;
+    }
+
     public void SetMenuState(bool canStart, bool canEnd)
     {
         lock (_lock)
@@ -257,16 +272,19 @@ internal sealed class RuntimeHarness : IDisposable
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
 
     /// <summary>
-    /// A live Recorder to run against, instead of the refused port. Set it and the mint goes
-    /// through a real <see cref="ControlClient"/>, so End drains real taps, triggers the real
-    /// end-of-meeting pipeline and polls it to a real summary. The End path is the one that
-    /// genuinely has to talk to a Recorder: faking the control client there would leave every
-    /// step of it unexercised. Pair with <see cref="RecorderSettings"/>.
+    /// Mint through a real <see cref="ControlClient"/> at the settings' port, instead of handing
+    /// back a canned session id. End then drains real taps, triggers the real end-of-meeting
+    /// pipeline and polls it to a real summary, which is the path faking the control client would
+    /// leave entirely unexercised. Pair with <see cref="RecorderSettings"/>.
+    ///
+    /// A flag rather than the server, because the harness neither starts nor disposes one and
+    /// reads the port off <see cref="Settings"/>: whether it is a <see cref="FakeRecorder"/> or
+    /// the Python one <see cref="RealRecorderMeetingE2ETests"/> stands up is the caller's affair.
     /// </summary>
-    public FakeRecorder? Recorder { get; init; }
+    public bool RealMint { get; init; }
 
-    /// <summary>The settings that reach <see cref="Recorder"/>: its port and the token it was
-    /// started with.</summary>
+    /// <summary>The settings that reach the recorder <see cref="RealMint"/> mints against: its
+    /// port and the token it was started with.</summary>
     public static BridgeSettings RecorderSettings(FakeRecorder recorder)
     {
         ArgumentNullException.ThrowIfNull(recorder);
@@ -327,9 +345,13 @@ internal sealed class RuntimeHarness : IDisposable
         return Path.Join(file, "store");
     }
 
+    /// <summary>How the tap token is kept at rest. Overridden by the test that needs the SAVE to
+    /// fail with something no directory can produce.</summary>
+    public ITapTokenStore Tokens { get; init; } = new FakeTapTokenStore();
+
     public BridgeSettingsStore SettingsStore =>
         _settingsStore ??= new BridgeSettingsStore(
-            new FakeTapTokenStore(), SettingsStoreDirectory ?? _directory, "runtime-test.json");
+            Tokens, SettingsStoreDirectory ?? _directory, "runtime-test.json", "test-tray");
 
     private BridgeSettingsStore? _settingsStore;
 
@@ -379,7 +401,7 @@ internal sealed class RuntimeHarness : IDisposable
             _mintReached.TrySetResult();
             if (MintError is not null)
                 throw MintError;
-            if (Recorder is not null)
+            if (RealMint)
             {
                 using var control = new ControlClient(
                     settings.Host, settings.Port, settings.Tls, settings.Token, _http);

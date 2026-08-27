@@ -100,9 +100,20 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
         bool duplicateIdentity = resolved
             .GroupBy(r => r.StreamingIdentity, StringComparer.Ordinal)
             .Any(g => g.Count() > 1);
+
+        // Two selections that land on ONE endpoint: a follow-default row and a pin naming the
+        // device that is currently default. Distinct identities, so the check above passes, and
+        // the meeting then opens the same endpoint twice and streams one source as two speakers.
+        // On macOS every output collapses to a single synthetic row, so the pin and the
+        // follow-default are ALWAYS the same device there rather than only while it is default.
+        bool duplicateDevice = resolved
+            .GroupBy(r => (r.Device.Id, r.Device.Flow))
+            .Any(g => g.Count() > 1);
+
         SelectionVerdict verdict =
             resolved.Count == 0 ? SelectionVerdict.NothingToCapture
             : duplicateIdentity ? SelectionVerdict.DuplicateIdentity
+            : duplicateDevice ? SelectionVerdict.DuplicateDevice
             : SelectionVerdict.Ok;
         return new ResolveResult(resolved, missing, verdict);
     }
@@ -173,4 +184,10 @@ public enum SelectionVerdict
     /// <summary>Two resolved devices share a streaming identity; the Recorder would
     /// cross-attribute them. Each device must stream under a distinct identity.</summary>
     DuplicateIdentity,
+
+    /// <summary>Two selections resolved to the SAME endpoint under different identities: a
+    /// follow-default row plus a pin on the device that is currently default. Left alone the
+    /// meeting taps one source twice and files it as two speakers, which is a doubled far side
+    /// in every transcript and summary.</summary>
+    DuplicateDevice,
 }

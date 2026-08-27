@@ -114,6 +114,61 @@ public class BridgeRuntimeStartTests
     }
 
     [Fact]
+    public async Task Start_WhenTwoDevicesShareAnIdentity_RefusesBeforeOpeningAnything()
+    {
+        // The Recorder buckets WAVs and attribution by the sanitised identity, so two devices
+        // under one name are recorded as one speaker with their audio interleaved: a meeting
+        // that looks fine until someone reads the transcript. Refused BEFORE anything opens,
+        // which is the load-bearing half - the alternative is endpoints held "in use" and a
+        // detached session minted on the Recorder for a meeting that never runs.
+        using var harness = new RuntimeHarness();
+        harness.Settings.Devices =
+        [
+            new DeviceSelection.FollowDefault(DeviceFlow.Capture, "everyone", "everyone"),
+            new DeviceSelection.FollowDefault(DeviceFlow.Render, "everyone", "everyone"),
+        ];
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        FakeAudioCapture system = harness.AddDevice("system", DeviceFlow.Render);
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        (string title, string message, NoticeKind kind) = Assert.Single(harness.View.Notices);
+        Assert.Equal("Could not start meeting", title);
+        Assert.Contains("identity", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(NoticeKind.Warning, kind);
+        // Nothing opened, nothing minted, and Start is live again for the operator to fix it.
+        Assert.False(mic.Started);
+        Assert.False(system.Started);
+        Assert.Null(harness.SessionIdInUse);
+        Assert.True(harness.View.CanStart);
+    }
+
+    [Fact]
+    public async Task Start_ClearsWhateverNoticeTheLastMeetingLeftShowing()
+    {
+        // A shell that shows notices IN PLACE rather than as a transient balloon - the Mac
+        // menu has no balloon, so its notice is a line under the status header - would
+        // otherwise carry "Recording saved" or a device warning through idle and into the next
+        // meeting, where it reads as something that just happened.
+        //
+        // Cleared from Start rather than on reaching idle, and that is the whole decision:
+        // idle is exactly where "Recording saved" belongs, because the pipeline posts it and
+        // then resets to idle. Hiding on idle would swallow the one notice an operator is
+        // waiting for.
+        using var harness = new RuntimeHarness();
+        harness.AddDevice("mic", DeviceFlow.Capture);
+        BridgeRuntime runtime = harness.Build();
+        harness.View.ShowNotice("Recording saved", "the last meeting", NoticeKind.Information);
+
+        runtime.Start();
+        await RuntimeHarness.StartSettledAsync(runtime);
+
+        Assert.Equal(1, harness.View.NoticesCleared);
+    }
+
+    [Fact]
     public async Task Start_WhenOneDeviceCannotBeOpened_RecordsTheMeetingOnTheRest()
     {
         using var harness = new RuntimeHarness();

@@ -13,9 +13,13 @@ namespace TapScribe.Bridge.Core.Tests;
 /// So the cross-platform CI job, which has no Python deps, skips this cleanly.</summary>
 internal sealed class RequiresPythonAsrAttribute : FactAttribute
 {
+    // Once per process, not once per decorated test: the probe spawns a Python interpreter, and
+    // every job that BUILDS this project pays it at discovery, including the two that skip.
+    private static readonly Lazy<bool> Importable = new(FasterWhisperImportable);
+
     public RequiresPythonAsrAttribute()
     {
-        if (!FasterWhisperImportable())
+        if (!Importable.Value)
             Skip = "faster-whisper not importable — the Python recorder stack isn't present here";
     }
 
@@ -69,16 +73,8 @@ public class RealRecorderMeetingE2ETests
     public async Task MultiPersonMultiLanguageMeeting_RealPipeline_ProducesAMultilingualTranscriptAndSummary()
     {
         string repoRoot = FindRepoRoot();
-        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
-        string norwegianWav = Path.Join(audio, "marlene-nb.wav");
-        string englishWav = Path.Join(audio, "armstrong-en.wav");
-        Assert.True(
-            File.Exists(norwegianWav) && File.Exists(englishWav),
-            "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
-
-        await using RealRecorder? maybeRec = await RealRecorder.TryStartAsync(repoRoot, batchModel: "base");
-        Assert.True(maybeRec is not null, "the Python recorder failed to start though faster-whisper is importable");
-        RealRecorder rec = maybeRec!;
+        (string audio, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
 
         using var http = new HttpClient();
         using var control = new ControlClient("127.0.0.1", rec.Port, tls: false, token: "", http);
@@ -135,11 +131,7 @@ public class RealRecorderMeetingE2ETests
         JsonElement root = doc.RootElement;
         string plain = root.GetProperty("plain_text").GetString() ?? "";
 
-        HashSet<string> speakers = root.GetProperty("segments").EnumerateArray()
-            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
-            .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
-            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> speakers = SpeakersIn(root);
         Assert.True(
             speakers.Count >= 2,
             $"expected >=2 speakers, got [{string.Join(", ", speakers)}]; plain={Trunc(plain)}");
@@ -159,6 +151,125 @@ public class RealRecorderMeetingE2ETests
         // The summary was produced + persisted from the multilingual transcript.
         Assert.False(string.IsNullOrWhiteSpace(last.SummaryText), "End produced no summary text");
         Assert.True(File.Exists(Path.Join(sessionDir, "session-summary.json")), "no persisted summary");
+    }
+
+    /// <summary>
+    /// The same meeting, through <see cref="BridgeRuntime"/> instead of around it.
+    ///
+    /// The test above wires the Core clients by hand; a shell does not. Both hand every decision
+    /// to the runtime, so the class an operator's Start and End go through had met only
+    /// <see cref="FakeRecorder"/>. What that left unexercised is its sequencing against a server
+    /// that takes real time to answer.
+    ///
+    /// Platform-neutral: capture is <see cref="FakeAudioCapture"/> at the seam CoreAudio and
+    /// WASAPI fill, so this covers both shells.
+    /// </summary>
+    [RequiresPythonAsr]
+    public async Task Runtime_AMeetingAgainstTheRealRecorder_PublishesItsSummaryAndReturnsToIdle()
+    {
+        string repoRoot = FindRepoRoot();
+        (_, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
+
+        // The gate the test above argues for, as the operator's own setting. Spelled out rather
+        // than left to DefaultForFlow, which would fail this test for a reason it is not about.
+        var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 3000, PreRollMs: 0);
+        using var harness = new RuntimeHarness
+        {
+            RealMint = true,
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = rec.Port,
+                // --no-auth, so the tap token is not the subject here.
+                Token = "",
+                Identity = "Nora",
+                Name = "Nora",
+                Devices =
+                [
+                    new DeviceSelection.FollowDefault(DeviceFlow.Capture, "Nora", "Nora", gate),
+                    new DeviceSelection.FollowDefault(DeviceFlow.Render, "Ed", "Ed", gate),
+                ],
+            },
+            Budgets = new RuntimeBudgets
+            {
+                // Not the harness's 10 ms: a Recorder answering a status request that often is
+                // load this meeting competes with.
+                PollInterval = TimeSpan.FromMilliseconds(500),
+                StartSettleTimeout = TimeSpan.FromSeconds(30),
+                QuitTeardownCap = TimeSpan.FromSeconds(30),
+            },
+        };
+        FakeAudioCapture nora = harness.AddDevice("mic", DeviceFlow.Capture);
+        FakeAudioCapture ed = harness.AddDevice("out", DeviceFlow.Render);
+
+        var runtime = new BridgeRuntime(
+            harness.View, harness.Dispatcher, harness.Dependencies, harness.Settings, harness.Budgets);
+
+        // Start meeting.
+        runtime.Start();
+        await runtime.StartTask!.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.True(harness.View.CanEnd, "the tray never offered End, so no meeting was published");
+        string session = harness.SessionIdInUse!;
+
+        await Task.WhenAll(FeedAsync(nora, ReadWavPcm(norwegianWav)), FeedAsync(ed, ReadWavPcm(englishWav)));
+        await Task.Delay(TimeSpan.FromSeconds(1)); // let the last frames drain to the Recorder
+
+        // End meeting: the runtime drains both taps, triggers the real pipeline and polls it.
+        runtime.End();
+        await runtime.EndTask!.WaitAsync(PipelineBudget);
+
+        // The runtime opened ONE window and rendered the finished pipeline into it.
+        FakeMeetingWindow window = Assert.Single(harness.View.Windows);
+        PipelineView? shown = window.Last;
+        Assert.True(shown is not null, "the meeting window was opened but nothing was rendered into it");
+        Assert.True(
+            shown!.Phase == PipelinePhase.Done,
+            $"pipeline did not reach Done: {shown.Phase} / {shown.FailureReason}");
+        Assert.False(string.IsNullOrWhiteSpace(shown.SummaryText), "the window was shown without a summary");
+
+        // Both speakers reached one detached session: the far side is attributed, not mixed
+        // into the operator's track.
+        string sessionDir = Path.Join(rec.BaseDir, "recordings", session);
+        using JsonDocument doc = JsonDocument.Parse(
+            File.ReadAllText(Path.Join(sessionDir, "session-transcript.json")));
+        HashSet<string> speakers = SpeakersIn(doc.RootElement);
+        Assert.True(speakers.Count >= 2, $"expected >=2 speakers, got [{string.Join(", ", speakers)}]");
+
+        // And the tray came back, with the meeting in the history Past-meetings reads.
+        Assert.True(harness.View.CanStart, "the tray never offered Start again");
+        Assert.False(harness.View.CanEnd, "the tray still offers End after the meeting finished");
+        MeetingRecord remembered = Assert.Single(harness.HistoryStore.Load().Meetings);
+        Assert.Equal(session, remembered.SessionId);
+    }
+
+    // Who the merged transcript attributes segments to.
+    private static HashSet<string> SpeakersIn(JsonElement transcript) =>
+        transcript.GetProperty("segments").EnumerateArray()
+            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!)
+            .ToHashSet(StringComparer.Ordinal);
+
+    // The two speakers' fixtures, and the check that they are on disk.
+    private static (string Dir, string Norwegian, string English) SpeechFixtures(string repoRoot)
+    {
+        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
+        string norwegian = Path.Join(audio, "marlene-nb.wav");
+        string english = Path.Join(audio, "armstrong-en.wav");
+        Assert.True(
+            File.Exists(norwegian) && File.Exists(english),
+            "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
+        return (audio, norwegian, english);
+    }
+
+    // A null here is a real FAILURE, not a skip: RequiresPythonAsr already decided the ASR stack
+    // is present, so a recorder that will not start is a healthy stack that could not boot one.
+    private static async Task<RealRecorder> StartRealRecorderAsync(string repoRoot)
+    {
+        RealRecorder? rec = await RealRecorder.TryStartAsync(repoRoot, batchModel: "base");
+        Assert.True(rec is not null, "the Python recorder failed to start though faster-whisper is importable");
+        return rec!;
     }
 
     private static TapConnectionOptions Tap(int port, string identity, string session) => new()

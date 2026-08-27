@@ -19,6 +19,8 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     private readonly Dictionary<uint, bool?> _mute = [];
     private readonly List<Registration> _listeners = [];
     private readonly List<Handle> _handles = [];
+    private readonly List<Tap> _taps = [];
+    private readonly List<AggregateDevice> _aggregates = [];
 
     /// <summary>When set, <see cref="ListDevices"/> throws it.</summary>
     public Exception? ListDevicesError { get; set; }
@@ -37,6 +39,20 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     /// <summary>When set, <see cref="StopIo"/> throws it: the endpoint was invalidated while
     /// capture ran, so there is nothing left to stop.</summary>
     public Exception? StopIoError { get; set; }
+
+    /// <summary>When set, <see cref="CreateProcessTap"/> throws it: this Mac refused the tap,
+    /// which is what a missing TCC grant and a pre-14.4 kernel both look like from here.
+    /// </summary>
+    public Exception? CreateProcessTapError { get; set; }
+
+    /// <summary>When set, <see cref="CreateAggregateDevice"/> throws it.</summary>
+    public Exception? CreateAggregateDeviceError { get; set; }
+
+    /// <summary>When set, <see cref="ReadTapFormat"/> throws it: the tap was built and then
+    /// refused to say what it carries, which is the one step of a rebind that runs AFTER both
+    /// system-wide objects exist and so is the one whose unwind has something to release.
+    /// </summary>
+    public Exception? ReadTapFormatError { get; set; }
 
     /// <summary>When set, <see cref="Dispose"/> throws it. The seam binds disposal to be
     /// throw-free all the way up, and only a HAL that misbehaves can show that the layer above
@@ -90,6 +106,32 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         FireProperty(deviceId, CoreAudioPropertyKind.Mute);
     }
 
+    /// <summary>Move the system default output to <paramref name="device"/> and fire the
+    /// property, the way plugging in headphones does the two together. Registering the device
+    /// as part of the move rather than beforehand is what makes a test read as the situation:
+    /// the endpoint appears and becomes the default in one step.</summary>
+    /// <param name="device">The endpoint that is now the default output. Must be a
+    /// <see cref="DeviceFlow.Render"/> row; there is no such thing as a default output that is
+    /// an input.</param>
+    public void SetDefaultOutput(CoreAudioDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        if (device.Flow != DeviceFlow.Render)
+            throw new InvalidOperationException($"{device.Name} is not an output, so it cannot be the default one");
+
+        for (int i = 0; i < _devices.Count; i++)
+            if (_devices[i].Flow == DeviceFlow.Render)
+                _devices[i] = _devices[i] with { IsDefault = false };
+
+        int existing = _devices.FindIndex(d => d.ObjectId == device.ObjectId && d.Flow == DeviceFlow.Render);
+        if (existing >= 0)
+            _devices[existing] = device with { IsDefault = true };
+        else
+            AddDevice(device with { IsDefault = true });
+
+        FireProperty(CoreAudioObject.System, CoreAudioPropertyKind.DefaultOutputDevice);
+    }
+
     /// <summary>Invoke every live listener on <paramref name="objectId"/> for
     /// <paramref name="kind"/>. A no-op when nothing is watching, matching CoreAudio: the OS
     /// fires on properties nobody asked about, and a capture that registered no listener is
@@ -104,7 +146,7 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
             .Where(l => l.Live && l.ObjectId == objectId && l.Kind == kind)
             .ToList())
         {
-            listener.Handler();
+            listener.Invoke();
         }
     }
 
@@ -127,6 +169,24 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     /// <summary>IOProcs currently running.</summary>
     public int RunningIoProcs => _handles.Count(h => h.Running);
 
+    /// <summary>Process taps created and not yet destroyed.</summary>
+    public int LiveTaps => _taps.Count(t => !t.Destroyed);
+
+    /// <summary>Aggregate devices created and not yet destroyed.</summary>
+    public int LiveAggregates => _aggregates.Count(a => !a.Destroyed);
+
+    /// <summary>The output endpoint each live aggregate was built around, by UID. What a
+    /// rebind test reads: the claim is not "an aggregate exists" but "the aggregate is bound to
+    /// the device the Mac is playing through NOW".</summary>
+    public IReadOnlyList<string> LiveAggregateOutputs =>
+        [.. _aggregates.Where(a => !a.Destroyed).Select(a => a.OutputDeviceUid)];
+
+    /// <summary>The stream description every tap reports. Fixed for the whole fake rather than
+    /// per tap, because a global tap has one format at a time and the thing worth varying is
+    /// what it becomes AFTER a rebind - which is what setting this between binds models.
+    /// </summary>
+    public CoreAudioStreamFormat TapFormat { get; set; } = Formats.Float32Stereo48k;
+
     /// <summary>Deliver one buffer to the device's running IOProc, the stand-in for CoreAudio
     /// calling it. Refuses when nothing is running: a real IOProc's callback cannot fire
     /// before <see cref="StartIo"/> or after <see cref="StopIo"/>, so a test that pushes into
@@ -143,8 +203,15 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         handle.Callback(pcm);
     }
 
-    public IReadOnlyList<CoreAudioDevice> ListDevices() =>
-        ListDevicesError is not null ? throw ListDevicesError : _devices.ToList();
+    /// <summary>Runs at the top of <see cref="ListDevices"/>. The rebind calls it while holding
+    /// the capture's binding lock, so it is where a test can act with that lock held.</summary>
+    public Action? BeforeListDevices { get; set; }
+
+    public IReadOnlyList<CoreAudioDevice> ListDevices()
+    {
+        BeforeListDevices?.Invoke();
+        return ListDevicesError is not null ? throw ListDevicesError : _devices.ToList();
+    }
 
     public CoreAudioStreamFormat ReadStreamFormat(uint deviceId)
     {
@@ -196,6 +263,12 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         Handle handle = Live(ioProc, nameof(StopIo));
         // Stopping a stopped IOProc is legal on real CoreAudio (it answers noErr), and the
         // seam documents Stop as safe to call when not started, so this does not refuse it.
+        //
+        // Cleared BEFORE the throw, so a scripted StopIoError still leaves DestroyIoProc able to
+        // succeed. Whether the real HAL agrees is UNKNOWN: a stop that fails because the endpoint
+        // is gone would likely refuse the destroy too, but nothing here can force a real stop to
+        // fail, so modelling that would be a guess dressed as a fixture. Left honest rather than
+        // plausible; the teardown-fault tests above it assert this fake's rule, not CoreAudio's.
         handle.Running = false;
         if (StopIoError is not null)
             throw StopIoError;
@@ -208,6 +281,54 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
             throw new InvalidOperationException(
                 "the IOProc is still running; CoreAudio refuses to destroy one that was not stopped first");
         handle.Destroyed = true;
+    }
+
+    public CoreAudioTapHandle CreateProcessTap()
+    {
+        if (CreateProcessTapError is not null)
+            throw CreateProcessTapError;
+
+        var tap = new Tap($"tap-uid-{_tapsCreated++}");
+        _taps.Add(tap);
+        return tap;
+    }
+
+    public CoreAudioStreamFormat ReadTapFormat(CoreAudioTapHandle tap)
+    {
+        LiveTap(tap, nameof(ReadTapFormat));
+        return ReadTapFormatError is null ? TapFormat : throw ReadTapFormatError;
+    }
+
+    public void DestroyProcessTap(CoreAudioTapHandle tap)
+    {
+        Tap live = LiveTap(tap, nameof(DestroyProcessTap));
+        // The ordering CoreAudio itself enforces, and the one a teardown is easiest to get
+        // backwards: an aggregate that still lists this tap refers to an object that is gone.
+        if (_aggregates.Any(a => !a.Destroyed && a.Tap == live))
+            throw new InvalidOperationException(
+                "the tap is still listed by a live aggregate device; destroy the aggregate first");
+        live.Destroyed = true;
+    }
+
+    public CoreAudioAggregateHandle CreateAggregateDevice(string outputDeviceUid, CoreAudioTapHandle tap)
+    {
+        ArgumentNullException.ThrowIfNull(outputDeviceUid);
+        Tap live = LiveTap(tap, nameof(CreateAggregateDevice));
+        if (CreateAggregateDeviceError is not null)
+            throw CreateAggregateDeviceError;
+
+        var aggregate = new AggregateDevice(_nextAggregateId++, outputDeviceUid, live);
+        _aggregates.Add(aggregate);
+        return aggregate;
+    }
+
+    public void DestroyAggregateDevice(CoreAudioAggregateHandle device)
+    {
+        AggregateDevice live = LiveAggregate(device, nameof(DestroyAggregateDevice));
+        if (_handles.Any(h => !h.Destroyed && h.DeviceId == live.DeviceId))
+            throw new InvalidOperationException(
+                "an IOProc is still registered on the aggregate; destroy it first");
+        live.Destroyed = true;
     }
 
     public void Dispose()
@@ -223,6 +344,13 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
     // Mute reads answered so far, which is what SeedMuteError counts against.
     private int _muteReads;
 
+    // Taps issued so far, so each gets a distinguishable UID the way CoreAudio's do.
+    private int _tapsCreated;
+
+    // Aggregate object ids, from well above any device id a test registers, so a test that
+    // confuses the two fails rather than silently addressing a real device.
+    private uint _nextAggregateId = 900;
+
     // The handle-validating half: a handle has to be one THIS fake issued and still live, or
     // the call is one hardware would have refused.
     private Handle Live(CoreAudioIoProcHandle ioProc, string call)
@@ -235,6 +363,43 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
         return handle;
     }
 
+    private Tap LiveTap(CoreAudioTapHandle tap, string call)
+    {
+        ArgumentNullException.ThrowIfNull(tap);
+        if (tap is not Tap live || !_taps.Contains(live))
+            throw new InvalidOperationException($"{call} was handed a tap handle this HAL never issued");
+        if (live.Destroyed)
+            throw new InvalidOperationException($"{call} was handed a tap handle that was already destroyed");
+        return live;
+    }
+
+    private AggregateDevice LiveAggregate(CoreAudioAggregateHandle device, string call)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        if (device is not AggregateDevice live || !_aggregates.Contains(live))
+            throw new InvalidOperationException(
+                $"{call} was handed an aggregate handle this HAL never issued");
+        if (live.Destroyed)
+            throw new InvalidOperationException(
+                $"{call} was handed an aggregate handle that was already destroyed");
+        return live;
+    }
+
+    private sealed class Tap(string uid) : CoreAudioTapHandle
+    {
+        public string Uid { get; } = uid;
+        public bool Destroyed { get; set; }
+    }
+
+    private sealed class AggregateDevice(uint deviceId, string outputDeviceUid, Tap tap)
+        : CoreAudioAggregateHandle
+    {
+        public override uint DeviceId { get; } = deviceId;
+        public string OutputDeviceUid { get; } = outputDeviceUid;
+        public Tap Tap { get; } = tap;
+        public bool Destroyed { get; set; }
+    }
+
     private sealed class Handle(uint deviceId, CoreAudioIoCallback callback) : CoreAudioIoProcHandle
     {
         public uint DeviceId { get; } = deviceId;
@@ -245,12 +410,28 @@ internal sealed class FakeCoreAudioHal : ICoreAudioHal
 
     private sealed class Registration(uint objectId, CoreAudioPropertyKind kind, Action handler) : IDisposable
     {
+        // What makes removal WAIT for a callback that is already running, which is the half of
+        // AudioObjectRemovePropertyListener's contract a caller can deadlock against.
+        private readonly Lock _inFlight = new();
+
         public uint ObjectId { get; } = objectId;
         public CoreAudioPropertyKind Kind { get; } = kind;
         public Action Handler { get; } = handler;
         public bool Live { get; private set; } = true;
 
-        public void Dispose() => Live = false;
+        public void Invoke()
+        {
+            lock (_inFlight)
+                Handler();
+        }
+
+        // Reentrant, so a handler disposing its own registration still returns. A DIFFERENT
+        // thread's removal blocks here until the callback it raced returns.
+        public void Dispose()
+        {
+            Live = false;
+            lock (_inFlight) { }
+        }
     }
 }
 

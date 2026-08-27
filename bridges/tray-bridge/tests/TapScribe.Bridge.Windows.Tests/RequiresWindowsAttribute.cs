@@ -1,0 +1,18 @@
+namespace TapScribe.Bridge.Windows.Tests;
+
+/// <summary>
+/// A <see cref="FactAttribute"/> for a test that calls into WASAPI for real, skipped at discovery
+/// anywhere else. The twin of the macOS project's <c>RequiresMacOSAttribute</c>: the TFM builds
+/// anywhere and would otherwise run these into a <c>DllNotFoundException</c> off Windows.
+/// </summary>
+internal sealed class RequiresWindowsAttribute : FactAttribute
+{
+    /// <summary>Skip at discovery unless the host is Windows.</summary>
+    /// <param name="capability">What the test needs Windows FOR, folded into the skip reason:
+    /// a skip list is only useful if it names the capability that went unexercised.</param>
+    public RequiresWindowsAttribute(string capability)
+    {
+        if (!OperatingSystem.IsWindows())
+            Skip = $"not running Windows, so this host cannot {capability}";
+    }
+}

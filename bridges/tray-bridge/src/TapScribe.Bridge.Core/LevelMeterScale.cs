@@ -22,4 +22,14 @@ public static class LevelMeterScale
         double clamped = Math.Clamp(rms, GateTuning.MinThreshold, GateTuning.MaxThreshold);
         return Math.Log(clamped / GateTuning.MinThreshold) / GateTuning.LogSpan;
     }
+
+    /// <summary>Whether a level at <paramref name="rms"/> is at or past
+    /// <paramref name="threshold"/>, which is what a meter's two-tone fill means: below, the
+    /// gate is shut and the level is heard but not recorded.</summary>
+    /// <remarks>Here rather than in each bar because both shells were deciding it separately,
+    /// and in different arithmetic: one compared raw RMS and the other compared the fractions
+    /// it had already computed for drawing. <see cref="Fraction"/> is monotonic so the two
+    /// agreed, which is precisely the sort of agreement that stops holding without anyone
+    /// noticing.</remarks>
+    public static bool IsOpen(double rms, double threshold) => rms >= threshold;
 }

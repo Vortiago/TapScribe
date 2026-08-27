@@ -15,7 +15,12 @@ public class BridgeSettingsStoreTests : IDisposable
     private readonly string _dir =
         Path.Join(Path.GetTempPath(), $"tapscribe-settings-{Guid.NewGuid():N}");
 
-    private BridgeSettingsStore Store(ITapTokenStore tokens) => new(tokens, _dir, "settings.json");
+    // A shell's own fallback slug, spelled as neither platform's, so a test asserting on the
+    // stamp cannot pass because it happened to match a default.
+    private const string Fallback = "test-tray";
+
+    private BridgeSettingsStore Store(ITapTokenStore tokens) =>
+        new(tokens, _dir, "settings.json", Fallback);
 
     [Fact]
     public void SaveThenLoad_RoundTripsEveryField()
@@ -160,10 +165,11 @@ public class BridgeSettingsStoreTests : IDisposable
     {
         // Nothing written yet: a first run must land on the environment-seeded defaults.
         BridgeSettings loaded = Store(new FakeTapTokenStore()).Load();
-        BridgeSettings expected = BridgeSettings.SeedFromEnvironment();
+        BridgeSettings expected = BridgeSettings.SeedFromEnvironment(Fallback);
 
         Assert.Equal(expected.Host, loaded.Host);
         Assert.Equal(expected.Port, loaded.Port);
+        Assert.Equal(Fallback, loaded.FallbackIdentity);
     }
 
     [Fact]
@@ -174,10 +180,139 @@ public class BridgeSettingsStoreTests : IDisposable
         File.WriteAllText(store.FilePath, "{ this is not valid json at all ");
 
         BridgeSettings loaded = store.Load(); // must not throw
-        BridgeSettings expected = BridgeSettings.SeedFromEnvironment();
+        BridgeSettings expected = BridgeSettings.SeedFromEnvironment(Fallback);
 
         Assert.Equal(expected.Host, loaded.Host);
         Assert.Equal(expected.Port, loaded.Port);
+    }
+
+    [Fact]
+    public void Load_StampsTheShellsFallbackIdentity_OnAFileThatCarriesNone()
+    {
+        // The settings file has no such key and never will: it is the shell's fact, not the
+        // operator's. Every blank Speaker ID resolves through it - the base identity a tap
+        // streams under, and the label the default microphone row is named with - so a file
+        // loaded without the stamp would run the meeting under whatever Core's own frozen
+        // default happens to be, which is the wrong platform's on every shell but one.
+        BridgeSettingsStore store = Store(new FakeTapTokenStore());
+        store.Save(new BridgeSettings { Host = "rec.example", Identity = "" });
+
+        BridgeSettings loaded = store.Load();
+
+        Assert.Equal(Fallback, loaded.FallbackIdentity);
+        Assert.Equal(Fallback, loaded.DefaultDevices()[0].Identity);
+    }
+
+    [Fact]
+    public void Save_AfterAReadThePlatformRefused_LeavesTheStoredSecretAlone()
+    {
+        // A Keychain that refuses reads as "", the same value as "the operator cleared the
+        // field", and Write("") is how a platform is told to DELETE an out-of-band secret. So
+        // saving ANYTHING after a refused read revoked a working token: an ad-hoc rebuild
+        // re-prompts for the login password, a dismissed prompt reads "", and the next slider
+        // nudge deleted the item. Loading "" and saving "" is not an instruction to delete.
+        var keychain = new RefusingKeychain { Secret = "tok-abc", Refuse = false };
+        Store(keychain).Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        // The next launch: same file, same Keychain, but this build's signature is one its ACL
+        // does not trust, and the operator dismissed the password prompt.
+        keychain.Refuse = true;
+        BridgeSettingsStore store = Store(keychain);
+        BridgeSettings loaded = store.Load();
+        Assert.Equal("", loaded.Token); // the refusal, as the operator's dialog sees it
+
+        store.Save(loaded);
+
+        Assert.Equal("tok-abc", keychain.Secret);
+    }
+
+    [Fact]
+    public void Save_AfterTheOperatorClearsARealToken_DeletesTheStoredSecret()
+    {
+        // The other half, so the rule above cannot be "never delete": a token that WAS read and
+        // is then blanked is the operator revoking it, and the item has to go.
+        var keychain = new RefusingKeychain { Refuse = false };
+        BridgeSettingsStore store = Store(keychain);
+        store.Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        BridgeSettings loaded = store.Load();
+        Assert.Equal("tok-abc", loaded.Token);
+
+        loaded.Token = "";
+        store.Save(loaded);
+
+        Assert.Null(keychain.Secret);
+    }
+
+    [Fact]
+    public void Save_AfterTheOperatorClearsATokenEnteredThisSession_DeletesTheStoredSecret()
+    {
+        // The case with no Load between the two Saves, which is every operator's: the shell loads
+        // once at launch and the dialog edits the settings in memory thereafter. A token entered
+        // and then blanked leaves the store's last-seen value empty on both sides of the guard, so
+        // the delete was skipped and the next launch read the revoked token back out.
+        var keychain = new RefusingKeychain { Refuse = false };
+        BridgeSettingsStore store = Store(keychain);
+        store.Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        store.Save(new BridgeSettings { Host = "rec.example", Token = "" });
+
+        Assert.Null(keychain.Secret);
+        Assert.Equal("", store.Load().Token);
+    }
+
+    [Fact]
+    public void Save_WhenTheAtRestTokenCouldNotBeRead_KeepsTheOpaqueValueTheFileHeld()
+    {
+        // The in-file half of the same skip: the settings object a dialog hands to Save is
+        // rebuilt from its draft and carries no ProtectedToken at all, so leaving the property
+        // alone rewrites the file WITHOUT the key. Skipping the Write then protects the secret
+        // store and destroys the reference to it in the same Save.
+        var blobs = new RefusingBlobStore();
+        Store(blobs).Save(new BridgeSettings { Host = "rec.example", Token = "tok-abc" });
+
+        blobs.Refuse = true;
+        BridgeSettingsStore relaunched = Store(blobs);
+        relaunched.Load(); // the refused read: the token comes back "" through no fault of the operator
+        relaunched.Save(new BridgeSettings { Host = "rec.other" });
+
+        blobs.Refuse = false;
+        Assert.Equal("tok-abc", Store(blobs).Load().Token);
+    }
+
+    /// <summary>A DPAPI-shaped store: the opaque value lives in the settings file, and reading
+    /// it back can refuse the way an unprotect against another profile does — "" rather than a
+    /// throw.</summary>
+    private sealed class RefusingBlobStore : ITapTokenStore
+    {
+        internal bool Refuse { get; set; }
+
+        public string? Write(string token) => string.IsNullOrEmpty(token) ? null : Blob + token;
+
+        public string Read(string? atRest) =>
+            Refuse || atRest is null || !atRest.StartsWith(Blob, StringComparison.Ordinal)
+                ? ""
+                : atRest[Blob.Length..];
+
+        private const string Blob = "blob:";
+    }
+
+    /// <summary>An out-of-band secret store that can refuse a read the way a locked Keychain
+    /// does: "" rather than a throw. <see cref="Secret"/> is the item itself, so a test can ask
+    /// whether a Save destroyed it.</summary>
+    private sealed class RefusingKeychain : ITapTokenStore
+    {
+        internal string? Secret { get; set; }
+
+        internal bool Refuse { get; set; } = true;
+
+        public string? Write(string token)
+        {
+            Secret = string.IsNullOrEmpty(token) ? null : token;
+            return null;
+        }
+
+        public string Read(string? atRest) => Refuse ? "" : Secret ?? "";
     }
 
     public void Dispose()

@@ -46,12 +46,12 @@ def client(recorder_under_test):
     app.dependency_overrides.clear()
 
 
-def test_api_bridges_returns_two_items_with_expected_shape(client):
+def test_api_bridges_returns_three_items_with_expected_shape(client):
     r = client.get("/api/bridges")
     assert r.status_code == 200
     body = r.json()
     assert isinstance(body, list)
-    assert len(body) == 2
+    assert len(body) == 3
     for row in body:
         assert set(row) == {"id", "filename", "download_url"}
         assert all(isinstance(row[k], str) and row[k] for k in row)
@@ -71,6 +71,12 @@ def test_api_bridges_download_urls_point_at_latest_release_assets(client):
     assert (
         by_id["windows-tray"]["download_url"]
         == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-win-x64.zip"
+    )
+
+    assert by_id["macos-tray"]["filename"] == "TapScribe.TrayBridge-osx-arm64.pkg"
+    assert (
+        by_id["macos-tray"]["download_url"]
+        == "https://github.com/Vortiago/TapScribe/releases/latest/download/TapScribe.TrayBridge-osx-arm64.pkg"
     )
 
 
@@ -111,3 +117,19 @@ def test_every_catalog_filename_is_an_asset_release_yml_uploads():
     assert BRIDGE_ARTIFACTS, "the catalog must not be empty or this test proves nothing"
     missing = [a.filename for a in BRIDGE_ARTIFACTS if a.filename not in text]
     assert not missing, f"catalog filenames not produced by release.yml: {missing}"
+
+
+def test_every_catalog_id_has_a_download_anchor_in_the_settings_card():
+    """The other half of that contract, on the dashboard's side. The "Get a
+    bridge" card maps catalog ids to its own `data-slot` anchors, and its loop
+    skips an id the map does not name: a catalog row with no anchor renders a
+    link that never gets an href, which reads as "download unavailable" rather
+    than as a wiring mistake. Read as TEXT for the same reason as above."""
+    settings_js = (
+        Path(__file__).resolve().parents[1] / "tapscribe" / "web" / "js" / "next" / "views" / "settings.js"
+    )
+    assert settings_js.is_file(), f"settings view missing at {settings_js}"
+    text = settings_js.read_text(encoding="utf-8")
+    anchors = text[text.index("const bridgeAnchors = {") : text.index("getBridgeCatalog()")]
+    missing = [a.id for a in BRIDGE_ARTIFACTS if f'"{a.id}"' not in anchors and f"{a.id}:" not in anchors]
+    assert not missing, f"catalog ids with no anchor in the Get-a-bridge card: {missing}"

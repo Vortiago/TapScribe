@@ -48,6 +48,11 @@ public sealed class SettingsDraft
     // (so a migrated pinned gate is recovered rather than reset — ADR-0007).
     private string _baseIdentity = "";
     private string _baseName = "";
+
+    // The shell's fallback slug, carried across a Save. Neither editable nor shown: it is a
+    // property of the platform, and dropping it here would hand the runtime settings whose
+    // blank Speaker ID resolves to another OS's frozen name.
+    private string _fallbackIdentity = "";
     private IReadOnlyList<DeviceSelection> _savedDevices = [];
     private IReadOnlyList<DeviceSelection> _effectiveDevices = [];
     private IReadOnlyList<DeviceSelection> _absentPinned = [];
@@ -71,6 +76,7 @@ public sealed class SettingsDraft
             ProcessOnEnd = current.ProcessOnEnd,
             _baseIdentity = current.Identity,
             _baseName = current.Name,
+            _fallbackIdentity = current.FallbackIdentity,
             _savedDevices = current.Devices,
             _effectiveDevices = current.EffectiveDevices,
         };
@@ -187,9 +193,16 @@ public sealed class SettingsDraft
             Host = Host.Trim(),
             Port = Port,
             Tls = Tls,
-            AllowSelfSignedCert = AllowSelfSignedCert,
+            // Scoped to TLS here, where it is DECIDED, rather than in each shell's dialog.
+            // InsecureTls states the rule as a property of the settings ("gate every use on
+            // Tls && AllowSelfSignedCert") and four consumers re-check it downstream, but a
+            // dialog that persisted the pair unscoped would arm an accept-any validator that
+            // the next TLS tick turns on with no second consent, and every shell would have to
+            // remember not to. That is the wrong way for the one security knob here to fail.
+            AllowSelfSignedCert = Tls && AllowSelfSignedCert,
             Identity = _baseIdentity,
             Name = _baseName,
+            FallbackIdentity = _fallbackIdentity,
             Token = Token.Trim(),
             ProcessOnEnd = ProcessOnEnd,
             Devices = selections,

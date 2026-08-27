@@ -28,6 +28,11 @@ public sealed record ConnectionTestResult(
     }
 }
 
+/// <summary>What a Settings dialog puts on its status line after a "Test connection".</summary>
+/// <param name="Text">Shown verbatim.</param>
+/// <param name="Ok">Whether to render it as success.</param>
+public readonly record struct ConnectionTestOutcome(string Text, bool Ok);
+
 /// <summary>
 /// Probes a Recorder the way the SpatialChat bridge's popup does: a GET /health
 /// reachability check (catches a bad host / DNS / port / TLS), then — only if
@@ -37,6 +42,28 @@ public sealed record ConnectionTestResult(
 /// </summary>
 public static class ConnectionTester
 {
+    /// <summary>Run the probe under the shared timeout and describe every outcome, a throw
+    /// included. Both dialogs run this fire-and-forget from a click, where an escaping exception
+    /// is swallowed by the scheduler and strands the status line on "Testing...".</summary>
+    public static async Task<ConnectionTestOutcome> DescribeAsync(
+        TapConnectionOptions options, HttpClient? http = null)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(SettingsBounds.ConnectionTestTimeout);
+            ConnectionTestResult result = await TestAsync(options, http, timeout.Token)
+                .ConfigureAwait(false);
+            return new ConnectionTestOutcome(result.Describe(), result.Ok);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Deliberately the widest filter, like BridgeSettingsStore's token read. TestAsync
+            // answers a bad host, a refused token and a timeout as RESULTS, so what is left is a
+            // malformed entry throwing below it. What is lost is the stack.
+            return new ConnectionTestOutcome($"Test failed: {ex.Message}", Ok: false);
+        }
+    }
+
     public static async Task<ConnectionTestResult> TestAsync(
         TapConnectionOptions options, HttpClient? http = null, CancellationToken cancellationToken = default)
     {

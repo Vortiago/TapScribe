@@ -30,9 +30,17 @@ public static class TrayStores
     /// </summary>
     public const string SettingsFileName = "windows-tray-bridge.json";
 
+    /// <summary>
+    /// The identity a tap streams under when neither the operator nor Windows offers one.
+    /// Core's own frozen slug, named here rather than left implicit because it is now a
+    /// per-platform decision: every shell states its own, and this one's answer is "the value
+    /// that has always shipped". Changing it re-attributes every recording made under it.
+    /// </summary>
+    public const string FallbackIdentity = TapConnectionOptions.TrayIdentity;
+
     /// <summary>Connection settings + device selection, token protected by DPAPI.</summary>
     public static BridgeSettingsStore Settings { get; } =
-        new(new DpapiTapTokenStore(), BridgeAppData.Directory, SettingsFileName);
+        new(new DpapiTapTokenStore(), BridgeAppData.Directory, SettingsFileName, FallbackIdentity);
 
     /// <summary>The active meeting, for restart-resume (#107).</summary>
     public static MeetingStateStore MeetingState { get; } = new(BridgeAppData.Directory);

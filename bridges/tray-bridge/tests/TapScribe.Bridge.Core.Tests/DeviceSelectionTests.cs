@@ -120,6 +120,44 @@ public class DeviceSelectionTests
     }
 
     [Fact]
+    public void Resolve_AFollowDefaultAndAPinOnTheSameEndpoint_VerdictIsDuplicateDevice()
+    {
+        // Distinct identities, so the duplicate-identity check passes, and both resolve to ONE
+        // endpoint: the meeting would open it twice and file one source as two speakers, which
+        // doubles the far side in the transcript and the summary. macOS makes this the common
+        // case rather than the unlucky one - every output collapses to a single synthetic row
+        // there, so the pin and the follow-default name the same thing whatever is default.
+        IReadOnlyList<CaptureDevice> available = [Speakers("system-audio", isDefault: true)];
+
+        ResolveResult result = DeviceSelection.Resolve(
+            [
+                new DeviceSelection.FollowDefault(DeviceFlow.Render, "them", "Them"),
+                new DeviceSelection.Pinned("system-audio", "room", "Room"),
+            ],
+            available, Base);
+
+        Assert.Equal(SelectionVerdict.DuplicateDevice, result.Verdict);
+    }
+
+    [Fact]
+    public void Resolve_APinOnADeviceThatIsNotTheDefault_StillStarts()
+    {
+        // The other half: two selections on two endpoints is the ordinary two-speaker meeting,
+        // and the duplicate-device check must not refuse it just because one is a pin.
+        IReadOnlyList<CaptureDevice> available = [Mic("builtin", isDefault: true), Mic("usb")];
+
+        ResolveResult result = DeviceSelection.Resolve(
+            [
+                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic"),
+                new DeviceSelection.Pinned("usb", "usb", "USB"),
+            ],
+            available, Base);
+
+        Assert.Equal(SelectionVerdict.Ok, result.Verdict);
+        Assert.Equal(2, result.Resolved.Count);
+    }
+
+    [Fact]
     public void Resolve_BlankIdentityCollidingWithTheBaseIdentity_VerdictIsDuplicateIdentity()
     {
         // A blank Speaker ID streams under the BASE identity (ToTapOptions substitutes it),

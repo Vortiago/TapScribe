@@ -13,7 +13,9 @@ namespace TapScribe.Bridge.Windows.Tests;
 /// </summary>
 public class DpapiTapTokenStoreTests
 {
-    [Fact]
+    // The only one of the three that reaches DPAPI: the other two answer before it, so they
+    // stay portable and keep covering the degradation path everywhere.
+    [RequiresWindows("protect and unprotect a token through DPAPI")]
     public void WriteThenRead_RoundTripsTheToken_ThroughAnOpaqueBase64Blob()
     {
         const string secret = "round-trip-token-xyz";

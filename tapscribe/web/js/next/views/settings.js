@@ -141,7 +141,7 @@ export function build(ctx) {
   });
 
   // ---- Get-a-bridge card ------------------------------------------------------
-  // static-render: built ONCE here, never touched by `update`. The two download
+  // static-render: built ONCE here, never touched by `update`. The download
   // anchors point at GitHub-Release assets (releases/latest/download/<asset>),
   // so they are plain cross-origin hrefs — NOT same-origin triggerDownload
   // targets. The hrefs are filled from the memoized bridge catalog
@@ -151,9 +151,14 @@ export function build(ctx) {
   // first tagged release, so the hint always names that caveat.
   const bridgeDlSpatial = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlSpatial"));
   const bridgeDlTray = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlTray"));
+  const bridgeDlMac = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlMac"));
   const bridgeDlHint = pick(frag, "bridgeDlHint");
   /** @type {Record<string, HTMLAnchorElement>} */
-  const bridgeAnchors = { spacialchat: bridgeDlSpatial, "windows-tray": bridgeDlTray };
+  const bridgeAnchors = {
+    spacialchat: bridgeDlSpatial,
+    "windows-tray": bridgeDlTray,
+    "macos-tray": bridgeDlMac,
+  };
   getBridgeCatalog()
     .then((bridges) => {
       for (const b of bridges || []) {

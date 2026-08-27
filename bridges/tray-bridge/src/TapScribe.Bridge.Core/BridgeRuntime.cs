@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace TapScribe.Bridge.Core;
@@ -87,6 +88,9 @@ public sealed class BridgeRuntime
         // Disable Start now so a second click can't race a second meeting; the rest is async
         // and reports back through the dispatcher.
         ShowBusy();
+        // Everything a notice could be about belongs to the meeting that is over. A shell whose
+        // notice is a line rather than a balloon would otherwise carry it into this one.
+        _view.ClearNotice();
         ApplyStatus(new TrayStatus.Starting());
 
         // Publish the task rather than firing and forgetting: teardown waits on it, so a
@@ -308,8 +312,7 @@ public sealed class BridgeRuntime
             GateOptions gate = resolved.Gate.ToGateOptions();
             into.Add(new PipelineSpec(enumerator.Open(resolved.Device), options, gate));
         }
-        catch (Exception ex) when (
-            ex is ExternalException or NotSupportedException or ArgumentException or InvalidOperationException)
+        catch (Exception ex) when (CaptureSeam.IsDeclaredOpenFailure(ex))
         {
             _dispatcher.Post(() =>
                 _view.ShowNotice($"Could not open {resolved.Device.Name}", ex.Message, NoticeKind.Warning));
@@ -335,6 +338,9 @@ public sealed class BridgeRuntime
             "None of your selected devices are available. Check the Devices tab in Settings.",
         SelectionVerdict.DuplicateIdentity =>
             "Two devices share an identity. Give each a distinct identity in Settings.",
+        SelectionVerdict.DuplicateDevice =>
+            "Two of your selections are the same device, which would record it twice. "
+            + "Untick one of them, or unpin it, in the Devices tab in Settings.",
         _ => "Cannot start with the current device selection.",
     };
 
@@ -425,12 +431,20 @@ public sealed class BridgeRuntime
         {
             _deps.SettingsStore.Save(updated);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
+            when (ex is IOException or UnauthorizedAccessException or CryptographicException)
         {
-            // The settings directory could not be written (permissions, full disk, a file
-            // standing where the directory should be). Keep the new settings for this session
-            // and tell the operator they will not persist: throwing their edit away because
-            // the disk is unavailable would be the worse failure.
+            // The settings could not be persisted: the directory would not take them
+            // (permissions, full disk, a file standing where the directory should be), or DPAPI
+            // refused to protect the tap token. Keep the new settings for this session and tell
+            // the operator they will not persist: throwing their edit away because the disk or
+            // the keychain is unavailable would be the worse failure.
+            //
+            // These three and no more, because this message tells an operator to go and look at
+            // their disk. Anything else is this program being wrong, and CaptureSeam names the
+            // rule: a catch-all also swallows what no disk can produce, hiding a bug behind an
+            // operator-facing message. What catches those is the shell's menu-action boundary,
+            // where a throw would otherwise reach AppKit.
             _view.ShowNotice("Settings not saved", ex.Message, NoticeKind.Warning);
         }
 
@@ -730,12 +744,14 @@ public sealed class BridgeRuntime
         // view for as long as the process lingered.
         CancellationTokenSource? flow;
         Task? start;
+        Task? end;
         lock (_gate)
         {
             flow = _flowCancellation;
             _flowCancellation = null;
             _quitting = true; // a start in flight must tear itself down, not publish
             start = _startTask;
+            end = _endTask;
         }
         flow?.Cancel();
 
@@ -780,6 +796,18 @@ public sealed class BridgeRuntime
                     meeting.Orchestrator.DisposeAsync().AsTask(),
                     Task.Delay(_budgets.QuitTeardownCap))
                 .ConfigureAwait(false);
+
+        // An End already in flight took the meeting before this method could, so TakeMeeting
+        // above saw nothing and there was nothing here to tear down, but its drain is still
+        // running, and Shutdown below ends the shell's loop and, on both platforms, the
+        // process. Cut short there, the taps never flush and the Recorder strips and
+        // transcribes truncated WAVs: exactly what EndMeetingAsync's barrier exists to
+        // prevent. The drain does not take the flow's token, so the Cancel above only
+        // shortened the poll behind it. Raced against the same cap for the same reason as the
+        // teardown above: overrunning it is an outcome, not an error, and a tray that refuses
+        // to exit is worse than a dropped tail.
+        if (end is { IsCompleted: false })
+            await Task.WhenAny(end, Task.Delay(_budgets.QuitTeardownCap)).ConfigureAwait(false);
 
         // Marshalled like every other view touch. Both awaits above are ConfigureAwait(false),
         // so by here we are on a thread-pool thread: calling straight through would break the

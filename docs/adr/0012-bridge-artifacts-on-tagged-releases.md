@@ -6,12 +6,14 @@ date: 2026-07-15
 # Bridge artifacts are built by CI and attached to tag-driven GitHub Releases
 
 Pushing a `vX.Y.Z` tag fires `.github/workflows/release.yml`, which builds the
-wheel + sdist, the SpatialChat extension zip, the Windows tray exe zip, and a
-GHCR image, then attaches the release assets under **stable, unversioned
-filenames**:
+wheel + sdist, the SpatialChat extension zip, the Windows tray zip, the macOS
+tray package and bundle, and a GHCR image, then attaches the release assets
+under **stable, unversioned filenames**:
 
 - `tapscribe-spacialchat-bridge.zip`
 - `TapScribe.TrayBridge-win-x64.zip`
+- `TapScribe.TrayBridge-osx-arm64.pkg`
+- `TapScribe.TrayBridge-osx-arm64.zip`
 
 The dashboard's Settings "Get a bridge" card links to
 `https://github.com/{GITHUB_REPO}/releases/latest/download/<asset>`.
@@ -57,5 +59,18 @@ download the browser can fetch directly.
   links.
 - Cutting a release is a documented ritual (see `RELEASING.md`), never
   automatic.
-- The tray exe is unsigned; the card documents the SmartScreen warning. Code
-  signing / installer / auto-update stay out of scope.
+- Neither tray build is signed, and each OS objects in its own way, so the card
+  documents both. Windows shows SmartScreen, a click-through. macOS is why the
+  Mac artifact the card offers is a `.pkg` while Windows ships a zip: the bundle
+  carries only an ad-hoc signature, Gatekeeper reads a signature it cannot
+  validate as tampering, and a quarantined copy is therefore reported as DAMAGED
+  with Move to Trash as the only offer. Right-click -> Open does not bypass that
+  (it bypasses the milder unidentified-developer prompt, which needs a real
+  signature), leaving `xattr` as the only route out of a zip. An unsigned PACKAGE
+  gets the milder treatment, and `installer` writes payload outside the path that
+  applies quarantine, so the installed app opens straight away. Apple documents
+  none of that, so `ci.yml` asserts it on a real runner. The zip stays published
+  for anyone who wants the bundle without an installer, and it still needs the
+  command. Notarisation would remove the one remaining block and needs a paid
+  Apple Developer account; that, code signing and auto-update stay out of scope
+  for v1.

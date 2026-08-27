@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
@@ -263,7 +261,7 @@ public sealed class TapSession : IAsyncDisposable
             {
                 _capture.Stop();
             }
-            catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
+            catch (Exception ex) when (CaptureSeam.IsDeclaredCaptureFailure(ex))
             {
                 // The endpoint was invalidated while the meeting ran (unplugged / disabled /
                 // default-device switch): stopping a WASAPI client for a device that is gone
