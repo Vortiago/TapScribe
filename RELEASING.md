@@ -1,30 +1,24 @@
 # Releasing TapScribe
 
-A release is a deliberate, human-pushed `vX.Y.Z` tag — never automatic
+A release is a deliberate, human-pushed `vX.Y.Z` tag, never automatic
 ([ADR-0012](docs/adr/0012-bridge-artifacts-on-tagged-releases.md)). The tag
 fires `.github/workflows/release.yml`, which builds and publishes everything.
 
-## Cut a release
+## Cutting one
 
-1. **Bump the version** on a clean tree:
+The steps live in **[`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md)**,
+which is one owner for the ritual rather than a checklist that drifts from
+practice. In Claude Code it is `/release`; read it directly otherwise. The short
+form:
 
-   ```bash
-   python tools/bump_version.py X.Y.Z
-   ```
+1. `python tools/bump_version.py X.Y.Z`, as its own PR titled
+   `chore(release): vX.Y.Z`.
+2. Merge it.
+3. Annotated tag on the merged commit, message carrying the release notes.
+4. `git push origin vX.Y.Z`.
 
-   Stamps `pyproject.toml`, `tapscribe/__init__.py`, and
-   `bridges/spacialchat-bridge/manifest.json` in lock-step
-   (`tests/test_version_consistency.py` guards drift).
-
-2. **Open a PR with the bump and merge it.** Conventional-Commit title, e.g.
-   `build(release): vX.Y.Z`.
-
-3. **Tag the merged commit and push the tag:**
-
-   ```bash
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   ```
+Tagging before the bump lands ships a release stamped with the previous
+version, which is the one mistake the skill exists to prevent.
 
 ## What the release produces
 
