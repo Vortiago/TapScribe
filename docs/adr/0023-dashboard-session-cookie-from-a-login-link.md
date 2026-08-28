@@ -17,11 +17,14 @@ The cookie comes from a [login link](../../CONTEXT.md#login-link):
    password, so only a caller that could already reach the dashboard can mint —
    the [host role](../../CONTEXT.md#host-role) reads `.auth-password` off disk
    (the read the Bundle's tray does today for Copy password).
-2. Returns a token with a mint-site TTL: **60 s** for a tray click (the browser
-   opens immediately), **one hour** for the URL `start.sh` / `start.ps1` print
-   at boot, which an operator reaches only after preflight and a model load.
-   One knob, two values, because a single TTL is either too short for the
-   banner or too long for the click.
+2. Returns a single-use token valid 60 s. Single-use is the primary bound; the
+   TTL covers the case single-use does not — a token that is never SPENT (no
+   default browser, a launch that failed, a cancelled click) would otherwise be
+   a live credential with no expiry. It also travels through channels the
+   password does not: the address bar, and the OS's open-URL handoff, both of
+   which can log it, where `.auth-password` sits in one file behind file
+   permissions. The tray opens the browser immediately, so mint-to-spend is
+   sub-second and 60 s costs nothing.
 3. `GET /login?k=<token>` spends it, sets the cookie, and 302s to `/` so the
    token leaves the address bar. Exact `(method, path)` in
    `AUTH_EXEMPT_ROUTES` — it authenticates by spending the token. A spent or
@@ -41,6 +44,10 @@ The cookie comes from a [login link](../../CONTEXT.md#login-link):
    would otherwise clobber each other's session. Validated against an in-memory
    set (constant-time compare, per `auth.py`'s convention), so a Recorder
    restart logs the browser out — one click to get back in.
+
+`start.sh` / `start.ps1` keep printing the generated password and nothing else:
+the tray is the only mint site, so there is one TTL and no link an operator can
+reach long after it was made.
 
 `basic_auth_middleware` omits `WWW-Authenticate` on a 401 when the request
 carried a session cookie. Otherwise a Recorder restart turns the dashboard's
