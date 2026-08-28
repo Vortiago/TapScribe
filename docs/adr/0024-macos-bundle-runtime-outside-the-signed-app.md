@@ -13,6 +13,28 @@ the interpreter and wheel to `~/Library/Application Support/TapScribe/runtime/`
 and every pip run — preflight's repairs, `/setup`'s model backends — targets the
 copy. The `.app` is never written to.
 
+The copy is **version-stamped and atomic**, which is three decisions, not one:
+
+- It lands in `runtime/<version>.partial/` and is renamed to `runtime/<version>/`
+  only once complete. A quit or crash partway through 300 MB otherwise leaves a
+  `runtime/` that exists but holds a broken interpreter, and a "copy on first
+  launch" check never fires again.
+- The stamp is the `.app`'s version, so **an upgrade re-copies**. Without it,
+  installing 1.4 over a runtime copied from 1.3 leaves the installer saying 1.4
+  while the Recorder serves 1.3 — precisely the drift ADR-0015's one-wheel rule
+  exists to prevent, and one `ResolveWheel` cannot catch, because the stale
+  runtime holds exactly one (wrong) wheel.
+- A re-copy starts from the shipped interpreter, so the model backends `/setup`
+  pip-installed into the old one are gone. The tray says so and offers to
+  re-run the install picker; the previous `runtime/<old>` is kept until the new
+  one is complete, then deleted.
+
+Repair-by-reinstall has to be spelled out for the same reason: `BundleLayout`'s
+error text tells operators to reinstall, and on macOS reinstalling replaces the
+pristine `.app`, not the broken copy. The tray therefore treats a failed
+integrity check on `runtime/<version>/` as "delete and re-copy", and reinstalling
+does fix it — via the next launch, not via the installer.
+
 Two facts force it. ADR-0015: `/setup` pip-installs into the embedded
 interpreter at runtime, which is why the Windows Bundle puts it under
 `%LOCALAPPDATA%\Programs\TapScribe` rather than `Program Files`. And on macOS

@@ -191,32 +191,27 @@ Recorder), "the Mac bridge" for the family.
 ## Bundle
 
 A self-contained, platform-native distribution of the Recorder: embedded
-CPython, the wheel, and the [Tray Bridge](#tray-bridge), installed per-user with
-no Python prerequisite. The tray it ships points `TAPSCRIBE_BASE_DIR` at the
-operator's data directory, boots the Recorder and supervises it — the
-[host role](#host-role); it is not the server, it starts one. ADR-0015;
-ADR-0022 (proposed) makes that tray the Tray Bridge, ADR-0024 (proposed) adds
-the macOS shape.
+CPython, the wheel, and a tray, installed per-user with no Python prerequisite.
+The tray points `TAPSCRIBE_BASE_DIR` at the operator's data directory, boots the
+Recorder and supervises it — the [host role](#host-role); it is not the server,
+it starts one. Windows only; ADR-0015. Today that tray is a dedicated executable
+(the Launcher); ADR-0022 (proposed) replaces it with the
+[Tray Bridge](#tray-bridge), and ADR-0024 (proposed) adds the macOS shape.
 
 A Bundle is **not a Bridge**: a Bridge taps audio *into* a Recorder, a Bundle
 *is* one, packaged. Shipping a Bridge inside one is composition, not identity —
 so a Bundle still never appears in the dashboard's "Get a bridge" card (you need
 a Bundle to have a dashboard).
 _Avoid_: "installer" (it names the act, leaving no word for the result), "the
-exe", "the Windows app", "Launcher" (retired — the tray is the executable, and
-`RecorderSupervisor` names the mechanism).
+exe", "the Windows app".
 
 ## Host role
 
-ADR-0022, proposed. The Tray Bridge's second role: boot, supervise and reap a **co-located**
-Recorder, and be the way in to it (the [login link](#login-link), the log,
-Start / Stop). Carried only when a host payload sits beside the tray on disk —
-a [Bundle](#bundle) install — so the role is a fact about the install rather
-than a setting.
-
-Ownership is recorded at spawn: the tray stops only a Recorder it started, so a
-server that was already running when the tray launched outlives its Quit.
-ADR-0022.
+ADR-0022, proposed. The Tray Bridge's second role: boot, supervise and reap a
+**co-located** Recorder, and be the way in to it (the
+[login link](#login-link), the log, Start / Stop). Carried only when a host
+payload sits beside the tray on disk — a [Bundle](#bundle) install — so the
+role is a fact about the install rather than a setting.
 
 ## HTTP auth gate · auth schemes
 
@@ -290,7 +285,7 @@ An **attached tap** is a tap routed to it — as opposed to the
 simply omitting `?session=`, so the mode is a Bridge-side choice the Recorder
 needs no opinion on. A Bridge is attached OR in a bracketed meeting, never both:
 one device is one speaker, and one identity feeding two sessions at once would
-split a speaker across them.
+split a speaker across them. ADR-0025, proposed.
 _Avoid_: "the live session" in code and docs — it is the operator-facing
 spelling only (the dashboard badge), and "live" elsewhere in the product means
 the [LiveChannel](#livechannel--whisperlivekitchannel--moonshinelivechannel),
