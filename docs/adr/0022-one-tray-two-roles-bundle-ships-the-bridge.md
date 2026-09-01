@@ -1,5 +1,5 @@
 ---
-status: proposed (amends ADR-0015, extends ADR-0012)
+status: accepted (amends ADR-0015, extends ADR-0012)
 date: 2026-08-28
 ---
 

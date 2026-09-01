@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-08-28
 ---
 
@@ -33,8 +33,12 @@ Shape, all Bridge-side:
   mint round-trips the Recorder — and an attached tap has no mint, so an
   unreachable Recorder or a rejected token would otherwise stay silent until the
   first person spoke.
-- **Disconnect drains and closes, and triggers nothing** — the existing
-  `triggerPipeline: false` path.
+- **Disconnect drains and closes, and triggers nothing** — the same effect as
+  `ProcessOnEnd: false`, but NOT that code path. `RunPipelineFlowAsync` builds a
+  `MeetingController`, which requires a session id and throws without one, and
+  every other thing End does — the trigger, the poll, the Past-meetings entry,
+  the restart-resume state — is keyed on one too. An attached tap has no session
+  id, so Disconnect is the simpler path: take, drain, say so, idle.
 
 ## Consequences
 

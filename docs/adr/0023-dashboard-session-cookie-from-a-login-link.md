@@ -1,5 +1,5 @@
 ---
-status: proposed (amends ADR-0008)
+status: accepted (amends ADR-0008)
 date: 2026-08-28
 ---
 

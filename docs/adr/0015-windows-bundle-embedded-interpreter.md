@@ -86,13 +86,18 @@ uninstalling the program cannot delete someone's meeting recordings.
   you need a Bundle to have a dashboard. It rides ADR-0012's release
   mechanism: CI-built, attached to the tagged release under the stable
   unversioned filename `TapScribe-Setup-win-x64.exe`.
-- **Two tray icons on a machine running both.** The tray Launcher and the
+- ~~**Two tray icons on a machine running both.** The tray Launcher and the
   tray Bridge stay separate, independently installable executables: a
   Recorder can run on another machine (hence `--lan`/`--tls`), and the
   SpatialChat extension is a Bridge with no tray app at all, so fusing them
   would be correct for one topology and wrong for two. If the same-laptop
   case comes to dominate, the additive fix is a "local Recorder" section in
-  the tray Bridge, not a merge.
+  the tray Bridge, not a merge.~~ **Reversed by ADR-0022.** The same-laptop
+  case did come to dominate, and the fix landed as that section: there is now
+  ONE tray per OS, which carries the host role when a host payload sits beside
+  it on disk. The topologies this paragraph protected are unaffected — a
+  bridge-only install has no payload and shows no such section, and the
+  SpatialChat extension still has no tray at all.
 - **Unsigned for now.** SmartScreen will warn. Signing is chicken-and-egg —
   SignPath Foundation's OSS programme requires a released artifact first —
   so the first Bundle ships unsigned and the application follows it.

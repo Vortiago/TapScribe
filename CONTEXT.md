@@ -184,7 +184,7 @@ clients) plus a thin per-OS **shell** contributing audio capture, device
 enumeration, storage and the tray UI. Unqualified, it means the family;
 qualify with the OS only when the shell matters. ADR-0020. There is ONE tray
 per OS: in a [Bundle](#bundle) install it also carries the
-[host role](#host-role) (ADR-0022, proposed).
+[host role](#host-role). ADR-0022.
 _Avoid_: "the tray app" (it is a Bridge — a [Bundle](#bundle) is what *is* a
 Recorder), "the Mac bridge" for the family.
 
@@ -194,9 +194,10 @@ A self-contained, platform-native distribution of the Recorder: embedded
 CPython, the wheel, and a tray, installed per-user with no Python prerequisite.
 The tray points `TAPSCRIBE_BASE_DIR` at the operator's data directory, boots the
 Recorder and supervises it — the [host role](#host-role); it is not the server,
-it starts one. Windows only; ADR-0015. Today that tray is a dedicated executable
-(the Launcher); ADR-0022 (proposed) replaces it with the
-[Tray Bridge](#tray-bridge), and ADR-0024 (proposed) adds the macOS shape.
+it starts one. That tray is the [Tray Bridge](#tray-bridge), which is the same
+executable the bridge-only artifact ships and carries the extra role because the
+payload is beside it. Windows only; ADR-0015, ADR-0022. ADR-0024 (proposed) adds
+the macOS shape.
 
 A Bundle is **not a Bridge**: a Bridge taps audio *into* a Recorder, a Bundle
 *is* one, packaged. Shipping a Bridge inside one is composition, not identity —
@@ -207,11 +208,11 @@ exe", "the Windows app".
 
 ## Host role
 
-ADR-0022, proposed. The Tray Bridge's second role: boot, supervise and reap a
+The Tray Bridge's second role: boot, supervise and reap a
 **co-located** Recorder, and be the way in to it (the
 [login link](#login-link), the log, Start / Stop). Carried only when a host
 payload sits beside the tray on disk — a [Bundle](#bundle) install — so the
-role is a fact about the install rather than a setting.
+role is a fact about the install rather than a setting. ADR-0022.
 
 ## HTTP auth gate · auth schemes
 
@@ -225,8 +226,7 @@ construction. ADR-0008.
 The Basic scheme accepts two **credential forms** for the same secret: the
 `Authorization: Basic` header, and a **dashboard session cookie** obtained by
 spending a [login link](#login-link). Two forms, still one scheme — a route is
-never gated differently depending on which the caller used. ADR-0023
-(proposed).
+never gated differently depending on which the caller used. ADR-0023.
 
 The `/tap` **WebSocket** is a fourth, separate path — middlewares don't see WS
 upgrades, so it carries the token in `Sec-WebSocket-Protocol`.
@@ -241,7 +241,7 @@ one click instead of a password prompt. Minted only by a caller that can
 already authenticate (the tray reads `.auth-password` off disk), spent once,
 and never a second secret at rest.
 _Avoid_: calling it a token or an API key — it authenticates a browser once,
-and buys nothing a caller could not already do. ADR-0023, proposed.
+and buys nothing a caller could not already do. ADR-0023.
 
 ## Bracketed meeting
 
@@ -285,7 +285,7 @@ An **attached tap** is a tap routed to it — as opposed to the
 simply omitting `?session=`, so the mode is a Bridge-side choice the Recorder
 needs no opinion on. A Bridge is attached OR in a bracketed meeting, never both:
 one device is one speaker, and one identity feeding two sessions at once would
-split a speaker across them. ADR-0025, proposed.
+split a speaker across them. ADR-0025.
 _Avoid_: "the live session" in code and docs — it is the operator-facing
 spelling only (the dashboard badge), and "live" elsewhere in the product means
 the [LiveChannel](#livechannel--whisperlivekitchannel--moonshinelivechannel),
