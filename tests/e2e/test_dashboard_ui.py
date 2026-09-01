@@ -8003,3 +8003,71 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             await _shot(page, "voices-05-people.png")
         finally:
             await browser.close()
+
+
+async def test_login_link_signs_the_browser_in_without_an_auth_dialog(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """ADR-0023, in a real browser and against a LIVE auth gate.
+
+    The claim is about what the browser is never asked for: the operator clicks
+    Open dashboard in the tray, lands signed in, and the native Basic dialog —
+    which no page can dismiss and no test can click — never appears. The context
+    carries no `http_credentials` on purpose: with them this would pass whether
+    or not the cookie worked.
+    """
+    base = running_recorder_auth_on.base_url
+    password = running_recorder_auth_on.recorder.auth.value
+
+    # What the tray does: read .auth-password off disk, ask for a link.
+    async with httpx.AsyncClient() as client:
+        # Unauthenticated, the dashboard is shut.
+        assert (await client.get(base + "/")).status_code == 401
+        minted = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert minted.status_code == 200, minted.text
+        link = minted.json()["path"]
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # Any 401 reaching the page would mean the cookie was not accepted —
+            # and in a real browser it is what pops the dialog.
+            unauthorized: list[str] = []
+            page.on(
+                "response",
+                lambda r: unauthorized.append(f"{r.status} {r.url}") if r.status == 401 else None,
+            )
+
+            await page.goto(base + link, wait_until="domcontentloaded")
+
+            # The 303 landed on the dashboard itself, and the token is gone from
+            # the address bar (and so from history and the next Referer).
+            assert page.url.rstrip("/") == base.rstrip("/"), page.url
+            assert "k=" not in page.url
+
+            # It is the real dashboard, and the cookie authenticates every
+            # subsequent request rather than just the landing: the poll's own
+            # endpoint keeps answering 200.
+            await page.wait_for_selector("#tapsRailBody", timeout=10000)
+            state = await page.evaluate(
+                "async (u) => (await fetch(u, {credentials: 'include'})).status",
+                base + "/api/state",
+            )
+            assert state == 200, state
+            assert unauthorized == [], unauthorized
+
+            # Re-opening the same link straight away lands on the dashboard
+            # again rather than on a dead-link page: the grace window, which is
+            # what makes the tray's own launch survive a link scanner, a URL
+            # preview or a double-click spending the token first. (That the link
+            # DOES die afterwards is the store's own cover, where the clock is
+            # injected and nothing has to wait ten seconds.)
+            again = await context.new_page()
+            await again.goto(base + link, wait_until="domcontentloaded")
+            assert again.url.rstrip("/") == base.rstrip("/"), again.url
+            assert unauthorized == [], unauthorized
+        finally:
+            await browser.close()
