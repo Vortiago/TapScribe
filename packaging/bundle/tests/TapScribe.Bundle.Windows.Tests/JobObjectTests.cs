@@ -50,8 +50,38 @@ public class JobObjectTests
         JobObject? job = JobObject.TryCreate(_ => { });
         Assert.NotNull(job);
 
-        using Process self = Process.GetCurrentProcess();
+        using var self = new CurrentProcess();
 
         Assert.False(job!.Adopt(self));
+    }
+
+    /// <summary>This process, as the reaper's seam sees one. Already a job member by
+    /// TryCreate, which is the cheapest way to get a refusal without spawning
+    /// anything.</summary>
+    private sealed class CurrentProcess : IChildProcess
+    {
+        private readonly Process _process = Process.GetCurrentProcess();
+
+        public bool HasExited => false;
+
+        public int ExitCode => 0;
+
+        public int Id => _process.Id;
+
+        public IntPtr NativeHandle => _process.Handle;
+
+        public event EventHandler? Exited
+        {
+            add { }
+            remove { }
+        }
+
+        public void Kill() => throw new NotSupportedException("not killing the test run");
+
+        public bool WaitForExit(int milliseconds) => false;
+
+        public void WaitForExit() => throw new NotSupportedException("not waiting on the test run");
+
+        public void Dispose() => _process.Dispose();
     }
 }

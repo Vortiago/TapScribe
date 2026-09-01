@@ -1,7 +1,8 @@
 ; TapScribe Windows Bundle — Inno Setup script (ADR-0015).
 ;
 ; A Bundle is the Recorder packaged: an embedded CPython, the tapscribe wheel,
-; and the tray Launcher. It is NOT a frozen binary — /setup pip-installs the
+; and the Tray Bridge, which carries the host role because that payload is beside
+; it on disk (ADR-0022). It is NOT a frozen binary — /setup pip-installs the
 ; operator's chosen model backends into this interpreter at runtime, so the
 ; layout has to stay a real, writable Python installation. (No venv: the
 ; embedded CPython IS the environment, and `sys.prefix\Scripts` is where pip
@@ -11,7 +12,7 @@
 ; Built by the `bundle` job in .github/workflows/release.yml, which stages:
 ;   staging/python/    the embedded interpreter, core deps already installed
 ;   staging/wheel/     the tapscribe-X.Y.Z-*.whl this Bundle installs from
-;   staging/launcher/  the published TapScribe.Bundle.Launcher exe
+;   staging/tray/      the published tray exe, taken from the bridge-only artifact
 ;
 ; Pass the version in:  ISCC /DMyAppVersion=1.1.0 packaging\windows\TapScribe.iss
 
@@ -44,10 +45,17 @@ LicenseFile=..\..\LICENSE
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
-; Same name the Launcher's single-instance guard uses (Program.cs). Without it
-; Setup happily overwrites files while the tray app is running them, which on
-; Windows means a locked TapScribe.exe and a half-applied upgrade.
-AppMutex=Local\TapScribe.Bundle.Launcher
+; The same names the tray's single-instance guard uses
+; (TapScribe.TrayBridge.Windows/Program.cs). Without it Setup happily overwrites
+; files while the tray app is running them, which on Windows means a locked
+; TapScribe.exe and a half-applied upgrade.
+;
+; BOTH names, for at least one release. The Bundle's tray used to be a separate
+; Launcher holding Local\TapScribe.Bundle.Launcher (ADR-0015); listing only the
+; new name would leave an installer upgrading over a RUNNING old Launcher unable
+; to see it, and it would hit files-in-use instead of asking it to quit. Drop the
+; old name once no supported upgrade path starts from a Launcher install.
+AppMutex=Local\TapScribe.TrayBridge,Local\TapScribe.Bundle.Launcher
 
 ; The staged payload is embedded CPython + TapScribe's CORE deps only (fastapi,
 ; uvicorn, numpy, websockets, cryptography, onnxruntime) — order of ~150 MB, not
@@ -81,7 +89,7 @@ Name: "startup"; Description: "Start {#MyAppName} when I sign in"; GroupDescript
 ; installing 1.2.0 over 1.1.0 would ADD a second .whl rather than replace it —
 ; and BundleLayout.ResolveWheel() deliberately refuses to guess between two,
 ; throwing BundleLayoutException. Without this line the first upgrade after a
-; release bricks the Launcher for every operator at once, with the only recourse
+; release bricks the tray for every operator at once, with the only recourse
 ; being to delete a file out of %LOCALAPPDATA% by hand.
 ;
 ; Scoped to the wheel folder ONLY. Emphatically NOT {app}\python: /setup
@@ -97,7 +105,7 @@ Source: "..\..\staging\python\*"; DestDir: "{app}\python"; Flags: ignoreversion 
 ; installed) so a repair or an extras install can point pip back at the exact
 ; artifact this installer shipped.
 Source: "..\..\staging\wheel\*.whl"; DestDir: "{app}\wheel"; Flags: ignoreversion
-Source: "..\..\staging\launcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\staging\tray\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

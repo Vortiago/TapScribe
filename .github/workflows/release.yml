@@ -268,9 +268,14 @@ jobs:
   bundle:
     name: build windows bundle
     # Must be windows-latest: it lays down a Windows embedded CPython, pip-installs
-    # into it (torch ships OS-specific wheels), publishes a WinForms Launcher, and
-    # runs Inno Setup — none of which cross-compile.
-    needs: build
+    # into it (torch ships OS-specific wheels) and runs Inno Setup — none of which
+    # cross-compile.
+    #
+    # Needs `tray` as well as `build`, because the Bundle ships the SAME tray the
+    # bridge-only zip does (ADR-0022) and REUSES that artifact rather than publishing
+    # it a second time: one tray per OS is the whole decision, and building it twice
+    # is exactly where the two copies would drift.
+    needs: [build, tray]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -333,16 +338,21 @@ jobs:
           New-Item -ItemType Directory -Force -Path staging/wheel | Out-Null
           Copy-Item $wheel staging/wheel/
 
-      - name: Publish the Launcher
+      # The tray, taken from the bridge-only job rather than rebuilt. Its host role
+      # switches on the payload staged above being on disk beside it (ADR-0022), so
+      # the same executable is a bridge-only tray in the zip and a Bundle's tray here.
+      - name: Stage the tray
+        uses: actions/download-artifact@v7
+        with:
+          name: bridge-tray
+          path: bridge-tray
+
+      - name: Unpack the tray
         shell: pwsh
-        run: >
-          dotnet publish packaging/bundle/src/TapScribe.Bundle.Launcher
-          -c Release -r win-x64 --self-contained
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:Version=${{ env.VER }}
-          -p:InformationalVersion=${{ env.VER }}
-          -o staging/launcher
+        run: |
+          $ErrorActionPreference = "Stop"
+          Expand-Archive -Path bridge-tray/TapScribe.TrayBridge-win-x64.zip -DestinationPath staging/tray -Force
+          if (-not (Test-Path staging/tray/TapScribe.TrayBridge.exe)) { throw "the tray zip did not contain TapScribe.TrayBridge.exe" }
 
       - name: Build the installer (Inno Setup)
         shell: pwsh

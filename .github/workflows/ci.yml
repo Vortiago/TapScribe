@@ -718,14 +718,14 @@ jobs:
       - name: Build + test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 
-  # The Windows Bundle's Launcher (packaging/bundle/, ADR-0015) uses the same
+  # The Windows Bundle (packaging/bundle/, ADR-0015) uses the same
   # Core/Windows split as the tray Bridge above and for the same reason: the
   # path resolution, argv construction, log-rotation policy and password read
   # live in a cross-platform Core so they're testable off Windows. Only the
   # tray, the Job Object and the actual spawn are Windows-only, and those are
   # covered by the compile in `bundle-build` below.
   bundle-core-crossplatform:
-    name: bundle launcher core (ubuntu)
+    name: bundle core (ubuntu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -738,11 +738,12 @@ jobs:
       - name: Build + test bundle-core only
         run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
 
-  # Compiles the WinForms Launcher on its native OS. The release `bundle` job
-  # publishes it, but only on a tag — without this, a Launcher that doesn't
-  # compile would not be discovered until release day.
+  # Builds the Bundle solution on its native OS: the cross-platform Core (already
+  # tested above) plus the Windows reaper, whose kernel behaviour only Windows can
+  # answer for. The release `bundle` job runs on a tag only, so without this a
+  # break here would not be discovered until release day.
   bundle-build:
-    name: bundle launcher build (windows)
+    name: bundle build + reaper tests (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
