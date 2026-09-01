@@ -87,13 +87,15 @@ public static class RuntimeCopy
         if (present && IsIntact(layout))
             return new RuntimeCopyResult(RuntimeCopyOutcome.Current);
 
-        // A runtime for a DIFFERENT version, kept until the new one is complete so a
-        // failed upgrade leaves the operator with the Recorder they had.
-        string? superseded = OtherVersions(layout).FirstOrDefault();
+        // Runtimes for OTHER versions, kept until the new one is complete so a failed
+        // upgrade leaves the operator with the Recorder they had. Read ONCE: the list is
+        // reported as PreviousVersion and then deleted, and two enumerations that had to
+        // agree could stop agreeing the first time the filter changed.
+        List<string> superseded = OtherVersions(layout);
 
         RuntimeCopyOutcome outcome = present
             ? RuntimeCopyOutcome.Repaired
-            : superseded is not null ? RuntimeCopyOutcome.Upgraded : RuntimeCopyOutcome.Fresh;
+            : superseded.Count > 0 ? RuntimeCopyOutcome.Upgraded : RuntimeCopyOutcome.Fresh;
 
         if (present)
         {
@@ -116,15 +118,15 @@ public static class RuntimeCopy
         CopyPayload(layout, partial);
         Directory.Move(partial, layout.RuntimeDirectory);
 
-        // Only now — the new runtime is complete, so the old one has stopped being the
-        // fallback it was being kept as.
-        foreach (string old in OtherVersions(layout))
+        // Only now — the new runtime is complete, so the old ones have stopped being the
+        // fallback they were being kept as.
+        foreach (string old in superseded)
         {
             log($"runtime: removing the superseded {old}.");
             Delete(Path.Join(layout.RuntimeRoot, old));
         }
 
-        return new RuntimeCopyResult(outcome, superseded);
+        return new RuntimeCopyResult(outcome, superseded.FirstOrDefault());
     }
 
     /// <summary>
@@ -188,11 +190,17 @@ public static class RuntimeCopy
     {
         Directory.CreateDirectory(destination);
 
-        foreach (string dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
-            Directory.CreateDirectory(Path.Join(destination, Path.GetRelativePath(source, dir)));
+        foreach (string file in Directory.EnumerateFiles(source))
+            File.Copy(file, Path.Join(destination, Path.GetFileName(file)), overwrite: true);
 
-        foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
-            File.Copy(file, Path.Join(destination, Path.GetRelativePath(source, file)), overwrite: true);
+        // ONE walk, carrying the destination down with it. The two-sweep shape this
+        // replaced read the whole tree twice — once for directories, once for files — and
+        // materialised both into arrays: a python-build-standalone tree with core deps
+        // installed is tens of thousands of entries, so that was megabytes of strings live
+        // at once, plus a Path.GetRelativePath per entry, in a menu-bar app that otherwise
+        // idles small.
+        foreach (string dir in Directory.EnumerateDirectories(source))
+            CopyTree(dir, Path.Join(destination, Path.GetFileName(dir)));
     }
 
     /// <summary>Remove a tree if it is there. Absent is the desired state, not an error.</summary>

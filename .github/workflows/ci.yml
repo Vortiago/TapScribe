@@ -613,6 +613,10 @@ jobs:
           test "$(printf '%s' "$app" | grep -c '')" = 1
           test -d "$app"
           codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
+          # Published for the Bundle-package step below, so the exactly-one-match rule above
+          # is the only place this path is resolved — a second `find` there would be a copy
+          # with a weaker check, which is the one easier to forget when the path drifts.
+          echo "APP=$app" >> "$GITHUB_ENV"
 
           # The SAME script release.yml ships with, so this gate cannot drift
           # into testing a package nobody downloads.
@@ -685,10 +689,6 @@ jobs:
       - name: Prove the Bundle package script stages a payload
         run: |
           set -euo pipefail
-          app=$(find bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release \
-            -maxdepth 3 -type d -name 'TapScribe.app' -not -path '*/publish/*')
-          test -n "$app"
-
           stub=$(mktemp -d)
           mkdir -p "$stub/python/bin"
           printf '#!/bin/sh\necho stub\n' > "$stub/python/bin/python3"
@@ -696,7 +696,7 @@ jobs:
           : > "$stub/tapscribe-0.0.0-py3-none-any.whl"
 
           packaging/macos/build-bundle-pkg.sh \
-            "$app" "$stub/python" "$stub/tapscribe-0.0.0-py3-none-any.whl" 0.0.0 bundle-probe.pkg
+            "$APP" "$stub/python" "$stub/tapscribe-0.0.0-py3-none-any.whl" 0.0.0 bundle-probe.pkg
 
           # The three-way contract: BundleLayout.MacOSPayload looks in
           # Contents/Resources, the tray's role probe asks the same path, and the

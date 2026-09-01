@@ -118,7 +118,7 @@ public static class RecorderCommand
                 request.TrayPid.ToString(CultureInfo.InvariantCulture),
                 request.GroupId.ToString(CultureInfo.InvariantCulture),
             },
-            new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.Ordinal)));
+            ReadOnlyDictionary<string, string>.Empty);
     }
 
     private static string Absolute(string wheelPath) => Path.GetFullPath(wheelPath.Trim());

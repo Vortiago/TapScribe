@@ -32,7 +32,7 @@ public sealed class ProcessGroupReaper : IProcessReaper
 {
     private readonly int _group;
     private readonly Action<string> _log;
-    private Process? _watchdog;
+    private readonly Process? _watchdog;
     private bool _disposed;
 
     private ProcessGroupReaper(int group, Action<string> log, Process? watchdog)
@@ -49,11 +49,20 @@ public sealed class ProcessGroupReaper : IProcessReaper
     /// <c>JobObject.TryCreate</c> keeps: no reaper is a degraded tray, not a broken one, and
     /// refusing to start the Recorder over a missing backstop would be the worse trade.
     /// </summary>
-    /// <param name="trayExecutable">The tray's own binary, re-invoked as the watchdog.</param>
-    public static ProcessGroupReaper? TryCreate(string trayExecutable, Action<string> log)
+    /// <param name="trayExecutable">The tray's own binary, re-invoked as the watchdog.
+    /// Nullable because <c>Environment.ProcessPath</c> is: an unknown path is answered here,
+    /// as a degraded tray, rather than made a throw at the call site — which would take the
+    /// whole HOST ROLE down (the Recorder vanishing from the menu) over a missing backstop.</param>
+    public static ProcessGroupReaper? TryCreate(string? trayExecutable, Action<string> log)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(trayExecutable);
         ArgumentNullException.ThrowIfNull(log);
+
+        if (string.IsNullOrWhiteSpace(trayExecutable))
+        {
+            log("reaper: this process has no known path, so the parent-death watch cannot be "
+                + "started; a crash may leave whisperlivekit-server running.");
+            return null;
+        }
 
         int self = Environment.ProcessId;
         if (Posix.setpgid(0, 0) != 0)
@@ -93,13 +102,7 @@ public sealed class ProcessGroupReaper : IProcessReaper
     {
         ArgumentNullException.ThrowIfNull(child);
 
-        // The seam hands out a native HANDLE, which is a Windows idea; on POSIX the id is
-        // the pid, and IChildProcess carries it as the same field.
-        int pid = (int)child.NativeHandle;
-        if (pid <= 0)
-            return false;
-
-        return Posix.setpgid(pid, _group) == 0;
+        return child.ProcessId > 0 && Posix.setpgid(child.ProcessId, _group) == 0;
     }
 
     /// <summary>
@@ -134,8 +137,6 @@ public sealed class ProcessGroupReaper : IProcessReaper
         {
             UseShellExecute = false,
             CreateNoWindow = true,
-            RedirectStandardOutput = false,
-            RedirectStandardError = false,
         };
         foreach (string argument in command.Arguments)
             info.ArgumentList.Add(argument);
@@ -159,9 +160,10 @@ public sealed class ProcessGroupReaper : IProcessReaper
 
     private void StopWatchdog()
     {
-        Process? watchdog = _watchdog;
-        _watchdog = null;
-        if (watchdog is null)
+        // No run-once dance of its own: Dispose is the only caller and already guards with
+        // _disposed, so a second mechanism tracking "the watchdog has been dealt with" would
+        // only make a reader check whether either can fire without the other.
+        if (_watchdog is not { } watchdog)
             return;
 
         try

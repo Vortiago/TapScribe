@@ -70,6 +70,9 @@ public sealed record BundleLayout
     /// <summary>The host role's log folder inside the data dir.</summary>
     public const string LogFolder = "logs";
 
+    /// <summary>The Recorder's session output folder inside the data dir.</summary>
+    public const string RecordingsFolder = "recordings";
+
     /// <summary>The active log file. <see cref="LogRotation"/> derives archive names from it.</summary>
     public const string LogFileName = "recorder.log";
 
@@ -88,16 +91,31 @@ public sealed record BundleLayout
     /// <see cref="MacOSPayload"/> climbs to.</summary>
     private const string ContentsFolder = "Contents";
 
-    /// <summary>What macOS calls the per-user application data root. Two segments, joined
-    /// rather than written with a separator, so the Core stays testable off macOS.</summary>
-    private static readonly string[] ApplicationSupport = ["Library", "Application Support"];
+    /// <summary>The interpreter's path RELATIVE to the python folder, and the GUI one beside
+    /// it. Carried as state rather than switched on <see cref="Shape"/> at each use: the two
+    /// factories already know the platform, so a third shape then has to supply its answers
+    /// to the constructor — where the compiler asks — instead of falling through a
+    /// two-armed branch to whichever side was written second.</summary>
+    private readonly string _python;
+    private readonly string _pythonw;
+    private readonly string _reinstallAdvice;
 
-    private BundleLayout(BundleShape shape, string payloadDirectory, string dataDirectory, string runtimeDirectory)
+    private BundleLayout(
+        BundleShape shape,
+        string payloadDirectory,
+        string dataDirectory,
+        string runtimeDirectory,
+        string python,
+        string pythonw,
+        string reinstallAdvice)
     {
         Shape = shape;
         PayloadDirectory = payloadDirectory;
         DataDirectory = dataDirectory;
         RuntimeDirectory = runtimeDirectory;
+        _python = python;
+        _pythonw = pythonw;
+        _reinstallAdvice = reinstallAdvice;
     }
 
     /// <summary>Which platform's Bundle this is.</summary>
@@ -116,9 +134,10 @@ public sealed record BundleLayout
     /// <see cref="DataDirectory"/> on macOS.</summary>
     public string RuntimeDirectory { get; }
 
-    /// <summary>Whether the runtime is a copy that has to exist before anything can run —
-    /// true on macOS only. What the tray's first launch branches on.</summary>
-    public bool RuntimeIsACopy => !string.Equals(RuntimeDirectory, PayloadDirectory, StringComparison.Ordinal);
+    /// <summary>Whether the runtime is a copy that has to exist before anything can run.
+    /// Read off the shape rather than re-derived by comparing the two roots: one fact in two
+    /// encodings can disagree, and this is the first thing <see cref="RuntimeCopy"/> asks.</summary>
+    public bool RuntimeIsACopy => Shape is BundleShape.MacOS;
 
     public string PythonDirectory => Path.Join(RuntimeDirectory, PythonFolder);
 
@@ -133,21 +152,12 @@ public sealed record BundleLayout
     /// POSIX-shaped, so the interpreter is <c>bin/python3</c> and the entry points are
     /// beside it in <c>bin/</c>.
     /// </summary>
-    public string Python => Shape == BundleShape.Windows
-        ? Path.Join(PythonDirectory, "python.exe")
-        : Path.Join(PythonDirectory, "bin", "python3");
+    public string Python => Path.Join(PythonDirectory, _python);
 
-    /// <summary>
-    /// The interpreter for the long-lived Recorder.
-    ///
-    /// Windowless on Windows, so no console flashes and none stays open. macOS has no
-    /// such pair — a child of a GUI app gets no terminal to begin with — so this is
-    /// deliberately the SAME binary there rather than a second name that would have to
-    /// exist. Callers do not branch; that is why the property survives on both.
-    /// </summary>
-    public string Pythonw => Shape == BundleShape.Windows
-        ? Path.Join(PythonDirectory, "pythonw.exe")
-        : Python;
+    /// <summary>The interpreter for the long-lived Recorder: windowless on Windows, so no
+    /// console flashes and none stays open, and the same binary as <see cref="Python"/> on
+    /// macOS (see <see cref="ForMacOS"/>).</summary>
+    public string Pythonw => Path.Join(PythonDirectory, _pythonw);
 
     public string WheelDirectory => Path.Join(RuntimeDirectory, WheelFolder);
 
@@ -158,22 +168,25 @@ public sealed record BundleLayout
     /// <summary>The wheel as SHIPPED — the copy's source.</summary>
     public string PayloadWheelDirectory => Path.Join(PayloadDirectory, WheelFolder);
 
-    /// <summary>Where the version-stamped runtime copies live. Empty on Windows, which
-    /// has none.</summary>
+    /// <summary>Where the version-stamped runtime copies live. Meaningless on Windows,
+    /// whose runtime is the payload — the path resolves there, nothing reads it.</summary>
     public string RuntimeRoot => Path.Join(DataDirectory, RuntimeFolder);
 
     public string PasswordFile => Path.Join(DataDirectory, PasswordFileName);
+
+    /// <summary>Where the Recorder writes sessions (<c>config.RECORDINGS_DIR</c>). Named
+    /// here with every other folder rather than in a shell: the macOS tray reveals it in
+    /// Finder, and a literal there is the one folder name no CI leg would compile.</summary>
+    public string RecordingsDirectory => Path.Join(DataDirectory, RecordingsFolder);
 
     public string LogDirectory => Path.Join(DataDirectory, LogFolder);
 
     public string LogFile => Path.Join(LogDirectory, LogFileName);
 
-    /// <summary>What to tell an operator whose install is broken. Platform-specific
-    /// because the two are repaired by downloading different files, and "reinstall from
+    /// <summary>What to tell an operator whose install is broken. Platform-specific because
+    /// the two are repaired by downloading different files, and "reinstall from
     /// TapScribe-Setup-win-x64.exe" on a Mac is worse than saying nothing.</summary>
-    public string ReinstallAdvice => Shape == BundleShape.Windows
-        ? "reinstall from a freshly downloaded TapScribe-Setup-win-x64.exe."
-        : "reinstall from a freshly downloaded TapScribe-Bundle-osx-arm64.pkg.";
+    public string ReinstallAdvice => _reinstallAdvice;
 
     /// <summary>
     /// Resolve the Windows layout from the tray's own directory and the user profile.
@@ -194,7 +207,10 @@ public sealed record BundleLayout
             BundleShape.Windows,
             payload,
             Path.GetFullPath(Path.Join(userProfileDirectory, DataFolder)),
-            payload);
+            payload,
+            python: "python.exe",
+            pythonw: "pythonw.exe",
+            reinstallAdvice: "reinstall from a freshly downloaded TapScribe-Setup-win-x64.exe.");
     }
 
     /// <summary>
@@ -217,13 +233,22 @@ public sealed record BundleLayout
         ArgumentException.ThrowIfNullOrWhiteSpace(homeDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(version);
 
+        // Path.Join's multi-arg overload, so the two macOS segments need no separator
+        // literal and the Core stays testable off macOS.
         string data = Path.GetFullPath(
-            Path.Join(Path.Join(homeDirectory, Path.Join(ApplicationSupport)), DataFolder));
+            Path.Join(homeDirectory, "Library", "Application Support", DataFolder));
+        // The same binary for both: macOS has no pythonw twin — a child of a GUI app gets no
+        // terminal to begin with — so this is deliberately not a second name that would have
+        // to exist. Callers do not branch; that is why the property survives on both.
+        string interpreter = Path.Join("bin", "python3");
         return new BundleLayout(
             BundleShape.MacOS,
             Path.GetFullPath(payloadDirectory),
             data,
-            Path.Join(data, RuntimeFolder, SafeStamp(version)));
+            Path.Join(data, RuntimeFolder, SafeStamp(version)),
+            python: interpreter,
+            pythonw: interpreter,
+            reinstallAdvice: "reinstall from a freshly downloaded TapScribe-Bundle-osx-arm64.pkg.");
     }
 
     /// <summary>

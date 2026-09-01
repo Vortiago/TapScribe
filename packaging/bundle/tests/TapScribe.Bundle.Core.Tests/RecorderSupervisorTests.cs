@@ -178,6 +178,8 @@ public class RecorderSupervisorTests
 
         public IntPtr NativeHandle => IntPtr.Zero;
 
+        public int ProcessId => 4242;
+
         public bool Killed { get; private set; }
 
         public event EventHandler? Exited;

@@ -26,6 +26,19 @@ public interface IChildProcess : IDisposable
     /// one, rather than every double implementing one nothing calls.</summary>
     IntPtr NativeHandle { get; }
 
+    /// <summary>
+    /// The child's process id — what a POSIX reaper needs, where the Windows one needs
+    /// <see cref="NativeHandle"/>.
+    ///
+    /// Its own member rather than a cast of the handle. macOS' reaper used to do
+    /// <c>(int)child.NativeHandle</c>, which happens to work on .NET-for-Unix and is a
+    /// reinterpretation of a WINDOWS concept: nothing documents the two as the same integer,
+    /// and the failure it buys is silent — <c>setpgid</c> on a garbage id returns -1, the
+    /// reaper answers false, and the WhisperLiveKit orphan it exists to prevent is back with
+    /// nothing in the log worth reading.
+    /// </summary>
+    int ProcessId { get; }
+
     /// <summary>Raised when the child exits on its own. Subscribed BEFORE the child is
     /// allowed to raise it: a Recorder that dies instantly (a broken wheel, a port already
     /// held) would otherwise raise into an empty delegate and leave the tray reporting a
@@ -72,6 +85,8 @@ public sealed class ChildProcess : IChildProcess
     }
 
     public IntPtr NativeHandle => _process.Handle;
+
+    public int ProcessId => _process.Id;
 
     public void Kill() => _process.Kill(entireProcessTree: true);
 

@@ -42,6 +42,57 @@ public static class LoginLink
     /// Sent per-request rather than on the client, so it cannot ride along on anything else
     /// the tray sends.</param>
     /// <param name="log">Where a failed mint says why. Never given the password.</param>
+    /// <summary>
+    /// What "Open dashboard" should navigate to for this install: a signed-in link when the
+    /// password could be read and the Recorder minted one, and the plain dashboard when
+    /// either could not.
+    ///
+    /// The password READ belongs here with the round-trip, not in each shell. It was written
+    /// twice — once per tray — and what was duplicated is not a widget but a policy: which
+    /// failures fall back silently, and the anti-leak rule that only the lookup's STATUS is
+    /// logged, never text derived from the file (CodeQL
+    /// cs/cleartext-storage-of-sensitive-information). A rule about a secret with two
+    /// implementations is one edit away from having two behaviours.
+    /// </summary>
+    public static string DashboardUrlFor(HttpClient http, BundleLayout layout, Action<string> log)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(log);
+
+        PasswordLookup lookup = PasswordFile.Read(layout.PasswordFile);
+        if (!lookup.IsOk || lookup.Password is null)
+        {
+            log($"login link: password unavailable ({lookup.Status}) — opening the dashboard signed out.");
+            return BundleDefaults.DashboardUrl;
+        }
+
+        return SignedInUrl(http, BundleDefaults.DashboardUrl, lookup.Password, log);
+    }
+
+    /// <summary>
+    /// A target safe to write to a log or show in a balloon: the same URL with any query
+    /// stripped.
+    ///
+    /// Here because the query is THIS type's secret — <c>?k=</c> is a live single-use
+    /// dashboard credential (ADR-0023) — and the log it would otherwise reach is one the
+    /// tray invites the operator to open and paste. It was written once per shell and the
+    /// two had already diverged: one used <c>Uri</c> and preserved <c>file://</c> targets
+    /// whole, the other cut at the first '?' and truncated them. Whoever mints the secret
+    /// owns what counts as redacting it.
+    ///
+    /// A non-URL, or a file, is returned unchanged: those carry no secret and the operator
+    /// needs the whole path to act on the message.
+    /// </summary>
+    public static string WithoutSecrets(string? target)
+    {
+        if (string.IsNullOrEmpty(target))
+            return "";
+
+        return Uri.TryCreate(target, UriKind.Absolute, out Uri? uri) && !uri.IsFile && uri.Query.Length > 0
+            ? uri.GetLeftPart(UriPartial.Path)
+            : target;
+    }
+
     public static string SignedInUrl(
         HttpClient http,
         string dashboardUrl,

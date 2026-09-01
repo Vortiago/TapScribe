@@ -52,20 +52,31 @@ public static class ParentDeathWatch
     }
 
     /// <summary>
-    /// Block until the process is gone, through a kqueue <c>EVFILT_PROC</c>/<c>NOTE_EXIT</c>
-    /// watch — the one macOS primitive that reports another process's exit without polling.
+    /// Block until the process is gone: a kqueue <c>EVFILT_PROC</c>/<c>NOTE_EXIT</c> watch,
+    /// or a poll when that could not be armed.
     ///
-    /// Falls back to polling <c>kill(pid, 0)</c> when the watch cannot be registered, which
-    /// is not merely defensive: the tray may ALREADY have exited by the time the watchdog
-    /// gets here (a crash during startup is the likeliest crash of all), and registering a
-    /// watch on a dead pid fails with ESRCH. Returning immediately in that case is exactly
-    /// right — the thing being waited for has happened.
+    /// Two named halves rather than one method with three exits. The shape this replaced had
+    /// an early return, a return inside a <c>try</c>, and a loop after the <c>finally</c> —
+    /// and it was already wrong: the "no kqueue" branch said "fall through to the poll below"
+    /// and RETURNED, so a kqueue that could not be created meant the watchdog killed the
+    /// Recorder's process group immediately, while the tray was still running.
     /// </summary>
     private static void WaitForExit(int pid)
     {
+        if (!TryWatchForExit(pid))
+            PollUntilGone(pid);
+    }
+
+    /// <summary>
+    /// Arm a one-shot exit watch and block on it. False means it could not be armed at all —
+    /// including because the process is ALREADY gone, which is the likeliest case of all (a
+    /// tray that crashed during startup) and which the poll then answers immediately.
+    /// </summary>
+    private static bool TryWatchForExit(int pid)
+    {
         int queue = Posix.kqueue();
         if (queue < 0)
-            return; // no kqueue: fall through to the poll below.
+            return false;
 
         try
         {
@@ -78,19 +89,21 @@ public static class ParentDeathWatch
             };
             var fired = default(Posix.KEvent);
 
-            // Registration and wait in one call, which is what makes this race-free: if the
+            // Registration and wait in ONE call, which is what makes this race-free: if the
             // process died between the caller's spawn and here, the register itself fails
-            // and we are done.
-            if (Posix.kevent(queue, ref change, 1, ref fired, 1, IntPtr.Zero) >= 0)
-                return;
+            // with ESRCH rather than arming a watch that will never fire.
+            return Posix.kevent(queue, ref change, 1, ref fired, 1, IntPtr.Zero) >= 0;
         }
         finally
         {
             Posix.close(queue);
         }
+    }
 
-        // ESRCH (already gone), or a kqueue that would not take the filter. Poll rather than
-        // give up: giving up here means never killing the group.
+    /// <summary>The fallback, and never a give-up: giving up here means never killing the
+    /// group, which is the whole reason this process exists.</summary>
+    private static void PollUntilGone(int pid)
+    {
         while (Posix.kill(pid, 0) == 0)
             Thread.Sleep(TimeSpan.FromSeconds(1));
     }

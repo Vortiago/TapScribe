@@ -77,6 +77,10 @@ public sealed class HostController : IDisposable
     private readonly IRecorderHost _supervisor;
     private readonly Lock _gate = new();
     private RecorderState _state = RecorderState.Stopped;
+
+    /// <summary>The last header alerted on, so a repeated render of the same bad state does
+    /// not say it again. Under <c>_gate</c> with the state it is derived from.</summary>
+    private string _alerted = "";
     private string _message = "TapScribe is not running.";
 
     public HostController(IHostView view, Action<Action> post, IRecorderHost supervisor)
@@ -94,22 +98,29 @@ public sealed class HostController : IDisposable
     /// log writer, wired to this controller's state callback. The shell calls this once,
     /// after it has established that the payload is there.
     /// </summary>
+    /// <param name="notice">How the shell says something that is not a STATE. Marshalled by
+    /// this method, so a shell never has to know the supervisor speaks from a background
+    /// thread. Omitted, it goes to the log — which is the right default for a shell that has
+    /// no way to show one.</param>
     public static HostController Attach(
         IHostView view,
         Action<Action> post,
         BundleLayout layout,
         IProcessReaper? reaper,
         Action<string> log,
-        Func<bool> recorderAnswers)
+        Func<bool> recorderAnswers,
+        Action<string>? notice = null)
     {
         ArgumentNullException.ThrowIfNull(view);
+        ArgumentNullException.ThrowIfNull(post);
         HostController? controller = null;
         var supervisor = new RecorderSupervisor(
             layout,
             reaper,
             log,
             onState: (state, message) => controller?.Report(state, message),
-            recorderAnswers: recorderAnswers);
+            recorderAnswers: recorderAnswers,
+            onNotice: notice is null ? null : message => post(() => notice(message)));
         controller = new HostController(view, post, supervisor);
         return controller;
     }
@@ -131,12 +142,22 @@ public sealed class HostController : IDisposable
 
     private void Report(RecorderState state, string message, bool alert)
     {
+        HostView rendered = Render(state, message);
+        bool sayIt;
         lock (_gate)
         {
             _state = state;
             _message = message;
+            // Alert ONCE per distinct bad header, decided here rather than in each shell.
+            // Both trays had grown the same `_alerted` field, which made "when does the
+            // operator get told again" a rule with two implementations in two assemblies —
+            // one of them compilable on no CI leg this repo runs. It belongs beside IsBad,
+            // which is the other half of the same question.
+            sayIt = alert && IsBad(state) && !string.Equals(_alerted, rendered.Header, StringComparison.Ordinal);
+            _alerted = alert && IsBad(state) ? rendered.Header : "";
         }
-        HostView view = Render(state, message) with { Alert = alert && IsBad(state) };
+
+        HostView view = rendered with { Alert = sayIt };
         _post(() => _view.ShowHost(view));
     }
 

@@ -33,10 +33,6 @@ internal sealed class TrayHost : IHostView, IDisposable
     /// <summary>The shell's marshaller. Held because the host role does work OFF the UI
     /// thread (the login-link mint) and every menu and balloon touch has to come back.</summary>
     private readonly Action<Action> _post;
-    /// <summary>The last header balloon'd, so a re-render of the same bad state does not
-    /// balloon again on every tick.</summary>
-    private string _alerted = "";
-
     private readonly ToolStripSeparator _separator = new();
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _startItem;
@@ -115,7 +111,8 @@ internal sealed class TrayHost : IHostView, IDisposable
 
         _log.Write("--- TapScribe host role starting ---");
         _controller = HostController.Attach(
-            this, post, layout, _reaper, _log.Write, RecorderAnswers);
+            this, post, layout, _reaper, _log.Write, RecorderAnswers,
+            notice: message => _notify("TapScribe", message, NoticeKind.Warning));
     }
 
     /// <summary>The items to splice into the tray menu, in order. The shell owns where
@@ -142,10 +139,11 @@ internal sealed class TrayHost : IHostView, IDisposable
         // The Recorder's state lives in the MENU, which an operator only sees when they open
         // it — and the tray ICON stays the Bridge's tap state by design (ADR-0022). So a
         // crash or a failed boot has no ambient signal at all unless it says so out loud.
-        // Keyed on the header so a repeated render of the same bad state balloons once.
-        if (host.Alert && host.Header != _alerted)
+        // WHETHER to say it, and whether it has already been said, are HostController's —
+        // both trays had grown the same de-dup field, and a rule about what the operator
+        // hears should not have one implementation per shell.
+        if (host.Alert)
             _notify("TapScribe", host.Header, NoticeKind.Warning);
-        _alerted = host.Alert ? host.Header : "";
     }
 
     /// <summary>
@@ -171,7 +169,7 @@ internal sealed class TrayHost : IHostView, IDisposable
         string url = BundleDefaults.DashboardUrl;
         try
         {
-            url = DashboardUrl();
+            url = LoginLink.DashboardUrlFor(_http, _layout, _log.Write);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -183,23 +181,6 @@ internal sealed class TrayHost : IHostView, IDisposable
 
         _post(() => Guarded(() => ShellOpen(url)));
     });
-
-    /// <summary>The password file is the shell's to read (it is on THIS machine, at a path this
-    /// layout resolved); the round-trip is <see cref="LoginLink"/>'s, in Bundle.Core, where both
-    /// shells and the ubuntu CI leg can reach it.</summary>
-    private string DashboardUrl()
-    {
-        PasswordLookup lookup = PasswordFile.Read(_layout.PasswordFile);
-        if (!lookup.IsOk || lookup.Password is null)
-        {
-            // Never the file-derived text: only the status. Same anti-leak rule as
-            // CopyPassword below (CodeQL cs/cleartext-storage-of-sensitive-information).
-            _log.Write($"login link: password unavailable ({lookup.Status}) — opening the dashboard signed out.");
-            return BundleDefaults.DashboardUrl;
-        }
-
-        return LoginLink.SignedInUrl(_http, BundleDefaults.DashboardUrl, lookup.Password, _log.Write);
-    }
 
     private void CopyPassword()
     {
@@ -278,53 +259,17 @@ internal sealed class TrayHost : IHostView, IDisposable
         {
             // No handler registered for http/.log, or the shell refused. Not fatal — the
             // operator can open it themselves, so say what we tried and carry on.
-            string said = WithoutSecrets(target);
+            string said = LoginLink.WithoutSecrets(target);
             _log.Write($"could not open {said}: {error.Message}");
             _notify("TapScribe", $"Could not open {said}.", NoticeKind.Warning);
         }
     }
 
-    /// <summary>
-    /// A target with its query stripped. The one URL this class opens is a login link, whose
-    /// <c>?k=</c> IS a live single-use dashboard credential (ADR-0023) — and the failure path
-    /// above writes to a rotating log file the operator is invited to open and paste, and to
-    /// a balloon anyone at the machine can read. Unspent, that token stays valid for its whole
-    /// TTL. Same anti-leak rule the password reads keep: say what was tried, never the secret.
-    /// </summary>
-    private static string WithoutSecrets(string target) =>
-        Uri.TryCreate(target, UriKind.Absolute, out Uri? uri) && !uri.IsFile && uri.Query.Length > 0
-            ? uri.GetLeftPart(UriPartial.Path)
-            : target;
-
-    /// <summary>
-    /// Whether SOMETHING is serving the Recorder's port — the discriminator between
-    /// "someone else's Recorder holds 8001" and "this install is broken".
-    ///
-    /// Through <see cref="ControlClient"/>, which already owns what `GET /health` means and
-    /// how it fails; a second reachability probe with its own timeout and its own idea of
-    /// success is the kind that drifts when that contract moves. Loopback and no token: a
-    /// Bundle IS the Recorder on this machine, and /health takes no credential.
-    /// </summary>
-    private bool RecorderAnswers()
-    {
-        try
-        {
-            using var control = new ControlClient(
-                "127.0.0.1", BundleDefaults.RecorderPort, tls: false, token: "", _http);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            control.CheckHealthAsync(timeout.Token).GetAwaiter().GetResult();
-            return true;
-        }
-        catch (Exception error) when (
-            error is HttpRequestException or TaskCanceledException or OperationCanceledException
-                or System.Net.Sockets.SocketException or InvalidOperationException)
-        {
-            // Nothing listening, or it did not answer in time. Either way: not somebody
-            // else's healthy Recorder. The filter matches ConnectionTester's, which wraps
-            // the same call for the same question.
-            return false;
-        }
-    }
+    /// <summary>Whether SOMETHING is serving the Recorder's port. The rule — and the five
+    /// ways of not being there — belong to <see cref="ConnectionTester"/>, which already owns
+    /// what <c>GET /health</c> means; both shells had written it out identically.</summary>
+    private bool RecorderAnswers() =>
+        ConnectionTester.AnswersOnLoopback(BundleDefaults.RecorderPort, _http, TimeSpan.FromSeconds(2));
 
     /// <summary>The same boundary the Bridge half keeps around an operator action: a bug
     /// must not become a tray that vanishes, and WinForms answers an escaping handler with

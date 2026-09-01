@@ -43,10 +43,6 @@ internal sealed class MacTrayHost : IHostView, IDisposable
     private readonly NSMenuItem _revealItem;
     private readonly NSMenuItem _logItem;
 
-    /// <summary>The last header alerted, so a re-render of the same bad state does not
-    /// notify again on every tick.</summary>
-    private string _alerted = "";
-
     /// <summary>
     /// Build the host role if this install carries one, or answer null — which is what a
     /// bridge-only tray gets, and why its menu is exactly what it was before the role
@@ -91,7 +87,7 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         // Created BEFORE anything is spawned: a child inherits its parent's process group, so
         // leading the group once, here, is what makes the WhisperLiveKit GRANDCHILD reapable
         // without ever holding its handle (ProcessGroupReaper).
-        _reaper = ProcessGroupReaper.TryCreate(Environment.ProcessPath ?? "", _log.Write);
+        _reaper = ProcessGroupReaper.TryCreate(Environment.ProcessPath, _log.Write);
 
         _statusItem = new NSMenuItem("Starting…") { Enabled = false };
         // Both DISABLED until the first ShowHost, like the Bridge half's End/Disconnect. The
@@ -117,57 +113,19 @@ internal sealed class MacTrayHost : IHostView, IDisposable
 
         _log.Write("--- TapScribe host role starting ---");
         _controller = HostController.Attach(
-            this, post, layout, _reaper, _log.Write, RecorderAnswers);
+            this, post, layout, _reaper, _log.Write, RecorderAnswers,
+            notice: message => _notify("TapScribe", message, NoticeKind.Warning));
     }
 
     /// <summary>The items to splice into the tray menu, in order. The shell owns where they
     /// go; this owns what they are.</summary>
     internal IReadOnlyList<NSMenuItem> MenuItems { get; }
 
-    /// <summary>
-    /// Copy the runtime if this launch needs it, then boot the Recorder.
-    ///
-    /// OFF the main thread, and that is the whole reason this is not just
-    /// <c>_controller.Start()</c>: the first launch after an install copies ~300 MB, and on
-    /// AppKit's main thread that is a menu bar that does not respond and a beachball for the
-    /// length of it. The controller already boots on a background thread; this puts the copy
-    /// on the same side of the line.
-    /// </summary>
-    internal void Startup() => _ = Task.Run(() =>
-    {
-        try
-        {
-            RuntimeCopyResult copied = RuntimeCopy.Ensure(_layout, _log.Write);
-            if (copied.BackendsLost)
-                _post(() => _notify(
-                    "TapScribe",
-                    "TapScribe was updated, so the speech models you installed are gone. "
-                        + "Open the dashboard and run Setup again to reinstall them.",
-                    NoticeKind.Warning));
-        }
-        catch (Exception error) when (error is BundleLayoutException or IOException or UnauthorizedAccessException)
-        {
-            // The payload is not there, or the copy could not be written. Reported through the
-            // controller so it lands in the menu header the same way every other Recorder
-            // failure does, rather than as a notice the operator has to have been looking at.
-            _controller.Report(RecorderState.Failed, error.Message);
-            _log.Write($"runtime copy failed: {error}");
-            return;
-        }
-        catch (Exception error) when (error is not OutOfMemoryException)
-        {
-            // The backstop, for the reason RunTapsAsync has one: this is FIRE-AND-FORGET, so
-            // anything the filter above does not name faults the task unobserved and nothing
-            // reports it — leaving the menu on "Starting…" with Start AND Stop disabled until
-            // the tray is restarted. Reported as Failed rather than swallowed: the operator
-            // gets a menu they can act on, and the log gets the whole exception.
-            _controller.Report(RecorderState.Failed, "Could not prepare TapScribe. See the log.");
-            _log.Write($"host startup failed: {error}");
-            return;
-        }
-
-        _controller.Start();
-    });
+    /// <summary>Boot the Recorder, which on macOS begins by copying the runtime out of the
+    /// <c>.app</c> (ADR-0024). Both are the SUPERVISOR's, on its own background thread: doing
+    /// the copy here instead put a rule the Linux leg tests into a shell only a Mac can
+    /// build, and left "Start Recorder" unable to retry a copy that had failed.</summary>
+    internal void Startup() => _controller.Start();
 
     public void ShowHost(HostView? host)
     {
@@ -184,10 +142,9 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         // The Recorder's state lives in the MENU, which an operator only sees when they open
         // it — and the menu-bar glyph stays the Bridge's tap state by design (ADR-0022). So a
         // crash or a failed boot has no ambient signal at all unless it says so out loud.
-        // Keyed on the header so a repeated render of the same bad state notifies once.
-        if (host.Alert && host.Header != _alerted)
+        // Whether to say it, and whether it has already been said, are HostController's.
+        if (host.Alert)
             _notify("TapScribe", host.Header, NoticeKind.Warning);
-        _alerted = host.Alert ? host.Header : "";
     }
 
     /// <summary>
@@ -205,7 +162,7 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         string url = BundleDefaults.DashboardUrl;
         try
         {
-            url = DashboardUrl();
+            url = LoginLink.DashboardUrlFor(_http, _layout, _log.Write);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -218,23 +175,6 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         _post(() => Guarded(() => Open(NSUrl.FromString(url))));
     });
 
-    /// <summary>The password file is the shell's to read (it is on THIS machine, at a path this
-    /// layout resolved); the round-trip is <see cref="LoginLink"/>'s, in Bundle.Core, where both
-    /// shells and the ubuntu CI leg can reach it.</summary>
-    private string DashboardUrl()
-    {
-        PasswordLookup lookup = PasswordFile.Read(_layout.PasswordFile);
-        if (!lookup.IsOk || lookup.Password is null)
-        {
-            // Never the file-derived text: only the status. Same anti-leak rule as
-            // CopyPassword below.
-            _log.Write($"login link: password unavailable ({lookup.Status}) — opening the dashboard signed out.");
-            return BundleDefaults.DashboardUrl;
-        }
-
-        return LoginLink.SignedInUrl(_http, BundleDefaults.DashboardUrl, lookup.Password, _log.Write);
-    }
-
     private void CopyPassword()
     {
         PasswordLookup lookup = PasswordFile.Read(_layout.PasswordFile);
@@ -246,9 +186,7 @@ internal sealed class MacTrayHost : IHostView, IDisposable
             return;
         }
 
-        NSPasteboard pasteboard = NSPasteboard.GeneralPasteboard;
-        pasteboard.ClearContents();
-        pasteboard.SetStringForType(lookup.Password, NSPasteboardType.String.GetConstant()!);
+        Pasteboard.Put(lookup.Password);
         _notify("TapScribe", $"{lookup.Message} Username: {BundleDefaults.DashboardUser}.", NoticeKind.Information);
     }
 
@@ -262,7 +200,7 @@ internal sealed class MacTrayHost : IHostView, IDisposable
     /// </summary>
     private void RevealRecordings()
     {
-        string recordings = Path.Join(_layout.DataDirectory, "recordings");
+        string recordings = _layout.RecordingsDirectory;
         // The data dir rather than a folder that may not exist yet: the Recorder creates
         // recordings/ on its first session, and opening a missing path silently does nothing.
         string target = Directory.Exists(recordings) ? recordings : _layout.DataDirectory;
@@ -313,48 +251,17 @@ internal sealed class MacTrayHost : IHostView, IDisposable
             // open it themselves. Never the whole URL: the one this class opens is a login
             // link whose `?k=` IS a live single-use dashboard credential (ADR-0023), and this
             // goes to a rotating log file the operator is invited to open and paste.
-            string said = WithoutSecrets(url);
+            string said = LoginLink.WithoutSecrets(url.AbsoluteString);
             _log.Write($"could not open {said}.");
             _notify("TapScribe", $"Could not open {said}.", NoticeKind.Warning);
         }
     }
 
-    /// <summary>A target with its query stripped. Same anti-leak rule the password reads keep:
-    /// say what was tried, never the secret.</summary>
-    private static string WithoutSecrets(NSUrl url)
-    {
-        string full = url.AbsoluteString ?? "";
-        int query = full.IndexOf('?', StringComparison.Ordinal);
-        return query < 0 ? full : full[..query];
-    }
-
-    /// <summary>
-    /// Whether SOMETHING is serving the Recorder's port — the discriminator between "someone
-    /// else's Recorder holds 8001" and "this install is broken".
-    ///
-    /// Through <see cref="ControlClient"/>, which already owns what <c>GET /health</c> means
-    /// and how it fails. Loopback and no token: a Bundle IS the Recorder on this machine, and
-    /// /health takes no credential.
-    /// </summary>
-    private bool RecorderAnswers()
-    {
-        try
-        {
-            using var control = new ControlClient(
-                "127.0.0.1", BundleDefaults.RecorderPort, tls: false, token: "", _http);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            control.CheckHealthAsync(timeout.Token).GetAwaiter().GetResult();
-            return true;
-        }
-        catch (Exception error) when (
-            error is HttpRequestException or TaskCanceledException or OperationCanceledException
-                or System.Net.Sockets.SocketException or InvalidOperationException)
-        {
-            // Nothing listening, or it did not answer in time. Either way: not somebody else's
-            // healthy Recorder.
-            return false;
-        }
-    }
+    /// <summary>Whether SOMETHING is serving the Recorder's port. The rule — and the five
+    /// ways of not being there — belong to <see cref="ConnectionTester"/>, which already owns
+    /// what <c>GET /health</c> means; both shells had written it out identically.</summary>
+    private bool RecorderAnswers() =>
+        ConnectionTester.AnswersOnLoopback(BundleDefaults.RecorderPort, _http, TimeSpan.FromSeconds(2));
 
     /// <summary>The same boundary the Bridge half keeps around an operator action: a bug must
     /// not become a menu bar that vanishes.</summary>

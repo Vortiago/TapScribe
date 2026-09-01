@@ -40,6 +40,10 @@ public sealed class RecorderSupervisor : IRecorderHost
     private readonly IProcessReaper? _reaper;
     private readonly Action<string> _log;
     private readonly Action<RecorderState, string> _onState;
+    /// <summary>Something the operator must be told that is not a STATE — today only "the
+    /// update took your model backends with it". Separate from <see cref="_onState"/>
+    /// because the menu header renders a state and this is advice that outlives one.</summary>
+    private readonly Action<string> _onNotice;
     private readonly Func<BundleProcess, IChildProcess> _spawn;
     private readonly Func<bool> _recorderAnswers;
     private readonly Lock _gate = new();
@@ -60,7 +64,8 @@ public sealed class RecorderSupervisor : IRecorderHost
         Action<string> log,
         Action<RecorderState, string> onState,
         Func<BundleProcess, IChildProcess>? spawn = null,
-        Func<bool>? recorderAnswers = null)
+        Func<bool>? recorderAnswers = null,
+        Action<string>? onNotice = null)
     {
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(log);
@@ -71,6 +76,7 @@ public sealed class RecorderSupervisor : IRecorderHost
         _onState = onState;
         _spawn = spawn ?? (command => ChildProcess.Start(command, layout.RuntimeDirectory, log));
         _recorderAnswers = recorderAnswers ?? (() => false);
+        _onNotice = onNotice ?? log;
     }
 
     /// <summary>Whether the Recorder currently on the port is one this tray started.
@@ -135,6 +141,23 @@ public sealed class RecorderSupervisor : IRecorderHost
         try
         {
             Directory.CreateDirectory(_layout.DataDirectory);
+
+            // BEFORE ResolveWheel, which reads the RUNTIME's wheel folder — so on macOS
+            // there is nothing to resolve until the copy has happened (ADR-0024). Here
+            // rather than in the shell that has a copy to make: this method is already on
+            // the background thread, already has both catch tiers, and is what BOTH Start()
+            // and the operator's "Start Recorder" go through. Called from a shell instead,
+            // a failed first copy could never be retried — Start Recorder would go straight
+            // to ResolveWheel and answer "no TapScribe wheel found" forever.
+            //
+            // Costs a Windows Bundle nothing: its runtime IS its payload, so Ensure answers
+            // NotNeeded without touching the disk.
+            RuntimeCopyResult copied = RuntimeCopy.Ensure(_layout, _log);
+            if (copied.BackendsLost)
+                _onNotice(
+                    "TapScribe was updated, so the speech models you installed are gone. "
+                        + "Open the dashboard and run Setup again to reinstall them.");
+
             wheel = _layout.ResolveWheel();
         }
         catch (Exception error) when (error is BundleLayoutException or IOException or UnauthorizedAccessException)

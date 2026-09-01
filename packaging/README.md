@@ -50,7 +50,7 @@ the packaging flags: that script is the one owner of the `--analyze` →
 `BundleIsRelocatable NO` → `--component-plist` sequence and the `<relocate>`
 self-check, and it is the one CI's quarantine proof exercises — so the recipe the
 Bundle ships is the recipe that gate tests.
-[ADR-0024](../docs/adr/0024-macos-bundle-runtime-outside-app.md) owns why the
+[ADR-0024](../docs/adr/0024-macos-bundle-runtime-outside-the-signed-app.md) owns why the
 interpreter is copied OUT of the `.app` at runtime rather than run in place, and
 why there is no `pkg` postinstall script.
 

@@ -121,6 +121,9 @@ public class RuntimeCopyTests
         Assert.Equal(RuntimeCopyOutcome.Repaired, result.Outcome);
         Assert.True(result.BackendsLost);
         Assert.True(File.Exists(layout.Python));
+        // The outcome enum says WHAT happened; only the log says why, and a repair is the one
+        // case an operator reading it has to be able to tell from a first launch.
+        Assert.Contains(world.Logged, line => line.Contains("incomplete", StringComparison.Ordinal));
     }
 
     [Fact]

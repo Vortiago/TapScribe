@@ -91,6 +91,8 @@ public class JobObjectTests
 
         public virtual IntPtr NativeHandle => _process.Handle;
 
+        public int ProcessId => _process.Id;
+
         public event EventHandler? Exited
         {
             add { }
