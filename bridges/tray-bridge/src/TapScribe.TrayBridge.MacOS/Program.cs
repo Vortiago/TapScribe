@@ -1,5 +1,6 @@
 using TapScribe.Bridge.MacOS;
 using TapScribe.Bundle.Core;
+using TapScribe.Bundle.MacOS;
 
 namespace TapScribe.TrayBridge.MacOS;
 
@@ -16,12 +17,22 @@ namespace TapScribe.TrayBridge.MacOS;
 /// </summary>
 internal static class Program
 {
-    private static int Main() => Run(
-        MacOSProductVersion.Current(),
-        Console.Error,
-        TrayShell.RunMenuBar,
-        () => LegacyAppBundle.RemoveSuperseded(
-            LegacyAppBundle.ContainingApp(AppContext.BaseDirectory), Console.Error.WriteLine));
+    private static int Main(string[] args)
+    {
+        // BEFORE anything else, and before AppKit is touched at all: this same binary is
+        // re-invoked as its own parent-death watchdog (ADR-0024), and that invocation must not
+        // build a menu bar, read settings or claim a status item. It waits for the tray to die
+        // and kills the process group — see ParentDeathWatch.
+        if (ReapRequest.Parse(args) is { } reap)
+            return ParentDeathWatch.Run(reap, Console.Error);
+
+        return Run(
+            MacOSProductVersion.Current(),
+            Console.Error,
+            TrayShell.RunMenuBar,
+            () => LegacyAppBundle.RemoveSuperseded(
+                LegacyAppBundle.ContainingApp(AppContext.BaseDirectory), Console.Error.WriteLine));
+    }
 
     /// <summary>The launch decision, with the ambient read, the output stream and the launch itself
     /// passed in so it can be driven for a macOS this box is not running and without AppKit, which

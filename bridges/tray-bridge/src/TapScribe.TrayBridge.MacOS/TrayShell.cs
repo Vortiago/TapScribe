@@ -38,6 +38,9 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
     private NSStatusItem? _statusItem;
     private BridgeRuntime? _runtime;
+    /// <summary>The Recorder section, or null on a bridge-only install — in which case the
+    /// menu is exactly what it was before the host role existed (ADR-0022).</summary>
+    private MacTrayHost? _host;
     private SettingsWindow? _settingsWindow;
     private bool _uiReleased;
 
@@ -84,6 +87,19 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _menu.AddItem(_connect);
         _menu.AddItem(_disconnect);
         _menu.AddItem(_pastMeetings);
+
+        // The host role's own section, when this install carries a payload (ADR-0022). Between
+        // the tap commands and Settings/Quit: it is a different lifecycle, and the separator it
+        // brings with it says so. TryAttach answers null for a bridge-only tray, and then not one
+        // item of this is added — which is what makes that menu byte-identical to the one before
+        // the role existed.
+        _host = MacTrayHost.TryAttach(_dispatcher.Post, ShowNotice);
+        if (_host is not null)
+        {
+            foreach (NSMenuItem item in _host.MenuItems)
+                _menu.AddItem(item);
+        }
+
         _menu.AddItem(NSMenuItem.SeparatorItem);
         _menu.AddItem(settings);
         _menu.AddItem(quit);
@@ -128,6 +144,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         var runtime = new BridgeRuntime(this, _dispatcher, _deps, _deps.SettingsStore.Load());
         _runtime = runtime;
         runtime.Startup(); // resume a pipeline a previous session left running
+
+        // After the Bridge half, deliberately: the tap state is what the operator watches, and
+        // the host role's first act may be a 300 MB runtime copy (ADR-0024). Its own Startup
+        // does that off the main thread, so this returns to the run loop either way.
+        _host?.Startup();
     }
 
     // ---- ITrayView ----------------------------------------------------------------------
@@ -361,5 +382,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             NSStatusBar.SystemStatusBar.RemoveStatusItem(_statusItem);
             _statusItem = null;
         }
+
+        // LAST, and not for tidiness: disposing the host role stops the Recorder it started
+        // and then signals the process group this process is itself in (ProcessGroupReaper).
+        // Anything sequenced after it may not run.
+        _host?.Dispose();
+        _host = null;
     }
 }

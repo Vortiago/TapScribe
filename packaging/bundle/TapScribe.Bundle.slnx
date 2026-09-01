@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/TapScribe.Bundle.Core/TapScribe.Bundle.Core.csproj" />
+    <Project Path="src/TapScribe.Bundle.MacOS/TapScribe.Bundle.MacOS.csproj" />
     <Project Path="src/TapScribe.Bundle.Windows/TapScribe.Bundle.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">

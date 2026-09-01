@@ -738,6 +738,17 @@ jobs:
       - name: Build + test bundle-core only
         run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
 
+      # Both platform halves COMPILE here, which is the whole reason neither carries a
+      # platform TFM: a DllImport into kernel32 or libc needs none. Nothing referenced by
+      # Bundle.Core.Tests reaches them, so without this step the macOS reaper's only
+      # compile gate would be the one CI job that can build the macOS shell — and the
+      # Windows one's would be the windows job. A build, not a test: their behaviour is
+      # kernel behaviour, asserted where the kernel is.
+      - name: Compile both platform reapers
+        run: |
+          dotnet build packaging/bundle/src/TapScribe.Bundle.MacOS/TapScribe.Bundle.MacOS.csproj -c Release
+          dotnet build packaging/bundle/src/TapScribe.Bundle.Windows/TapScribe.Bundle.Windows.csproj -c Release
+
   # Builds the Bundle solution on its native OS: the cross-platform Core (already
   # tested above) plus the Windows reaper, whose kernel behaviour only Windows can
   # answer for. The release `bundle` job runs on a tag only, so without this a

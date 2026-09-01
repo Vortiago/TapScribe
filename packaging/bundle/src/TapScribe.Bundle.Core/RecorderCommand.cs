@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 
 namespace TapScribe.Bundle.Core;
 
@@ -90,6 +91,34 @@ public static class RecorderCommand
             layout.Pythonw,
             new[] { "-m", "tapscribe", "--install-spec", Absolute(wheelPath) },
             EnvironmentFor(layout));
+    }
+
+    /// <summary>
+    /// <c>&lt;the tray itself&gt; --reap-group &lt;tray pid&gt; &lt;group&gt;</c> — the macOS
+    /// watchdog (ADR-0024), which waits for the tray to exit and then kills the process
+    /// group its children are in.
+    ///
+    /// Here rather than built at the call site for the reason every other argv in this repo
+    /// is: list form, one owner, nothing interpolated into a shell string (CLAUDE.md). It
+    /// carries NO environment overlay — the watchdog reads no config, resolves no paths, and
+    /// must not inherit a <c>TAPSCRIBE_BASE_DIR</c> that would make it look like a Recorder.
+    /// </summary>
+    /// <param name="trayExecutable">The tray's own binary; the watchdog is a second
+    /// invocation of it, so there is no separate thing to sign, install or lose.</param>
+    public static BundleProcess Watchdog(string trayExecutable, ReapRequest request)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(trayExecutable);
+        ArgumentNullException.ThrowIfNull(request);
+
+        return new BundleProcess(
+            trayExecutable,
+            new[]
+            {
+                ReapRequest.Flag,
+                request.TrayPid.ToString(CultureInfo.InvariantCulture),
+                request.GroupId.ToString(CultureInfo.InvariantCulture),
+            },
+            new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.Ordinal)));
     }
 
     private static string Absolute(string wheelPath) => Path.GetFullPath(wheelPath.Trim());
