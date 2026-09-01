@@ -57,9 +57,14 @@ public sealed class JobObject : IProcessReaper
 
     /// <summary>
     /// True when the tray itself is in the job, so every process it spawns is placed
-    /// there by the kernel and no per-child assignment is needed (nor wanted — assigning
-    /// a process that is already a member fails). False means the caller must fall back
-    /// to <see cref="Adopt"/> for each child it starts.
+    /// there by the kernel and no per-child assignment is needed. False means the caller
+    /// must fall back to <see cref="Adopt"/> for each child it starts.
+    ///
+    /// Not because a redundant <see cref="Adopt"/> would FAIL — since Windows 8 a process
+    /// may belong to nested jobs and re-assigning one to a job it is already in succeeds
+    /// (<c>Adopt_IsAcceptedForAProcessAlreadyInTheJob</c>). The reason is the race the type
+    /// docs open with: per-child assignment cannot cover a grandchild forked before it
+    /// lands.
     /// </summary>
     public bool CoversChildrenByInheritance { get; }
 
