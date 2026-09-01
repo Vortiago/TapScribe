@@ -61,7 +61,7 @@ internal sealed class TrayHost : IHostView, IDisposable
             if (!BundleLayout.HostPayloadPresent(program))
                 return null;
 
-            BundleLayout layout = BundleLayout.Resolve(
+            BundleLayout layout = BundleLayout.ForWindows(
                 program, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
             return new TrayHost(layout, post, notify);
         }

@@ -14,8 +14,16 @@ namespace TapScribe.Bundle.Core.Tests;
 /// </summary>
 public class BundleLayoutTests
 {
+    /// <summary>Where a macOS <c>.app</c> carries its read-only payload. Three things have
+    /// to agree on it — this layout, the tray's role probe, and the package script — so it
+    /// is written out once here rather than derived.</summary>
+    private const string MacPayload = "/Applications/TapScribe.app/Contents/Resources";
+
     private static BundleLayout Layout(string program = "/opt/prog", string profile = "/home/op") =>
-        BundleLayout.Resolve(program, profile);
+        BundleLayout.ForWindows(program, profile);
+
+    private static BundleLayout MacLayout(string version = "1.3.0") =>
+        BundleLayout.ForMacOS(MacPayload, "/Users/op", version);
 
     [Fact]
     public void Resolve_PutsTheEmbeddedInterpreterUnderTheProgramDirectory()
@@ -40,7 +48,7 @@ public class BundleLayoutTests
         // %USERPROFILE%\TapScribe — never under the program dir (ADR-0015: an
         // uninstall must not be able to delete recordings).
         Assert.Equal(Path.Join("/home/op", "TapScribe"), layout.DataDirectory);
-        Assert.DoesNotContain(layout.ProgramDirectory, layout.DataDirectory, StringComparison.Ordinal);
+        Assert.DoesNotContain(layout.PayloadDirectory, layout.DataDirectory, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -66,9 +74,9 @@ public class BundleLayoutTests
         // pip runs with a different cwd than the tray, so every path handed
         // onward has to be absolute (install_target.resolve_install_spec absolutises
         // the wheel too, but a relative TAPSCRIBE_BASE_DIR would silently follow cwd).
-        BundleLayout layout = BundleLayout.Resolve("prog", "profile");
+        BundleLayout layout = BundleLayout.ForWindows("prog", "profile");
 
-        Assert.True(Path.IsPathRooted(layout.ProgramDirectory));
+        Assert.True(Path.IsPathRooted(layout.PayloadDirectory));
         Assert.True(Path.IsPathRooted(layout.DataDirectory));
         Assert.True(Path.IsPathRooted(layout.Python));
     }
@@ -80,8 +88,8 @@ public class BundleLayoutTests
     public void Resolve_RejectsABlankDirectory(string? blank)
     {
         // ThrowsAny: null surfaces as ArgumentNullException, a derived type.
-        Assert.ThrowsAny<ArgumentException>(() => BundleLayout.Resolve(blank!, "/home/op"));
-        Assert.ThrowsAny<ArgumentException>(() => BundleLayout.Resolve("/opt/prog", blank!));
+        Assert.ThrowsAny<ArgumentException>(() => BundleLayout.ForWindows(blank!, "/home/op"));
+        Assert.ThrowsAny<ArgumentException>(() => BundleLayout.ForWindows("/opt/prog", blank!));
     }
 
     // ---- wheel resolution -------------------------------------------------
@@ -156,9 +164,9 @@ public class BundleLayoutTests
         // The bridge-only artifact: the same tray executable, with nothing beside it. Its
         // menu must be exactly what it was before the host role existed.
         using var dir = new TempDir();
-        Directory.CreateDirectory(dir.Layout().ProgramDirectory);
+        Directory.CreateDirectory(dir.Layout().PayloadDirectory);
 
-        Assert.False(BundleLayout.HostPayloadPresent(dir.Layout().ProgramDirectory));
+        Assert.False(BundleLayout.HostPayloadPresent(dir.Layout().PayloadDirectory));
     }
 
     [Fact]
@@ -168,7 +176,7 @@ public class BundleLayoutTests
         dir.Wheel("tapscribe-1.0.0-py3-none-any.whl");
         Directory.CreateDirectory(dir.Layout().PythonDirectory);
 
-        Assert.True(BundleLayout.HostPayloadPresent(dir.Layout().ProgramDirectory));
+        Assert.True(BundleLayout.HostPayloadPresent(dir.Layout().PayloadDirectory));
     }
 
     [Fact]
@@ -181,11 +189,11 @@ public class BundleLayoutTests
         // the same bug with the halves swapped.
         using var wheelOnly = new TempDir();
         wheelOnly.Wheel("tapscribe-1.0.0-py3-none-any.whl");
-        Assert.True(BundleLayout.HostPayloadPresent(wheelOnly.Layout().ProgramDirectory));
+        Assert.True(BundleLayout.HostPayloadPresent(wheelOnly.Layout().PayloadDirectory));
 
         using var pythonOnly = new TempDir();
         Directory.CreateDirectory(pythonOnly.Layout().PythonDirectory);
-        Assert.True(BundleLayout.HostPayloadPresent(pythonOnly.Layout().ProgramDirectory));
+        Assert.True(BundleLayout.HostPayloadPresent(pythonOnly.Layout().PayloadDirectory));
     }
 
     [Fact]
@@ -197,7 +205,7 @@ public class BundleLayoutTests
         Directory.CreateDirectory(dir.Layout().PythonDirectory);
         BundleLayout layout = dir.Layout();
 
-        Assert.True(BundleLayout.HostPayloadPresent(layout.ProgramDirectory));
+        Assert.True(BundleLayout.HostPayloadPresent(layout.PayloadDirectory));
         Assert.Throws<BundleLayoutException>(() => layout.ResolveWheel());
     }
 
@@ -207,7 +215,7 @@ public class BundleLayoutTests
             Path.GetTempPath(), "tapscribe-bundle-" + Guid.NewGuid().ToString("n"));
 
         public BundleLayout Layout() =>
-            BundleLayout.Resolve(Path.Join(_root, "program"), Path.Join(_root, "profile"));
+            BundleLayout.ForWindows(Path.Join(_root, "program"), Path.Join(_root, "profile"));
 
         public string Wheel(string name)
         {
@@ -223,5 +231,119 @@ public class BundleLayoutTests
             if (Directory.Exists(_root))
                 Directory.Delete(_root, recursive: true);
         }
+    }
+
+    [Fact]
+    public void ForMacOS_PutsTheDataRootUnderApplicationSupport()
+    {
+        // ADR-0024. Bridge.MacOS/TrayStores already keeps the tray's settings here, so
+        // settings, recordings/, config/, .auth-password, .tap-token and the runtime share
+        // one folder: one thing to back up, one to delete, and a bridge-only operator who
+        // later installs the Bundle keeps their settings. Never ~/Documents, ~/Desktop or
+        // ~/Downloads, which are TCC-protected.
+        BundleLayout layout = MacLayout();
+
+        Assert.Equal(
+            Path.Join("/Users/op", "Library", "Application Support", "TapScribe"),
+            layout.DataDirectory);
+    }
+
+    [Fact]
+    public void ForMacOS_TargetsPipAtACopyOutsideTheApp()
+    {
+        // The decision the whole ADR turns on: /setup pip-installs at runtime and writing
+        // inside a signed .app invalidates its signature, so nothing pip touches may live
+        // under the payload.
+        BundleLayout layout = MacLayout();
+
+        Assert.True(layout.RuntimeIsACopy);
+        Assert.Equal(
+            Path.Join(layout.DataDirectory, "runtime", "1.3.0"), layout.RuntimeDirectory);
+        Assert.StartsWith(layout.DataDirectory, layout.PythonDirectory, StringComparison.Ordinal);
+        Assert.StartsWith(layout.DataDirectory, layout.WheelDirectory, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ForMacOS_ReadsThePayloadFromInsideTheApp()
+    {
+        // The copy's SOURCE, and the only two paths that may point into the bundle.
+        BundleLayout layout = MacLayout();
+
+        Assert.Equal(Path.Join(MacPayload, "python"), layout.PayloadPythonDirectory);
+        Assert.Equal(Path.Join(MacPayload, "wheel"), layout.PayloadWheelDirectory);
+    }
+
+    [Fact]
+    public void ForMacOS_UsesThePosixInterpreterAndHasNoSeparateWindowlessOne()
+    {
+        // python-build-standalone's install_only tree is POSIX-shaped on macOS: bin/python3,
+        // with the console-script entry points beside it. And there is no pythonw twin —
+        // a child of a GUI app gets no terminal to begin with — so Pythonw is deliberately
+        // the same binary rather than a second name that would have to exist.
+        BundleLayout layout = MacLayout();
+
+        Assert.Equal(Path.Join(layout.PythonDirectory, "bin", "python3"), layout.Python);
+        Assert.Equal(layout.Python, layout.Pythonw);
+    }
+
+    [Fact]
+    public void ForMacOS_StampsTheRuntimeWithTheVersionSoAnUpgradeRecopies()
+    {
+        // Without the stamp, installing 1.4 over a runtime copied from 1.3 leaves the
+        // installer saying 1.4 while the Recorder serves 1.3 — drift ResolveWheel cannot
+        // catch, because the stale runtime holds exactly one (wrong) wheel.
+        Assert.NotEqual(MacLayout("1.3.0").RuntimeDirectory, MacLayout("1.4.0").RuntimeDirectory);
+    }
+
+    [Theory]
+    [InlineData("../../../etc")]
+    [InlineData("1.3.0/../../evil")]
+    [InlineData("..")]
+    public void ForMacOS_CannotBeSteeredOutOfTheRuntimeRootByAVersion(string version)
+    {
+        // The version reaching a macOS build is whatever `-p:Version=` was given — a git
+        // tag, and therefore external text — and it becomes a directory name under the
+        // operator's home. Reduced to one safe segment rather than trusted.
+        BundleLayout layout = MacLayout(version);
+
+        Assert.Equal(
+            Path.GetFullPath(layout.RuntimeRoot),
+            Path.GetFullPath(Path.Join(layout.RuntimeDirectory, "..")));
+    }
+
+    [Fact]
+    public void ForMacOS_TellsAMacOperatorHowToRepairAMacInstall()
+    {
+        // "reinstall from TapScribe-Setup-win-x64.exe" is worse than saying nothing to
+        // someone holding a .pkg.
+        Assert.Contains("osx-arm64.pkg", MacLayout().ReinstallAdvice, StringComparison.Ordinal);
+        Assert.Contains("win-x64.exe", Layout().ReinstallAdvice, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MacOSPayload_ClimbsToContentsResourcesFromWhereverTheAssembliesSit()
+    {
+        // The SDK has moved managed assemblies between Contents/MonoBundle and
+        // Contents/MacOS before, and a wrong guess reads downstream as "no host payload" —
+        // a Bundle silently demoted to a bridge-only tray.
+        string expected = Path.Join("/Applications/TapScribe.app", "Contents", "Resources");
+
+        Assert.Equal(
+            expected,
+            BundleLayout.MacOSPayload("/Applications/TapScribe.app/Contents/MonoBundle"));
+        Assert.Equal(
+            expected,
+            BundleLayout.MacOSPayload("/Applications/TapScribe.app/Contents/MacOS"));
+    }
+
+    [Fact]
+    public void MacOSPayload_AnswersAMissingFolderRatherThanThrowingOutsideABundle()
+    {
+        // `dotnet run`, or a test host: there is no Contents above. The caller's very next
+        // step is the role probe, and "no host payload" is the right answer there — a throw
+        // would take down a tray that has a perfectly good bridge role.
+        string payload = BundleLayout.MacOSPayload("/tmp/not-a-bundle");
+
+        Assert.False(BundleLayout.HostPayloadPresent(payload));
     }
 }

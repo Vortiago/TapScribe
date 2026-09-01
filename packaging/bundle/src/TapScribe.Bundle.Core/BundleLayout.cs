@@ -9,21 +9,38 @@ public sealed class BundleLayoutException : Exception
     public BundleLayoutException(string message) : base(message) { }
 }
 
+/// <summary>Which platform's Bundle this is. The two differ in three ways and no more:
+/// where the payload ships, where pip may write, and what the interpreter is called.</summary>
+public enum BundleShape
+{
+    Windows,
+    MacOS,
+}
+
 /// <summary>
-/// Where everything in a Windows <b>Bundle</b> lives (ADR-0015), resolved from just two
-/// inputs: the directory the tray exe sits in, and the operator's user profile.
+/// Where everything in a <b>Bundle</b> lives (ADR-0015, ADR-0024), resolved from the
+/// directory the tray ships in and the operator's home.
 ///
-/// Two roots, deliberately separate:
+/// Three roots, and the split between the first two is the whole of what macOS added:
 /// <list type="bullet">
-///   <item><b>Program</b> (<c>%LOCALAPPDATA%\Programs\TapScribe</c>) — the embedded
-///   CPython and the shipped <c>tapscribe-*.whl</c>. Per-user, because <c>/setup</c>
-///   pip-installs into that interpreter at runtime and so it must be writable without
-///   elevation.</item>
-///   <item><b>Data</b> (<c>%USERPROFILE%\TapScribe</c>) — what
-///   <c>TAPSCRIBE_BASE_DIR</c> points at: recordings, config, <c>.auth-password</c>, and
-///   the host role's own logs. Outside the program dir so an uninstall cannot delete
-///   someone's meetings.</item>
+///   <item><b>Payload</b> — the embedded CPython and the shipped <c>tapscribe-*.whl</c>,
+///   AS SHIPPED. Read-only on macOS (writing inside a signed <c>.app</c> invalidates its
+///   signature — ADR-0024), and on Windows simply the folder the exe sits in.</item>
+///   <item><b>Runtime</b> — the interpreter pip actually targets: <c>/setup</c>'s model
+///   backends and preflight's repairs both install into it. On Windows that IS the
+///   payload, which is why the Bundle installs per-user under
+///   <c>%LOCALAPPDATA%\Programs\TapScribe</c> rather than into Program Files. On macOS it
+///   is a version-stamped COPY under the data root, which <see cref="RuntimeCopy"/>
+///   makes.</item>
+///   <item><b>Data</b> — what <c>TAPSCRIBE_BASE_DIR</c> points at: recordings, config,
+///   <c>.auth-password</c>, and the host role's own logs. Outside the payload so an
+///   uninstall cannot delete someone's meetings.</item>
 /// </list>
+///
+/// Everything downstream — <see cref="RecorderCommand"/>, preflight, <c>/setup</c> —
+/// reads <see cref="Python"/> and <see cref="WheelDirectory"/> and therefore targets the
+/// runtime WITHOUT knowing either platform's story. That is the point of the split: the
+/// macOS copy is a fact about this type, not a branch anyone else carries.
 ///
 /// Path construction only — the sole disk access is <see cref="ResolveWheel"/>, which
 /// has to look at what actually shipped. Everything uses <see cref="Path.Join"/>
@@ -36,16 +53,18 @@ public sealed class BundleLayoutException : Exception
 public sealed record BundleLayout
 {
     /// <summary>
-    /// The interpreter folder inside the program dir: a relocatable
-    /// python-build-standalone install with TapScribe's core deps already pip-installed
-    /// into it, which <c>/setup</c> then installs model backends into at runtime.
+    /// The interpreter folder inside the payload — and, once copied, inside the runtime: a
+    /// relocatable python-build-standalone install with TapScribe's core deps already
+    /// pip-installed into it, which <c>/setup</c> then installs model backends into at
+    /// runtime.
     /// </summary>
     public const string PythonFolder = "python";
 
-    /// <summary>The folder inside the program dir carrying the single shipped wheel.</summary>
+    /// <summary>The folder carrying the single shipped wheel.</summary>
     public const string WheelFolder = "wheel";
 
-    /// <summary>The data dir's name under the user profile — also the Windows installer's app name.</summary>
+    /// <summary>The data dir's name under the operator's home — also the Windows
+    /// installer's app name and the macOS bundle's folder under Application Support.</summary>
     public const string DataFolder = "TapScribe";
 
     /// <summary>The host role's log folder inside the data dir.</summary>
@@ -57,35 +76,91 @@ public sealed record BundleLayout
     /// <summary>The Recorder's dashboard password file (<c>config.AUTH_PASSWORD_FILE</c>).</summary>
     public const string PasswordFileName = ".auth-password";
 
-    private BundleLayout(string programDirectory, string dataDirectory)
+    /// <summary>Holds the macOS runtime copies, one folder per version (ADR-0024).</summary>
+    public const string RuntimeFolder = "runtime";
+
+    /// <summary>Where a macOS <c>.app</c> carries read-only payload, and where the
+    /// <c>.pkg</c> stages the interpreter and the wheel. Named once, because three things
+    /// have to agree on it: this layout, the tray's role probe, and the package script.</summary>
+    public const string ResourcesFolder = "Resources";
+
+    /// <summary>The <c>.app</c> subfolder every bundle has, which
+    /// <see cref="MacOSPayload"/> climbs to.</summary>
+    private const string ContentsFolder = "Contents";
+
+    /// <summary>What macOS calls the per-user application data root. Two segments, joined
+    /// rather than written with a separator, so the Core stays testable off macOS.</summary>
+    private static readonly string[] ApplicationSupport = ["Library", "Application Support"];
+
+    private BundleLayout(BundleShape shape, string payloadDirectory, string dataDirectory, string runtimeDirectory)
     {
-        ProgramDirectory = programDirectory;
+        Shape = shape;
+        PayloadDirectory = payloadDirectory;
         DataDirectory = dataDirectory;
+        RuntimeDirectory = runtimeDirectory;
     }
 
-    /// <summary>Where the tray exe lives; carries the interpreter and the wheel.</summary>
-    public string ProgramDirectory { get; }
+    /// <summary>Which platform's Bundle this is.</summary>
+    public BundleShape Shape { get; }
+
+    /// <summary>Where the payload ships: beside the tray exe on Windows, inside the
+    /// <c>.app</c> on macOS. The <see cref="HostPayloadPresent"/> probe's target, and the
+    /// SOURCE a macOS runtime copy reads from.</summary>
+    public string PayloadDirectory { get; }
 
     /// <summary>What <c>TAPSCRIBE_BASE_DIR</c> is set to.</summary>
     public string DataDirectory { get; }
 
-    public string PythonDirectory => Path.Join(ProgramDirectory, PythonFolder);
+    /// <summary>The interpreter root every pip run targets. Equal to
+    /// <see cref="PayloadDirectory"/> on Windows; a version-stamped copy under
+    /// <see cref="DataDirectory"/> on macOS.</summary>
+    public string RuntimeDirectory { get; }
+
+    /// <summary>Whether the runtime is a copy that has to exist before anything can run —
+    /// true on macOS only. What the tray's first launch branches on.</summary>
+    public bool RuntimeIsACopy => !string.Equals(RuntimeDirectory, PayloadDirectory, StringComparison.Ordinal);
+
+    public string PythonDirectory => Path.Join(RuntimeDirectory, PythonFolder);
 
     /// <summary>
     /// Console interpreter — used for blocking, logged steps like preflight.
     ///
-    /// At the ROOT of the interpreter folder, not under <c>Scripts\</c>: the Bundle
-    /// ships a python-build-standalone <c>install_only</c> distribution installed to
-    /// <c>{app}\python</c> and pip-installs into it directly, so there is no venv and no
-    /// <c>Scripts\python.exe</c>. (<c>Scripts\</c> exists, but holds console-script entry
-    /// points like <c>pip.exe</c> and <c>whisperlivekit-server.exe</c>.)
+    /// At the ROOT of the interpreter folder on Windows, not under <c>Scripts\</c>: the
+    /// Bundle ships a python-build-standalone <c>install_only</c> distribution and
+    /// pip-installs into it directly, so there is no venv and no <c>Scripts\python.exe</c>.
+    /// (<c>Scripts\</c> exists, but holds console-script entry points like <c>pip.exe</c>
+    /// and <c>whisperlivekit-server.exe</c>.) The same distribution on macOS is
+    /// POSIX-shaped, so the interpreter is <c>bin/python3</c> and the entry points are
+    /// beside it in <c>bin/</c>.
     /// </summary>
-    public string Python => Path.Join(PythonDirectory, "python.exe");
+    public string Python => Shape == BundleShape.Windows
+        ? Path.Join(PythonDirectory, "python.exe")
+        : Path.Join(PythonDirectory, "bin", "python3");
 
-    /// <summary>Windowless interpreter — used for the long-lived Recorder so no console flashes.</summary>
-    public string Pythonw => Path.Join(PythonDirectory, "pythonw.exe");
+    /// <summary>
+    /// The interpreter for the long-lived Recorder.
+    ///
+    /// Windowless on Windows, so no console flashes and none stays open. macOS has no
+    /// such pair — a child of a GUI app gets no terminal to begin with — so this is
+    /// deliberately the SAME binary there rather than a second name that would have to
+    /// exist. Callers do not branch; that is why the property survives on both.
+    /// </summary>
+    public string Pythonw => Shape == BundleShape.Windows
+        ? Path.Join(PythonDirectory, "pythonw.exe")
+        : Python;
 
-    public string WheelDirectory => Path.Join(ProgramDirectory, WheelFolder);
+    public string WheelDirectory => Path.Join(RuntimeDirectory, WheelFolder);
+
+    /// <summary>The interpreter as SHIPPED — the copy's source. Only
+    /// <see cref="RuntimeCopy"/> has business with it.</summary>
+    public string PayloadPythonDirectory => Path.Join(PayloadDirectory, PythonFolder);
+
+    /// <summary>The wheel as SHIPPED — the copy's source.</summary>
+    public string PayloadWheelDirectory => Path.Join(PayloadDirectory, WheelFolder);
+
+    /// <summary>Where the version-stamped runtime copies live. Empty on Windows, which
+    /// has none.</summary>
+    public string RuntimeRoot => Path.Join(DataDirectory, RuntimeFolder);
 
     public string PasswordFile => Path.Join(DataDirectory, PasswordFileName);
 
@@ -93,19 +168,105 @@ public sealed record BundleLayout
 
     public string LogFile => Path.Join(LogDirectory, LogFileName);
 
+    /// <summary>What to tell an operator whose install is broken. Platform-specific
+    /// because the two are repaired by downloading different files, and "reinstall from
+    /// TapScribe-Setup-win-x64.exe" on a Mac is worse than saying nothing.</summary>
+    public string ReinstallAdvice => Shape == BundleShape.Windows
+        ? "reinstall from a freshly downloaded TapScribe-Setup-win-x64.exe."
+        : "reinstall from a freshly downloaded TapScribe-Bundle-osx-arm64.pkg.";
+
     /// <summary>
-    /// Resolve the layout from the tray's own directory and the user profile.
+    /// Resolve the Windows layout from the tray's own directory and the user profile.
     /// Both are made absolute: pip and the Recorder run with a different cwd than the
     /// tray, so a relative path handed onward would silently follow theirs.
+    ///
+    /// Payload and runtime are the SAME folder here, which is exactly why the Windows
+    /// Bundle installs per-user: <c>/setup</c> pip-installs into the shipped interpreter,
+    /// so it has to be writable without elevation (ADR-0015).
     /// </summary>
-    public static BundleLayout Resolve(string programDirectory, string userProfileDirectory)
+    public static BundleLayout ForWindows(string programDirectory, string userProfileDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(programDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(userProfileDirectory);
 
+        string payload = Path.GetFullPath(programDirectory);
         return new BundleLayout(
-            Path.GetFullPath(programDirectory),
-            Path.GetFullPath(Path.Join(userProfileDirectory, DataFolder)));
+            BundleShape.Windows,
+            payload,
+            Path.GetFullPath(Path.Join(userProfileDirectory, DataFolder)),
+            payload);
+    }
+
+    /// <summary>
+    /// Resolve the macOS layout: read-only payload inside the <c>.app</c>, data under
+    /// <c>~/Library/Application Support/TapScribe</c>, and the runtime a copy stamped with
+    /// the <c>.app</c>'s version (ADR-0024).
+    ///
+    /// The version is passed rather than read here because <c>Bundle.Core</c> has no
+    /// bundle to read it from — the shell knows its own, and a Core that guessed would be
+    /// untestable on the Linux leg that covers everything else in this type.
+    /// </summary>
+    /// <param name="payloadDirectory">Normally <see cref="MacOSPayload"/> of the running
+    /// assembly's directory.</param>
+    /// <param name="homeDirectory">The operator's home, NOT the data root.</param>
+    /// <param name="version">The <c>.app</c>'s version. An upgrade changes it, which is
+    /// what makes the runtime re-copy rather than serve the previous release's wheel.</param>
+    public static BundleLayout ForMacOS(string payloadDirectory, string homeDirectory, string version)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(homeDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+
+        string data = Path.GetFullPath(
+            Path.Join(Path.Join(homeDirectory, Path.Join(ApplicationSupport)), DataFolder));
+        return new BundleLayout(
+            BundleShape.MacOS,
+            Path.GetFullPath(payloadDirectory),
+            data,
+            Path.Join(data, RuntimeFolder, SafeStamp(version)));
+    }
+
+    /// <summary>
+    /// The read-only payload folder inside a macOS <c>.app</c>, from the directory the
+    /// running assemblies sit in (<c>Contents/MonoBundle</c> for a <c>net*-macos</c> app).
+    ///
+    /// Climbs to <c>Contents</c> rather than assuming <c>MonoBundle</c>: the SDK has moved
+    /// managed assemblies between <c>Contents/MonoBundle</c> and <c>Contents/MacOS</c>
+    /// before, and a wrong guess here reads downstream as "no host payload" — a Bundle
+    /// silently demoted to a bridge-only tray, which is the same failure
+    /// <see cref="HostPayloadPresent"/>'s OR exists to prevent.
+    ///
+    /// Answers a path that simply will not exist when there is no <c>Contents</c> above
+    /// (a <c>dotnet run</c>, a test host) rather than throwing: the caller's very next
+    /// step is the role probe, and "no" is the right answer there.
+    /// </summary>
+    public static string MacOSPayload(string baseDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(baseDirectory);
+
+        string full = Path.GetFullPath(baseDirectory);
+        for (DirectoryInfo? dir = new(full); dir is not null; dir = dir.Parent)
+        {
+            if (string.Equals(dir.Name, ContentsFolder, StringComparison.Ordinal))
+                return Path.Join(dir.FullName, ResourcesFolder);
+        }
+
+        return Path.Join(full, ResourcesFolder);
+    }
+
+    /// <summary>
+    /// A version reduced to what may safely be ONE path segment. The stamp becomes a
+    /// directory name under the data root, and the version reaching a macOS build is
+    /// whatever <c>-p:Version=</c> was given — a tag, and therefore external text. Anything
+    /// that is not alphanumeric, dot, dash or underscore becomes a dash, so no separator
+    /// and no <c>..</c> can steer the copy out of <see cref="RuntimeRoot"/>.
+    /// </summary>
+    private static string SafeStamp(string version)
+    {
+        char[] safe = version.Select(
+            c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '-').ToArray();
+        string stamp = new string(safe).Trim('.', '-');
+        return stamp.Length == 0 ? "unknown" : stamp;
     }
 
     /// <summary>
@@ -114,7 +275,11 @@ public sealed record BundleLayout
     /// setting anyone can misconfigure: the same tray executable ships in the bridge-only
     /// artifact and in the Bundle, and this is the whole difference between them.
     ///
-    /// Deliberately NOT "does <see cref="Resolve"/> succeed" — that is pure path
+    /// Asked of the PAYLOAD, never the runtime: on macOS the runtime does not exist until
+    /// the first launch has copied it, so a runtime-based probe would answer "bridge-only"
+    /// to every Bundle exactly once — on the launch that was supposed to do the copying.
+    ///
+    /// Deliberately NOT "does <see cref="ForWindows"/> succeed" — that is pure path
     /// construction and probes nothing — and NOT "does <see cref="ResolveWheel"/> return"
     /// — that is designed to THROW on a packaging bug the operator must see. Folded into a
     /// boolean role probe, a Bundle whose <c>wheel/</c> was wiped would silently degrade
@@ -126,10 +291,10 @@ public sealed record BundleLayout
     /// <see cref="ResolveWheel"/>'s errors — and a missing interpreter — stay loud INSIDE
     /// it, which is where they belong.
     /// </summary>
-    public static bool HostPayloadPresent(string programDirectory)
+    public static bool HostPayloadPresent(string payloadDirectory)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(programDirectory);
-        string root = Path.GetFullPath(programDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
+        string root = Path.GetFullPath(payloadDirectory);
         return Directory.Exists(Path.Join(root, PythonFolder))
             || Directory.Exists(Path.Join(root, WheelFolder));
     }
@@ -150,7 +315,7 @@ public sealed record BundleLayout
         if (!Directory.Exists(dir))
             throw new BundleLayoutException(
                 $"the Bundle's wheel folder is missing: {dir}. This build of TapScribe is " +
-                "incomplete — reinstall from a freshly downloaded TapScribe-Setup-win-x64.exe.");
+                $"incomplete — {ReinstallAdvice}");
 
         string[] wheels = Directory.GetFiles(dir, "*.whl", SearchOption.TopDirectoryOnly);
         Array.Sort(wheels, StringComparer.Ordinal);
@@ -161,12 +326,11 @@ public sealed record BundleLayout
         if (wheels.Length == 0)
             throw new BundleLayoutException(
                 $"no TapScribe wheel found in {dir}. This build of TapScribe is incomplete — " +
-                "reinstall from a freshly downloaded TapScribe-Setup-win-x64.exe.");
+                ReinstallAdvice);
 
         string names = string.Join(", ", wheels.Select(Path.GetFileName));
         throw new BundleLayoutException(
             $"expected exactly one TapScribe wheel in {dir} but found {wheels.Length}: {names}. " +
-            "Refusing to guess which version to install — remove the stale one, or reinstall " +
-            "from a freshly downloaded TapScribe-Setup-win-x64.exe.");
+            $"Refusing to guess which version to install — remove the stale one, or {ReinstallAdvice}");
     }
 }

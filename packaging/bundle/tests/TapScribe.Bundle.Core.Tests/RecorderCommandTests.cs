@@ -9,7 +9,7 @@ namespace TapScribe.Bundle.Core.Tests;
 /// </summary>
 public class RecorderCommandTests
 {
-    private static readonly BundleLayout Layout = BundleLayout.Resolve("/opt/prog", "/home/op");
+    private static readonly BundleLayout Layout = BundleLayout.ForWindows("/opt/prog", "/home/op");
     private const string Wheel = "/opt/prog/wheel/tapscribe-1.0.0-py3-none-any.whl";
 
     [Fact]
@@ -71,7 +71,7 @@ public class RecorderCommandTests
         // CLAUDE.md: subprocess argv is always the list form — never an f-string,
         // never shell=True. Each token stands alone even when it contains spaces.
         BundleProcess cmd = RecorderCommand.Recorder(
-            BundleLayout.Resolve("/opt/Program Files/TapScribe", "/home/op"),
+            BundleLayout.ForWindows("/opt/Program Files/TapScribe", "/home/op"),
             "/opt/Program Files/TapScribe/wheel/tapscribe-1.0.0-py3-none-any.whl");
 
         Assert.Equal(4, cmd.Arguments.Count);

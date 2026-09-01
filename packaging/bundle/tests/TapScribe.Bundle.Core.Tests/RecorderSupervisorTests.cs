@@ -243,7 +243,7 @@ public class RecorderSupervisorTests
 
         private RecorderSupervisor Build()
         {
-            BundleLayout layout = BundleLayout.Resolve(
+            BundleLayout layout = BundleLayout.ForWindows(
                 Path.Join(_root, "program"), Path.Join(_root, "profile"));
             if (ShipWheel)
             {

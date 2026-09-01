@@ -69,7 +69,7 @@ public sealed class RecorderSupervisor : IRecorderHost
         _reaper = reaper;
         _log = log;
         _onState = onState;
-        _spawn = spawn ?? (command => ChildProcess.Start(command, layout.ProgramDirectory, log));
+        _spawn = spawn ?? (command => ChildProcess.Start(command, layout.RuntimeDirectory, log));
         _recorderAnswers = recorderAnswers ?? (() => false);
     }
 
@@ -143,7 +143,10 @@ public sealed class RecorderSupervisor : IRecorderHost
             return;
         }
 
-        _log($"program dir: {_layout.ProgramDirectory}");
+        // Runtime, not payload: this is the interpreter pip will target, which on macOS is
+        // the copy rather than what shipped (ADR-0024). A log naming the .app would send
+        // whoever reads it to a folder nothing writes to.
+        _log($"runtime dir: {_layout.RuntimeDirectory}");
         _log($"data dir:    {_layout.DataDirectory}");
         _log($"wheel:       {wheel}");
 
