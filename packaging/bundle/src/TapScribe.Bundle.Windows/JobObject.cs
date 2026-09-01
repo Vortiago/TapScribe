@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using TapScribe.Bundle.Core;
@@ -121,10 +120,10 @@ public sealed class JobObject : IProcessReaper
     /// grandchildren spawned in the first instants of the child's life — see the type
     /// docs for why self-assignment is preferred.
     /// </summary>
-    public bool Adopt(Process child)
+    public bool Adopt(IChildProcess child)
     {
         ArgumentNullException.ThrowIfNull(child);
-        return AssignProcessToJobObject(_handle, child.Handle);
+        return AssignProcessToJobObject(_handle, child.NativeHandle);
     }
 
     /// <summary>

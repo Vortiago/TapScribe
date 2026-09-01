@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using TapScribe.Bundle.Core;
 
 namespace TapScribe.Bundle.Launcher;
 
@@ -17,6 +18,8 @@ internal sealed class LauncherIcons : IDisposable
         [RecorderState.Running] = Dot(Color.LimeGreen),
         [RecorderState.Stopped] = Dot(Color.Gray),
         [RecorderState.Failed] = Dot(Color.Firebrick),
+        // Running, but not ours: the dashboard works, the tray just will not stop it.
+        [RecorderState.Unmanaged] = Dot(Color.LimeGreen),
     };
 
     public Icon this[RecorderState state] => _icons[state];

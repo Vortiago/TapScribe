@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace TapScribe.Bundle.Core;
 
 /// <summary>
@@ -42,5 +40,5 @@ public interface IProcessReaper : IDisposable
     /// throwing: the caller logs it and carries on, because the meeting the operator is
     /// about to record matters more than the leak they may get at quit.
     /// </summary>
-    bool Adopt(Process child);
+    bool Adopt(IChildProcess child);
 }

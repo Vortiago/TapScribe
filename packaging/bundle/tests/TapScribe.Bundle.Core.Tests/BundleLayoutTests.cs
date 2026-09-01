@@ -150,6 +150,57 @@ public class BundleLayoutTests
     }
 
     /// <summary>A throwaway program dir with a matching data dir, cleaned up on dispose.</summary>
+    [Fact]
+    public void HostPayloadPresent_IsFalseForABridgeOnlyInstall()
+    {
+        // The bridge-only artifact: the same tray executable, with nothing beside it. Its
+        // menu must be exactly what it was before the host role existed.
+        using var dir = new TempDir();
+        Directory.CreateDirectory(dir.Layout().ProgramDirectory);
+
+        Assert.False(BundleLayout.HostPayloadPresent(dir.Layout().ProgramDirectory));
+    }
+
+    [Fact]
+    public void HostPayloadPresent_IsTrueForABundle()
+    {
+        using var dir = new TempDir();
+        dir.Wheel("tapscribe-1.0.0-py3-none-any.whl");
+        Directory.CreateDirectory(dir.Layout().PythonDirectory);
+
+        Assert.True(BundleLayout.HostPayloadPresent(dir.Layout().ProgramDirectory));
+    }
+
+    [Fact]
+    public void HostPayloadPresent_StillClaimsTheRoleWhenHalfThePayloadIsMissing()
+    {
+        // The point of the OR. A Bundle whose wheel/ was wiped must NOT silently degrade
+        // to a bridge-only tray — the operator's Recorder would just vanish from the
+        // menu, with no error anywhere. It keeps the role, and ResolveWheel's own loud
+        // failure is what they see instead. Mirrored for a wiped interpreter, which is
+        // the same bug with the halves swapped.
+        using var wheelOnly = new TempDir();
+        wheelOnly.Wheel("tapscribe-1.0.0-py3-none-any.whl");
+        Assert.True(BundleLayout.HostPayloadPresent(wheelOnly.Layout().ProgramDirectory));
+
+        using var pythonOnly = new TempDir();
+        Directory.CreateDirectory(pythonOnly.Layout().PythonDirectory);
+        Assert.True(BundleLayout.HostPayloadPresent(pythonOnly.Layout().ProgramDirectory));
+    }
+
+    [Fact]
+    public void HostPayloadPresent_DoesNotSwallowAPackagingBugItClaimedTheRoleOver()
+    {
+        // The pairing that makes the OR safe: claiming the role with half a payload is
+        // only correct because resolution then FAILS loudly inside it.
+        using var dir = new TempDir();
+        Directory.CreateDirectory(dir.Layout().PythonDirectory);
+        BundleLayout layout = dir.Layout();
+
+        Assert.True(BundleLayout.HostPayloadPresent(layout.ProgramDirectory));
+        Assert.Throws<BundleLayoutException>(() => layout.ResolveWheel());
+    }
+
     private sealed class TempDir : IDisposable
     {
         private readonly string _root = Path.Join(

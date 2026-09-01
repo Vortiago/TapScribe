@@ -109,6 +109,32 @@ public sealed record BundleLayout
     }
 
     /// <summary>
+    /// Whether a host payload sits beside the tray on disk — the HOST ROLE test
+    /// (ADR-0022). It is a fact about the install, not a flag, a build variant or a
+    /// setting anyone can misconfigure: the same tray executable ships in the bridge-only
+    /// artifact and in the Bundle, and this is the whole difference between them.
+    ///
+    /// Deliberately NOT "does <see cref="Resolve"/> succeed" — that is pure path
+    /// construction and probes nothing — and NOT "does <see cref="ResolveWheel"/> return"
+    /// — that is designed to THROW on a packaging bug the operator must see. Folded into a
+    /// boolean role probe, a Bundle whose <c>wheel/</c> was wiped would silently degrade
+    /// to a bridge-only tray and the operator's Recorder would just vanish from the menu.
+    ///
+    /// EITHER folder claims the role, not both: an <c>AND</c> is exactly the silent
+    /// demotion above, and a <c>python/</c>-only probe is the same failure mirrored for a
+    /// wiped interpreter. Claim the role whenever any payload is there, and let
+    /// <see cref="ResolveWheel"/>'s errors — and a missing interpreter — stay loud INSIDE
+    /// it, which is where they belong.
+    /// </summary>
+    public static bool HostPayloadPresent(string programDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(programDirectory);
+        string root = Path.GetFullPath(programDirectory);
+        return Directory.Exists(Path.Join(root, PythonFolder))
+            || Directory.Exists(Path.Join(root, WheelFolder));
+    }
+
+    /// <summary>
     /// The absolute path of the one <c>*.whl</c> the Bundle ships, for
     /// <c>--install-spec</c>.
     ///

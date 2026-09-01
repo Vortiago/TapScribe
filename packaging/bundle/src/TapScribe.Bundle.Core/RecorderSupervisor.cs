@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace TapScribe.Bundle.Core;
 
 /// <summary>What the tray shows about the Recorder.</summary>
@@ -9,25 +7,32 @@ public enum RecorderState
     Running,
     Stopped,
     Failed,
+
+    /// <summary>
+    /// A Recorder is answering on the port, and this tray did not start it — a
+    /// <c>start.sh</c> in a terminal, or another install. Shown, never stopped: Quit takes
+    /// down only what this tray owns, and ownership is recorded at SPAWN rather than
+    /// configured (ADR-0022).
+    /// </summary>
+    Unmanaged,
 }
 
 /// <summary>
 /// Runs the Bundle's two child processes: <c>tapscribe.preflight</c> to completion, then
-/// the Recorder itself, with both children's stdout/stderr pumped into the Launcher's
-/// log.
+/// the Recorder itself, with both children's stdout/stderr pumped into the tray's log.
 ///
 /// Deliberately thin. Every decision it makes — which interpreter, which argv, which
-/// environment — comes from <see cref="RecorderCommand"/> in the cross-platform Core and
-/// is unit-tested there; what is left here is <c>Process.Start</c>, two event handlers,
-/// and a kill. Reaping is not this class's job: the <see cref="IProcessReaper"/> the tray
-/// holds covers the grandchildren (<c>whisperlivekit-server</c>) that this class never
-/// gets a handle to, and IT is where the two platforms differ.
+/// environment — comes from <see cref="RecorderCommand"/> and is unit-tested there; what is
+/// left here is a spawn, two event handlers, a kill, and the one classification below.
+/// Reaping is not this class's job: the <see cref="IProcessReaper"/> the tray holds covers
+/// the grandchildren (<c>whisperlivekit-server</c>) that this class never gets a handle to,
+/// and IT is where the two platforms differ.
 ///
 /// In Core rather than beside a shell because the lifecycle is the same on both, the way
 /// the capture lifecycle already is (ADR-0022): only the reaping is platform-shaped, and
-/// that is behind the seam.
-///
-/// <b>The spawn itself is not unit-tested — it needs a real interpreter.</b>
+/// that is behind the seam. The spawn and the health probe are injected for the same
+/// reason — so the decisions an operator meets when something is wrong are tested on the
+/// Linux leg rather than by breaking a real install by hand.
 /// </summary>
 public sealed class RecorderSupervisor : IDisposable
 {
@@ -35,22 +40,56 @@ public sealed class RecorderSupervisor : IDisposable
     private readonly IProcessReaper? _reaper;
     private readonly Action<string> _log;
     private readonly Action<RecorderState, string> _onState;
+    private readonly Func<BundleProcess, IChildProcess> _spawn;
+    private readonly Func<bool> _recorderAnswers;
     private readonly Lock _gate = new();
-    private Process? _recorder;
+    private IChildProcess? _recorder;
     /// <summary>The preflight child while it runs, so Stop() can reach it too.</summary>
-    private Process? _preflight;
+    private IChildProcess? _preflight;
     private bool _stopping;
 
-    public RecorderSupervisor(BundleLayout layout, IProcessReaper? reaper, Action<string> log, Action<RecorderState, string> onState)
+    /// <param name="reaper">The crash backstop, or null for the supported degraded mode.</param>
+    /// <param name="spawn">How to start one child. Defaults to a real process.</param>
+    /// <param name="recorderAnswers">Whether SOMETHING is serving the Recorder's port —
+    /// a <c>GET /health</c>. Consulted only when the Recorder this tray started exits
+    /// immediately, which is the one moment its answer changes what the operator is
+    /// told.</param>
+    public RecorderSupervisor(
+        BundleLayout layout,
+        IProcessReaper? reaper,
+        Action<string> log,
+        Action<RecorderState, string> onState,
+        Func<BundleProcess, IChildProcess>? spawn = null,
+        Func<bool>? recorderAnswers = null)
     {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(log);
+        ArgumentNullException.ThrowIfNull(onState);
         _layout = layout;
         _reaper = reaper;
         _log = log;
         _onState = onState;
+        _spawn = spawn ?? (command => ChildProcess.Start(command, layout.ProgramDirectory, log));
+        _recorderAnswers = recorderAnswers ?? (() => false);
     }
 
-    /// <summary>Boot the Recorder on a background thread; the tray keeps pumping messages.</summary>
-    public void Start() => Task.Run(Run);
+    /// <summary>Whether the Recorder currently on the port is one this tray started.
+    /// Recorded at spawn, never configured: Quit stops only what this owns.</summary>
+    public bool Manages
+    {
+        get
+        {
+            lock (_gate)
+                return _recorder is not null;
+        }
+    }
+
+    /// <summary>
+    /// Boot the Recorder on a background thread; the tray keeps pumping messages. The
+    /// shell ignores the returned task — that is the point of booting off-thread — and a
+    /// test awaits it rather than racing the thread pool.
+    /// </summary>
+    public Task Start() => Task.Run(Run);
 
     private void Run()
     {
@@ -61,7 +100,7 @@ public sealed class RecorderSupervisor : IDisposable
         // an unobserved Task and vanishes: no Fail(), no log line, no state change, and a
         // tray frozen on "Preparing TapScribe…" forever with no way for the operator to
         // tell whether it is still working. Narrowing this catch would restore exactly
-        // the silent death this PR exists to remove — an unhandled type is precisely the
+        // the silent death this exists to remove — an unhandled type is precisely the
         // case that must still reach the tray.
         //
         // Nothing is swallowed: the FULL exception (type, message, stack) goes to the
@@ -104,9 +143,9 @@ public sealed class RecorderSupervisor : IDisposable
         // gigabytes. If the operator hit Quit during it, Stop() already ran and found no
         // Recorder to kill, so spawning one now would start a process nobody is left to
         // reap. The reaper usually covers it, but a null one is an explicitly supported
-        // degraded path, and on THAT path the Recorder plus its
-        // WhisperLiveKit grandchild would be orphaned holding port 8001 — the exact leak
-        // this class exists to prevent.
+        // degraded path, and on THAT path the Recorder plus its WhisperLiveKit grandchild
+        // would be orphaned holding port 8001 — the exact leak this class exists to
+        // prevent.
         lock (_gate)
         {
             if (_stopping)
@@ -118,16 +157,16 @@ public sealed class RecorderSupervisor : IDisposable
 
     /// <summary>
     /// Blocking, logged. A non-zero exit is reported but does NOT stop the Recorder:
-    /// preflight's steps are repairs (the CUDA torch swap, the silero-vad probe), and a
-    /// failed repair still leaves a Recorder that boots — with a degraded backend the
-    /// operator can see in the log and fix from /setup.
+    /// preflight's steps are repairs (the CUDA torch swap, the model fetch), and a failed
+    /// repair still leaves a Recorder that boots — with a degraded backend the operator can
+    /// see in the log and fix from /setup.
     /// </summary>
     private bool RunPreflight(string wheel)
     {
         BundleProcess command = RecorderCommand.Preflight(_layout, wheel);
         try
         {
-            using Process process = Spawn(command);
+            using IChildProcess process = _spawn(command);
             bool quitRaced;
             lock (_gate)
             {
@@ -141,7 +180,7 @@ public sealed class RecorderSupervisor : IDisposable
                 // Quit landed between RunCore's check and this spawn. Kill OUTSIDE the
                 // lock — Stop() takes the same lock, and blocking it behind a kill is
                 // the opposite of what Quit is trying to achieve.
-                process.Kill(entireProcessTree: true);
+                process.Kill();
                 return false;
             }
 
@@ -172,30 +211,16 @@ public sealed class RecorderSupervisor : IDisposable
         BundleProcess command = RecorderCommand.Recorder(_layout, wheel);
         try
         {
-            Process process = Spawn(command);
+            IChildProcess process = _spawn(command);
             lock (_gate)
                 _recorder = process;
 
-            // Handler BEFORE the flag: setting EnableRaisingEvents registers the
-            // wait immediately and, for a process that has ALREADY exited, raises
-            // Exited synchronously — and Process latches _raisedOnExited so it
-            // never fires again. A Recorder that dies instantly (broken wheel,
-            // EADDRINUSE) would raise into an empty delegate, leaving the tray
-            // green and "running" forever with a dead dashboard.
-            process.Exited += (_, _) =>
-            {
-                lock (_gate)
-                {
-                    if (_stopping)
-                        return;
-                }
+            Enrol(process);
 
-                _log($"recorder exited with code {process.ExitCode}");
-                _onState(
-                    RecorderState.Stopped,
-                    $"TapScribe stopped unexpectedly (exit {process.ExitCode}). See the log.");
-            };
-            process.EnableRaisingEvents = true;
+            // Subscribed before the child is allowed to raise it (the seam guarantees the
+            // order): a Recorder that dies instantly would otherwise raise into an empty
+            // delegate, leaving the tray green and "running" over a dead dashboard.
+            process.Exited += (_, _) => OnRecorderExited(process);
 
             _onState(RecorderState.Running, "TapScribe is running.");
         }
@@ -206,14 +231,68 @@ public sealed class RecorderSupervisor : IDisposable
     }
 
     /// <summary>
+    /// The Recorder this tray started has gone. WHY decides what the operator is told, and
+    /// the discriminator is the port, not the exit code (ADR-0022): unmanaged is decided by
+    /// the SPAWN ATTEMPT, not by probing first.
+    ///
+    ///   - something still answers /health ⇒ somebody else's Recorder holds the port. Shown
+    ///     as running-but-unmanaged, and Quit will not touch it.
+    ///   - nothing answers ⇒ this install is broken. Reported as failed rather than adopted,
+    ///     so a crash-loop looks like a crash-loop.
+    ///
+    /// Deliberately NOT read out of the child's stdout: matching an "address already in
+    /// use" string means owning uvicorn's wording forever, and the probe answers the
+    /// question directly.
+    /// </summary>
+    private void OnRecorderExited(IChildProcess process)
+    {
+        lock (_gate)
+        {
+            if (_stopping)
+                return;
+            // Ownership ends here: whatever is on the port now, this tray no longer has a
+            // handle to it, so Quit must not try to kill it.
+            if (ReferenceEquals(_recorder, process))
+                _recorder = null;
+        }
+
+        int code = process.ExitCode;
+        _log($"recorder exited with code {code}");
+
+        if (_recorderAnswers())
+        {
+            _log("something is still serving the Recorder's port — not ours to stop.");
+            _onState(
+                RecorderState.Unmanaged,
+                "TapScribe is already running from somewhere else. This tray will not stop it.");
+            return;
+        }
+
+        _onState(
+            RecorderState.Stopped,
+            $"TapScribe stopped unexpectedly (exit {code}). See the log.");
+    }
+
+    private void Enrol(IChildProcess process)
+    {
+        // Only when the tray could NOT put ITSELF in the reaper: otherwise the child is
+        // already a member by inheritance and a second enrolment fails.
+        if (_reaper is { CoversChildrenByInheritance: false } reaper && !reaper.Adopt(process))
+            _log("reaper: could not enrol the child — a crash may leave whisperlivekit-server running.");
+    }
+
+    /// <summary>
     /// Ask the Recorder to go away, then let the reaper take the rest. The kill is
-    /// <c>entireProcessTree</c> for the ordinary case; the reaper is the backstop for the
-    /// case this misses (a grandchild that re-parented).
+    /// whole-tree for the ordinary case; the reaper is the backstop for the case this
+    /// misses (a grandchild that re-parented).
+    ///
+    /// Stops only a Recorder THIS tray started: <see cref="_recorder"/> is null for an
+    /// unmanaged one, so a Recorder the operator launched from a terminal outlives Quit.
     /// </summary>
     public void Stop()
     {
-        Process? handle;
-        Process? preflight;
+        IChildProcess? handle;
+        IChildProcess? preflight;
         lock (_gate)
         {
             _stopping = true;
@@ -230,7 +309,7 @@ public sealed class RecorderSupervisor : IDisposable
             try
             {
                 if (!preflight.HasExited)
-                    preflight.Kill(entireProcessTree: true);
+                    preflight.Kill();
             }
             catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
             {
@@ -243,12 +322,12 @@ public sealed class RecorderSupervisor : IDisposable
 
         // `using` rather than try/finally + Dispose(): same guarantee, and it keeps
         // CodeQL's cs/missed-using-statement clean rather than needing a suppression.
-        using Process process = handle;
+        using IChildProcess process = handle;
         try
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                process.Kill();
                 process.WaitForExit(5000);
             }
         }
@@ -259,47 +338,6 @@ public sealed class RecorderSupervisor : IDisposable
             // leak this Stop() is trying to avoid.
             _log($"stop: {error.Message}");
         }
-    }
-
-    /// <summary>Spawn one <see cref="BundleProcess"/> with both streams pumped into the log.</summary>
-    private Process Spawn(BundleProcess command)
-    {
-        var info = new ProcessStartInfo(command.Executable)
-        {
-            // Argv as a list, never a shell string (CLAUDE.md) — ArgumentList quotes each
-            // token for us, so a program dir with a space in it stays one argument.
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            // The child is forced to UTF-8 (RecorderCommand.EnvironmentFor); decode
-            // the pipe the same way. Without this .NET uses the console/ANSI code
-            // page and the em-dashes this repo's messages are full of arrive
-            // mangled in the operator's only diagnostic surface.
-            StandardOutputEncoding = System.Text.Encoding.UTF8,
-            StandardErrorEncoding = System.Text.Encoding.UTF8,
-            WorkingDirectory = _layout.ProgramDirectory,
-        };
-        foreach (string argument in command.Arguments)
-            info.ArgumentList.Add(argument);
-        foreach (KeyValuePair<string, string> variable in command.Environment)
-            info.Environment[variable.Key] = variable.Value;
-
-        var process = new Process { StartInfo = info };
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) _log(e.Data); };
-        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log(e.Data); };
-
-        _log($"$ {command.Executable} {string.Join(' ', command.Arguments)}");
-        process.Start();
-
-        // Only when the tray could NOT put ITSELF in the reaper: otherwise the child is
-        // already a member by inheritance and a second enrolment fails.
-        if (_reaper is { CoversChildrenByInheritance: false } reaper && !reaper.Adopt(process))
-            _log("reaper: could not enrol the child — a crash may leave whisperlivekit-server running.");
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        return process;
     }
 
     private void Fail(string message)
