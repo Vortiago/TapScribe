@@ -27,6 +27,11 @@ internal sealed class TrayHost : IHostView, IDisposable
     private readonly RotatingLogWriter _log;
     private readonly JobObject? _reaper;
     private readonly HostController _controller;
+    // ONE client for the object's lifetime, the way ControlClient holds one: a fresh
+    // HttpClient per call leaks its handler's socket for the pool's idle timeout, and
+    // "Open dashboard" is a thing an operator clicks all day. Per-call timeouts come from
+    // a CancellationTokenSource, not from HttpClient.Timeout, which is per-client.
+    private readonly HttpClient _http = new();
     private readonly Action<string, string, NoticeKind> _notify;
 
     private readonly ToolStripSeparator _separator = new();
@@ -76,15 +81,18 @@ internal sealed class TrayHost : IHostView, IDisposable
         _passwordItem = new ToolStripMenuItem("Copy password", null, (_, _) => Guarded(CopyPassword));
         _logItem = new ToolStripMenuItem("Show log", null, (_, _) => Guarded(ShowLog));
 
+        MenuItems =
+            [_separator, _statusItem, _startItem, _stopItem, _dashboardItem, _passwordItem, _logItem];
+
         _log.Write("--- TapScribe host role starting ---");
         _controller = HostController.Attach(
             this, post, layout, _reaper, _log.Write, RecorderAnswers);
     }
 
     /// <summary>The items to splice into the tray menu, in order. The shell owns where
-    /// they go; this owns what they are.</summary>
-    internal IEnumerable<ToolStripItem> MenuItems =>
-        [_separator, _statusItem, _startItem, _stopItem, _dashboardItem, _passwordItem, _logItem];
+    /// they go; this owns what they are. Built once — the seven fields are readonly and the
+    /// set is read on every ShowHost, i.e. on every Recorder state change.</summary>
+    internal IReadOnlyList<ToolStripItem> MenuItems { get; }
 
     /// <summary>Boot the Recorder. Called once the message loop is pumping, like the
     /// Bridge runtime's own startup.</summary>
@@ -129,14 +137,21 @@ internal sealed class TrayHost : IHostView, IDisposable
 
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-                "Basic",
-                Convert.ToBase64String(Encoding.UTF8.GetBytes($"admin:{lookup.Password}")));
-            using HttpResponseMessage response = http
-                .PostAsync(new Uri(BundleDefaults.DashboardUrl.TrimEnd('/') + "/api/login-link"), content: null)
-                .GetAwaiter()
-                .GetResult();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post, new Uri(BundleDefaults.DashboardUrl.TrimEnd('/') + "/api/login-link"))
+            {
+                // Per-request rather than on the shared client: the password is this call's
+                // business and must not ride along on anything else the tray sends.
+                Headers =
+                {
+                    Authorization = new AuthenticationHeaderValue(
+                        "Basic",
+                        Convert.ToBase64String(Encoding.UTF8.GetBytes($"admin:{lookup.Password}"))),
+                },
+            };
+            using HttpResponseMessage response = _http
+                .Send(request, timeout.Token);
             response.EnsureSuccessStatusCode();
             using JsonDocument body = JsonDocument.Parse(
                 response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
@@ -221,23 +236,32 @@ internal sealed class TrayHost : IHostView, IDisposable
         }
     }
 
-    /// <summary>Whether SOMETHING is serving the Recorder's port. The discriminator
-    /// between "someone else's Recorder holds 8001" and "this install is broken".</summary>
+    /// <summary>
+    /// Whether SOMETHING is serving the Recorder's port — the discriminator between
+    /// "someone else's Recorder holds 8001" and "this install is broken".
+    ///
+    /// Through <see cref="ControlClient"/>, which already owns what `GET /health` means and
+    /// how it fails; a second reachability probe with its own timeout and its own idea of
+    /// success is the kind that drifts when that contract moves. Loopback and no token: a
+    /// Bundle IS the Recorder on this machine, and /health takes no credential.
+    /// </summary>
     private bool RecorderAnswers()
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            using HttpResponseMessage response = http
-                .GetAsync(new Uri(BundleDefaults.DashboardUrl.TrimEnd('/') + "/health"))
-                .GetAwaiter()
-                .GetResult();
-            return response.IsSuccessStatusCode;
+            using var control = new ControlClient(
+                "127.0.0.1", BundleDefaults.RecorderPort, tls: false, token: "", _http);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            control.CheckHealthAsync(timeout.Token).GetAwaiter().GetResult();
+            return true;
         }
-        catch (Exception error) when (error is HttpRequestException or TaskCanceledException)
+        catch (Exception error) when (
+            error is HttpRequestException or TaskCanceledException or OperationCanceledException
+                or System.Net.Sockets.SocketException or InvalidOperationException)
         {
             // Nothing listening, or it did not answer in time. Either way: not somebody
-            // else's healthy Recorder.
+            // else's healthy Recorder. The filter matches ConnectionTester's, which wraps
+            // the same call for the same question.
             return false;
         }
     }
@@ -268,6 +292,7 @@ internal sealed class TrayHost : IHostView, IDisposable
         _controller.Dispose();
         foreach (ToolStripItem item in MenuItems)
             item.Dispose();
+        _http.Dispose();
         _log.Write("--- TapScribe host role stopped ---");
         _log.Dispose();
         _reaper?.Dispose();

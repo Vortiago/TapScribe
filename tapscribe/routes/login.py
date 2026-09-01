@@ -17,25 +17,13 @@ native Basic dialog, which is the prompt this whole feature exists to remove.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .. import config
 from ..login_links import LoginLinks
 
 router = APIRouter()
-
-
-def cookie_name() -> str:
-    """The session cookie's name, which carries the port.
-
-    Cookies are scoped by host but NOT by port, so a checkout on 8001 and a
-    second Recorder on 8002 would otherwise overwrite each other's session and
-    log the operator out of whichever they touched second. Read at call time
-    rather than computed at import, because `config.PORT` is stamped by
-    `__main__.main()` after this module is imported.
-    """
-    return f"tapscribe_session_{config.PORT}"
 
 
 #: Deliberately a string here rather than a file under `web/`: it carries no
@@ -64,14 +52,17 @@ _SPENT_PAGE = """<!doctype html>
 
 
 def _store(request: Request) -> LoginLinks:
-    """The per-app store the lifespan built. Absent only in a test app that
-    skipped the lifespan, which gets an empty one rather than a 500 — every
-    token is then unknown, which is the correct answer for a Recorder that has
-    issued none."""
+    """The per-app store the lifespan built.
+
+    Absent means the app was assembled without its lifespan, which is a wiring
+    bug and not a state to paper over: silently constructing one here would mint
+    links against a store nothing else reads, so every one of them would fail to
+    spend and the operator would meet a dead link with no clue why. Answered the
+    way `auth.basic_auth_middleware` answers a missing Recorder — a 503, said out
+    loud."""
     store = getattr(request.app.state, "login_links", None)
     if store is None:
-        store = LoginLinks()
-        request.app.state.login_links = store
+        raise HTTPException(503, "Login links are not ready")
     return store
 
 
@@ -106,7 +97,7 @@ async def login(request: Request, k: str = ""):
 
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
-        cookie_name(),
+        config.session_cookie_name(),
         cookie,
         httponly=True,
         # Strict, not Lax: it costs the cookie on a web-page-initiated

@@ -124,6 +124,25 @@ AUTH_ENABLED: bool = True
 PORT: int = 8001
 TLS_ENABLED: bool = False
 
+
+def session_cookie_name() -> str:
+    """The dashboard session cookie's name, which carries the port.
+
+    Here rather than beside the route that sets it, for two reasons. It is read on
+    the hottest path in the app — `auth.basic_auth_middleware`, crossed by the
+    dashboard's 500 ms poll — and core reaching into `routes/` for it meant a
+    deferred import re-run on every request. And this module is the leaf both
+    sides already import, so one owner costs no new dependency edge: a middleware
+    that spelled the name differently from the route would silently stop accepting
+    the sessions that route mints, which reads exactly like "the login link is
+    broken".
+
+    A function, not a constant: `PORT` is stamped by `__main__.main()` after this
+    module is imported.
+    """
+    return f"tapscribe_session_{PORT}"
+
+
 # Bearer token bridges send on the /tap WebSocket (carried via
 # Sec-WebSocket-Protocol). Distinct from the dashboard password so the
 # operator can hand a tap-token to browser extensions without exposing

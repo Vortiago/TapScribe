@@ -159,8 +159,6 @@ public class RecorderSupervisorTests
 
         public int ExitCode { get; private set; }
 
-        public int Id => 4242;
-
         public IntPtr NativeHandle => IntPtr.Zero;
 
         public bool Killed { get; private set; }

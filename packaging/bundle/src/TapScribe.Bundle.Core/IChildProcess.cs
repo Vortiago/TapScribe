@@ -21,11 +21,9 @@ public interface IChildProcess : IDisposable
 
     int ExitCode { get; }
 
-    /// <summary>The child's process id, and its native handle. Both are here because the
-    /// two reapers want different ones — the job object enrols by handle, a POSIX process
-    /// group by pid — and both are facts every platform's <see cref="Process"/> has.</summary>
-    int Id { get; }
-
+    /// <summary>The child's native handle, which is what <see cref="IProcessReaper.Adopt"/>
+    /// enrols by. A POSIX reaper would want the pid instead; it gets a member when there is
+    /// one, rather than every double implementing one nothing calls.</summary>
     IntPtr NativeHandle { get; }
 
     /// <summary>Raised when the child exits on its own. Subscribed BEFORE the child is
@@ -72,8 +70,6 @@ public sealed class ChildProcess : IChildProcess
         }
         remove => _process.Exited -= value;
     }
-
-    public int Id => _process.Id;
 
     public IntPtr NativeHandle => _process.Handle;
 

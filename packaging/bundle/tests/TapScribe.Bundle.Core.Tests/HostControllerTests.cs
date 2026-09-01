@@ -31,7 +31,6 @@ public class HostControllerTests
         HostView shown = world.View.Last!;
         Assert.True(shown.CanStop);
         Assert.False(shown.CanStart);
-        Assert.True(shown.Managed);
         Assert.Equal("TapScribe is running.", shown.Header);
     }
 
@@ -49,7 +48,6 @@ public class HostControllerTests
         HostView shown = world.View.Last!;
         Assert.False(shown.CanStop, "the tray offered to stop a Recorder it does not own");
         Assert.True(shown.CanStart);
-        Assert.False(shown.Managed);
     }
 
     [Fact]
@@ -62,6 +60,32 @@ public class HostControllerTests
 
         Assert.True(world.View.Last!.CanStart);
         Assert.False(world.View.Last!.CanStop);
+    }
+
+    [Fact]
+    public void StartRecorder_WhileOneIsAlreadyComingUp_DoesNotStartASecond()
+    {
+        // Preflight is an unbounded pip install; a double-click must not run two of them.
+        // The guard asks Render whether Start would even have been offered, so the menu and
+        // the command can never disagree about it.
+        var world = new World();
+        world.Controller.Start();
+
+        world.Controller.StartRecorder();
+
+        Assert.Equal(1, world.Host.Starts);
+    }
+
+    [Fact]
+    public void StartRecorder_AfterAFailure_StartsAgain()
+    {
+        var world = new World();
+        world.Controller.Start();
+        world.Controller.Report(RecorderState.Failed, "TapScribe could not start.");
+
+        world.Controller.StartRecorder();
+
+        Assert.Equal(2, world.Host.Starts);
     }
 
     [Fact]
@@ -124,13 +148,13 @@ public class HostControllerTests
     {
         public bool Manages { get; set; }
 
-        public bool Started { get; private set; }
+        public int Starts { get; private set; }
 
         public bool Stopped { get; private set; }
 
         public Task Start()
         {
-            Started = true;
+            Starts++;
             return Task.CompletedTask;
         }
 

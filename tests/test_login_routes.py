@@ -10,35 +10,31 @@ Basic dialog (ADR-0023).
 from __future__ import annotations
 
 from collections.abc import Iterator
-from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from test_auth import BASIC_PASS as PASSWORD
+from test_auth import _mini_app
 
-from tapscribe import auth as _auth
 from tapscribe import config as _config
+from tapscribe.config import session_cookie_name as cookie_name
 from tapscribe.login_links import LoginLinks
-from tapscribe.routes.login import cookie_name
 from tapscribe.routes.login import router as login_router
-
-PASSWORD = "dashboard-secret"
 
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """The two routes behind the real auth middleware, and nothing else — the
-    same mini-app shape `test_auth.py` uses. The global app would drag in the
-    lifespan and a live Recorder, neither of which these routes touch."""
+    """The two routes behind the real auth middleware, and nothing else.
+
+    `test_auth`'s mini app IS that scaffold — middleware, a fake recorder, a
+    store — so the login router is added to it rather than a second copy being
+    built here. A copy had already drifted: it named the tap token differently
+    from the middleware's own tests. The global app would drag in the lifespan
+    and a live Recorder, neither of which these routes touch.
+    """
     monkeypatch.setattr(_config, "AUTH_ENABLED", True)
-    app = FastAPI()
-    app.middleware("http")(_auth.basic_auth_middleware)
+    app = _mini_app()
     app.include_router(login_router)
-    app.state.recorder = SimpleNamespace(
-        auth=SimpleNamespace(value=PASSWORD),
-        tap=SimpleNamespace(value="tap-token"),
-    )
-    app.state.login_links = LoginLinks()
     with TestClient(app) as c:
         yield c
 

@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from test_auth import BASIC_PASS, TAP_TOKEN, _mini_app
 
 from tapscribe import config as _config
-from tapscribe.routes.login import cookie_name
+from tapscribe.config import session_cookie_name as cookie_name
 
 
 @pytest.fixture

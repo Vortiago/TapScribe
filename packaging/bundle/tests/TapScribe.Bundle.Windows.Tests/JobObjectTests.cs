@@ -66,8 +66,6 @@ public class JobObjectTests
 
         public int ExitCode => 0;
 
-        public int Id => _process.Id;
-
         public IntPtr NativeHandle => _process.Handle;
 
         public event EventHandler? Exited

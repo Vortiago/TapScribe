@@ -40,16 +40,6 @@ _TAP_PREFIX_SLASH: str = config.TAP_PREFIX + "/"
 _STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-def _session_cookie_name() -> str:
-    """The dashboard session cookie's name. Deferred to `routes.login` so the
-    port-carrying spelling has ONE owner: a middleware that spelled it
-    differently would silently stop accepting the sessions that route mints,
-    which reads exactly like "the login link is broken"."""
-    from .routes.login import cookie_name
-
-    return cookie_name()
-
-
 def _is_cross_origin(request: Request) -> bool:
     """Whether the request carries an `Origin` that is not this server's own.
 
@@ -184,7 +174,7 @@ async def basic_auth_middleware(request: Request, call_next):
     if request.method.upper() in _STATE_CHANGING and _is_cross_origin(request):
         return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
 
-    cookie = request.cookies.get(_session_cookie_name())
+    cookie = request.cookies.get(config.session_cookie_name())
     links = getattr(request.app.state, "login_links", None)
     if cookie is not None and links is not None and links.validate(cookie):
         return await call_next(request)

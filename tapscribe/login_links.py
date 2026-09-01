@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .auth import utf8_compare_digest
@@ -70,7 +71,7 @@ class LoginLinks:
     #: Injected so the tests drive expiry without sleeping. `time.monotonic` and
     #: not `time.time`: a clock step (NTP, a laptop waking) must not retire a
     #: live link or resurrect a dead one.
-    _now: object = field(default=time.monotonic)
+    _now: Callable[[], float] = field(default=time.monotonic)
 
     def mint(self) -> str:
         """A fresh single-use token. Requires nothing — the CALLER is what
@@ -78,7 +79,7 @@ class LoginLinks:
         only somebody who could already reach the dashboard can mint one."""
         self._sweep()
         token = secrets.token_urlsafe(32)
-        self._links[token] = _Link(expires_at=self._clock() + TOKEN_TTL_S)
+        self._links[token] = _Link(expires_at=self._now() + TOKEN_TTL_S)
         return token
 
     def spend(self, token: str) -> str | None:
@@ -95,7 +96,7 @@ class LoginLinks:
         if found is None:
             return None
 
-        now = self._clock()
+        now = self._now()
         link = self._links[found]
         if link.cookie is None:
             link.cookie = secrets.token_urlsafe(32)
@@ -105,7 +106,9 @@ class LoginLinks:
 
         # Already spent. Inside the grace window this is the scanner/double-click
         # case and answers with the session it already issued; outside it, the
-        # link is used up.
+        # link is used up. The sweep above normally deletes the outside-grace ones
+        # before `_find` can see them — this is the braces to that belt, and the
+        # one place the window is actually decided, so it stays explicit.
         if now - link.spent_at <= GRACE_S:
             return link.cookie
         return None
@@ -139,7 +142,7 @@ class LoginLinks:
         long as the process does. Their number is bounded by how many times the
         operator has signed in, and minting requires the password.
         """
-        now = self._clock()
+        now = self._now()
         dead = [
             token
             for token, link in self._links.items()
@@ -148,6 +151,3 @@ class LoginLinks:
         ]
         for token in dead:
             del self._links[token]
-
-    def _clock(self) -> float:
-        return float(self._now())  # type: ignore[operator]

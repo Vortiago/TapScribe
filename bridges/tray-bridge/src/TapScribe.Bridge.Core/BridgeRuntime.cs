@@ -110,43 +110,72 @@ public sealed class BridgeRuntime
             _startTask = start;
     }
 
-    private async Task StartAsync(BridgeSettings settings)
+    private async Task StartAsync(BridgeSettings settings) =>
+        await RunTapsAsync(
+            settings,
+            "Could not start meeting",
+            preflight: ct => MintAsync(settings, ct),
+            // The takeover, and the one step Start has that Connect does not. Draining
+            // BEFORE the mint is the whole of it: the attached taps' last Utterance is
+            // flushed and finalised in the session it was recorded into, instead of being
+            // cut mid-word by a teardown that races the new meeting's first frames.
+            // EndMeetingAsync disposes in its own finally, so there is nothing left here to
+            // release.
+            before: async () =>
+            {
+                if (TakeAttached() is { } handedOver)
+                    await handedOver.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
+            },
+            // Runs under _gate, from RunTapsAsync. DateTimeOffset.Now is the meeting's
+            // wall-clock start, for the Past-meetings history (#168). The session id is
+            // non-null by MintAsync's own contract, which throws rather than answer one.
+            publish: (orchestrator, session) =>
+                _meeting = new Meeting(orchestrator, session!, DateTimeOffset.Now),
+            showLive: ShowMeetingRunning).ConfigureAwait(false);
+
+    /// <summary>
+    /// Open one mode's taps and publish them, or fail to idle saying why. This is the whole
+    /// of Start and Connect except the four things they genuinely differ on: which Recorder
+    /// round-trip they make (<paramref name="preflight"/>), what they must do first
+    /// (<paramref name="before"/>), which field they publish into
+    /// (<paramref name="publish"/>), and which commands they leave the operator
+    /// (<paramref name="showLive"/>).
+    ///
+    /// Shared for the reason <see cref="OpenTapsAsync"/> is: the orchestrator wiring, the
+    /// abandoned-publish race, the failure classification and the presentation tail are
+    /// mode-INVARIANT, and a second copy is where the two modes would quietly stop agreeing.
+    /// The catch filter especially — typed twice, it drifts the first time a failure is added
+    /// to one and not the other, and the symptom is a tray wedged on "Connecting…" forever.
+    /// </summary>
+    private async Task RunTapsAsync(
+        BridgeSettings settings,
+        string failureTitle,
+        Func<CancellationToken, Task<string?>> preflight,
+        Func<Task>? before,
+        Action<CaptureOrchestrator, string?> publish,
+        Action showLive)
     {
-        // Non-null once the meeting is published, which is the LAST thing the try does.
+        // Non-null once the taps are published, which is the LAST thing the try does.
         // Everything left to render then happens BELOW the catch, where it cannot reach
-        // FailToIdle: a throw while noticing a skipped device would otherwise be classified as
-        // a failed START and roll a live, streaming meeting back to idle, with Start re-enabled,
-        // End greyed out and no way left to end the meeting that is still recording.
+        // FailToIdle: a throw while noticing a skipped device would otherwise be classified
+        // as a failed start and roll a live, streaming meeting back to idle, with Start
+        // re-enabled, End greyed out and no way left to end the meeting that is still
+        // recording.
         StartedMeeting? started = null;
         try
         {
-            // The takeover. Draining BEFORE the mint is the whole of it: the attached taps'
-            // last Utterance is flushed and finalised in the session it was recorded into,
-            // instead of being cut mid-word by a teardown that races the new meeting's first
-            // frames. EndMeetingAsync disposes in its own finally, so there is nothing left
-            // here to release.
-            if (TakeAttached() is { } handedOver)
-                await handedOver.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
+            if (before is not null)
+                await before().ConfigureAwait(false);
 
-            OpenedTaps? opened = await OpenTapsAsync(
-                settings,
-                "Could not start meeting",
-                ct => MintAsync(settings, ct)).ConfigureAwait(false);
+            OpenedTaps? opened =
+                await OpenTapsAsync(settings, failureTitle, preflight).ConfigureAwait(false);
             if (opened is null)
-                return; // the selection cannot start a meeting, and OpenTapsAsync said so
+                return; // the selection cannot open any tap, and OpenTapsAsync said so
 
-            // The mint answers a session id or throws, so this is unreachable in production;
-            // it is here because the type cannot say so, and a meeting whose taps carried no
-            // session would silently become an attached one — recording into whatever the
-            // Recorder had open instead of into its own. Loud beats quiet; the filter below
-            // classifies it.
-            if (opened.SessionId is not { } sessionId)
-                throw new InvalidOperationException("The Recorder returned no session for the meeting.");
-
-            // Ownership of the whole set transfers AT THE CALL: StartAll releases everything it
-            // was given on every exit that is not a handed-back orchestrator, and the open phase
-            // hands its set over whole, so there is nothing here to clear and no window in which
-            // this method owns a device.
+            // Ownership of the whole set transfers AT THE CALL: StartAll releases everything
+            // it was given on every exit that is not a handed-back orchestrator, and the open
+            // phase hands its set over whole, so there is nothing here to clear and no window
+            // in which this method owns a device.
             CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
                 opened.Captures,
                 onConnected: id => _dispatcher.Post(() => ApplyStatus(opened.Tally.Connected(id).Status)),
@@ -165,16 +194,14 @@ public sealed class BridgeRuntime
             bool abandoned;
             lock (_gate)
             {
-                // Teardown ran while this start was in flight. Publishing now would hand the
-                // meeting to a shell that has already stopped: nobody would ever dispose it,
-                // the captures would keep streaming, and the detached session would stay open
-                // on the Recorder. Take the teardown ourselves instead. This is the same lock
-                // TakeMeeting uses, so exactly one of the two runs it.
+                // Teardown ran while this was in flight. Publishing now would hand the taps
+                // to a shell that has already stopped: nobody would ever dispose them, the
+                // captures would keep streaming, and a minted session would stay open on the
+                // Recorder. Take the teardown ourselves instead. This is the same lock
+                // TakeMeeting/TakeAttached use, so exactly one of the two runs it.
                 abandoned = _quitting;
                 if (!abandoned)
-                    // DateTimeOffset.Now is the meeting's wall-clock start, for the
-                    // Past-meetings history (#168).
-                    _meeting = new Meeting(orchestrator, sessionId, DateTimeOffset.Now);
+                    publish(orchestrator, opened.SessionId);
             }
             if (abandoned)
             {
@@ -184,7 +211,7 @@ public sealed class BridgeRuntime
                 return;
             }
 
-            started = new StartedMeeting(opened.Tally, opened.Missing); // the meeting is live from here
+            started = new StartedMeeting(opened.Tally, opened.Missing); // live from here
         }
         catch (Exception ex) when (
             ex is HttpRequestException
@@ -196,26 +223,27 @@ public sealed class BridgeRuntime
                 or ArgumentException)
         {
             // Pre-flight or device-open failure: classify the cause and return the menu to
-            // idle with a clear message. Includes the session-mint timeout
-            // (OperationCanceledException) and a malformed new-session response (JsonException)
-            // so neither can escape this fire-and-forget task and wedge the shell on
-            // "Starting…". The filter keeps this off CodeQL's catch-of-all radar.
+            // idle with a clear message. Includes the pre-flight timeout
+            // (OperationCanceledException) and a malformed new-session response
+            // (JsonException) so neither can escape this fire-and-forget task and wedge the
+            // shell on "Starting…" or "Connecting…". The filter keeps this off CodeQL's
+            // catch-of-all radar.
             StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
-            FailToIdle("Could not start meeting", failure.Message);
+            FailToIdle(failureTitle, failure.Message);
         }
 
         if (started is null)
             return; // the catch, or the non-Ok early return, already surfaced the failure
 
-        // From here the meeting IS streaming and everything left is presentation. It sits below
+        // From here the taps ARE streaming and everything left is presentation. It sits below
         // the catch on purpose: a failure to RENDER must never be classified as a failure to
-        // START, which would re-enable Start and grey out End over a meeting that is still
-        // recording. Devices that did not resolve are a non-fatal warning: the meeting runs on
-        // the ones that did, and the operator is told which it is missing.
+        // start, which would re-enable Start over a meeting that is still recording. Devices
+        // that did not resolve are a non-fatal warning: the recording runs on the ones that
+        // did, and the operator is told which it is missing.
         StartedMeeting live = started;
         _dispatcher.Post(() =>
         {
-            ShowMeetingRunning();
+            showLive();
             ApplyStatus(live.Tally.Status);
             if (live.Missing.Count > 0)
                 _view.ShowNotice(
@@ -323,11 +351,25 @@ public sealed class BridgeRuntime
         }
     }
 
-    /// <summary>A bracketed meeting's pre-flight: mint the detached session its taps route
-    /// into. The mint IS the Recorder round-trip, so a meeting needs no probe of its own — an
-    /// unreachable Recorder or a refused token throws out of here.</summary>
-    private async Task<string?> MintAsync(BridgeSettings settings, CancellationToken cancellationToken) =>
-        await _deps.MintDetachedSession(settings, cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// A bracketed meeting's pre-flight: mint the detached session its taps route into. The
+    /// mint IS the Recorder round-trip, so a meeting needs no probe of its own — an
+    /// unreachable Recorder or a refused token throws out of here.
+    ///
+    /// Answers a session id or throws, never null. That is what lets the shared open path
+    /// treat null as "an attached tap names no session" with no special case: a meeting
+    /// whose taps carried no session would silently BECOME an attached one, recording into
+    /// whatever the Recorder had open instead of into its own. Unreachable in production —
+    /// the dependency's own type says so — and here because the type cannot say it across a
+    /// delegate.
+    /// </summary>
+    private async Task<string?> MintAsync(BridgeSettings settings, CancellationToken cancellationToken)
+    {
+        string session = await _deps.MintDetachedSession(settings, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(session))
+            throw new InvalidOperationException("The Recorder returned no session for the meeting.");
+        return session;
+    }
 
     /// <summary>The in-flight Connect, so a test can await the real one instead of polling.</summary>
     public Task? ConnectTask
@@ -369,79 +411,18 @@ public sealed class BridgeRuntime
             _connectTask = connect;
     }
 
-    private async Task ConnectAsync(BridgeSettings settings)
-    {
-        StartedMeeting? started = null;
-        try
-        {
-            OpenedTaps? opened = await OpenTapsAsync(
-                settings,
-                "Could not connect",
-                CheckAsync).ConfigureAwait(false);
-            if (opened is null)
-                return; // the selection cannot open a tap, and OpenTapsAsync said so
-
-            CaptureOrchestrator orchestrator = CaptureOrchestrator.StartAll(
-                opened.Captures,
-                onConnected: id => _dispatcher.Post(() => ApplyStatus(opened.Tally.Connected(id).Status)),
-                onFailed: (id, ex) => _dispatcher.Post(() =>
-                {
-                    TallyReport report = opened.Tally.Dropped(id);
-                    ApplyStatus(report.Status);
-                    if (report.Transition)
-                        _view.ShowNotice($"{id} stopped", ex.Message, NoticeKind.Warning);
-                }));
-
-            bool abandoned;
-            lock (_gate)
-            {
-                // The same abandoned-start race Start publishes through, for the same reason:
-                // teardown ran while this connect was in flight, and publishing now would hand
-                // the taps to a shell that has already stopped.
-                abandoned = _quitting;
-                if (!abandoned)
-                    _attached = new Attached(orchestrator, DateTimeOffset.Now);
-            }
-            if (abandoned)
-            {
-                await orchestrator.DisposeAsync().ConfigureAwait(false);
-                return;
-            }
-
-            started = new StartedMeeting(opened.Tally, opened.Missing);
-        }
-        catch (Exception ex) when (
-            ex is HttpRequestException
-                or OperationCanceledException
-                or JsonException
-                or InvalidOperationException
-                or ExternalException
-                or NotSupportedException
-                or ArgumentException)
-        {
-            // The same classification Start uses, over the same failures: the pre-flight's
-            // transport errors and timeout, and a device that would not open.
-            StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
-            FailToIdle("Could not connect", failure.Message);
-        }
-
-        if (started is null)
-            return;
-
-        // Below the catch, exactly as in StartAsync: the taps ARE streaming from here, and a
-        // failure to RENDER must never be classified as a failure to connect.
-        StartedMeeting live = started;
-        _dispatcher.Post(() =>
-        {
-            ShowAttached();
-            ApplyStatus(live.Tally.Status);
-            if (live.Missing.Count > 0)
-                _view.ShowNotice(
-                    "Some devices unavailable",
-                    $"Skipped: {string.Join(", ", live.Missing.Select(DescribeSelection))}",
-                    NoticeKind.Warning);
-        });
-    }
+    private async Task ConnectAsync(BridgeSettings settings) =>
+        await RunTapsAsync(
+            settings,
+            "Could not connect",
+            preflight: CheckAsync,
+            // Nothing to hand over: Connect is refused while anything is streaming, so
+            // there is never an attached tap or a meeting to drain first.
+            before: null,
+            // Runs under _gate, from RunTapsAsync. No session id is carried, because an
+            // attached tap has none — see the Attached record.
+            publish: (orchestrator, _) => _attached = new Attached(orchestrator, DateTimeOffset.Now),
+            showLive: ShowAttached).ConfigureAwait(false);
 
     /// <summary>
     /// An attached tap's pre-flight. It has no mint to round-trip the Recorder, so without this
@@ -1035,26 +1016,20 @@ public sealed class BridgeRuntime
         // observed here for the same reason: whether the taps closed cleanly is not the thing
         // standing between the operator and a shell that goes away.
         if (meeting is not null)
-            await Task.WhenAny(
-                    meeting.Orchestrator.DisposeAsync().AsTask(),
-                    Task.Delay(_budgets.QuitTeardownCap))
-                .ConfigureAwait(false);
+            await CappedAsync(meeting.Orchestrator.DisposeAsync().AsTask()).ConfigureAwait(false);
 
         // The attached twin, under the same cap and for the same reason. Exclusive with the
         // meeting above, so at most one of the two ever runs — but read separately rather than
         // as an else, because "exactly one is non-null" is the invariant, not the assumption.
         Attached? attached = TakeAttached();
         if (attached is not null)
-            await Task.WhenAny(
-                    attached.Orchestrator.DisposeAsync().AsTask(),
-                    Task.Delay(_budgets.QuitTeardownCap))
-                .ConfigureAwait(false);
+            await CappedAsync(attached.Orchestrator.DisposeAsync().AsTask()).ConfigureAwait(false);
 
         // A Disconnect already in flight took the attached taps before this method could, and
         // its drain is still running. Same reasoning as the End wait below: cut short, the taps
         // never flush and the Recorder transcribes a truncated WAV.
         if (disconnect is { IsCompleted: false })
-            await Task.WhenAny(disconnect, Task.Delay(_budgets.QuitTeardownCap)).ConfigureAwait(false);
+            await CappedAsync(disconnect).ConfigureAwait(false);
 
         // An End already in flight took the meeting before this method could, so TakeMeeting
         // above saw nothing and there was nothing here to tear down, but its drain is still
@@ -1066,7 +1041,7 @@ public sealed class BridgeRuntime
         // teardown above: overrunning it is an outcome, not an error, and a tray that refuses
         // to exit is worse than a dropped tail.
         if (end is { IsCompleted: false })
-            await Task.WhenAny(end, Task.Delay(_budgets.QuitTeardownCap)).ConfigureAwait(false);
+            await CappedAsync(end).ConfigureAwait(false);
 
         // Marshalled like every other view touch. Both awaits above are ConfigureAwait(false),
         // so by here we are on a thread-pool thread: calling straight through would break the
@@ -1075,6 +1050,18 @@ public sealed class BridgeRuntime
         // to Dispose its NotifyIcon and end the message loop from the thread that owns them.
         _dispatcher.Post(_view.Shutdown);
     }
+
+    /// <summary>
+    /// Wait for one teardown, or for the cap, whichever lands first.
+    ///
+    /// RACED rather than enforced with <c>WaitAsync</c>, which is the whole point: overrunning
+    /// the cap is an expected outcome rather than an error, and <c>WaitAsync</c> turns it into
+    /// a TimeoutException that would skip the Shutdown after it. Out of a fire-and-forget click
+    /// handler nothing would report that, and <c>_quitting</c> is already latched, so the
+    /// operator would be left with a tray refusing to start a meeting and refusing to exit.
+    /// </summary>
+    private Task CappedAsync(Task teardown) =>
+        Task.WhenAny(teardown, Task.Delay(_budgets.QuitTeardownCap));
 
     /// <summary>
     /// A streaming meeting: the pipelines (which hold the enumerator their endpoints came out

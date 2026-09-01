@@ -8,10 +8,10 @@ namespace TapScribe.Bundle.Core;
 /// tray icon, which stays the Bridge's tap state (ADR-0022): the icon is what an operator
 /// watches during a call, and a Recorder that is merely stopped must not read as a meeting
 /// that failed.</param>
-/// <param name="Managed">Whether this tray started the Recorder it is describing. An
-/// unmanaged one is shown and never stopped, so the shell can say which it is looking
-/// at.</param>
-public sealed record HostView(string Header, bool CanStart, bool CanStop, bool Managed);
+/// <remarks>There is deliberately no "is it ours" flag: a shell that wanted one would be
+/// re-deriving what <paramref name="CanStop"/> already says, since an unmanaged Recorder is
+/// exactly the one this tray may not stop, and the header says so in words.</remarks>
+public sealed record HostView(string Header, bool CanStart, bool CanStop);
 
 /// <summary>
 /// Everything the host role needs from a tray shell. Its own seam in
@@ -73,7 +73,6 @@ public sealed class HostController : IDisposable
     private readonly Lock _gate = new();
     private RecorderState _state = RecorderState.Stopped;
     private string _message = "TapScribe is not running.";
-    private bool _busy;
 
     public HostController(IHostView view, Action<Action> post, IRecorderHost supervisor)
     {
@@ -129,20 +128,24 @@ public sealed class HostController : IDisposable
         {
             _state = state;
             _message = message;
-            _busy = false;
         }
         HostView view = Render(state, message);
         _post(() => _view.ShowHost(view));
     }
 
-    /// <summary>The operator asked for the Recorder to start (again).</summary>
+    /// <summary>
+    /// The operator asked for the Recorder to start (again). Refused when the menu would
+    /// not have offered it — asked of <see cref="Render"/> rather than re-derived, so a new
+    /// <see cref="RecorderState"/> cannot be enabled in one place and refused in the other.
+    /// The claim happens INSIDE the lock, so a double-click cannot start two preflights.
+    /// </summary>
     public void StartRecorder()
     {
         lock (_gate)
         {
-            if (_busy || _state is RecorderState.Preflight or RecorderState.Running)
+            if (!Render(_state, _message).CanStart)
                 return;
-            _busy = true;
+            _state = RecorderState.Preflight;
         }
         Start();
     }
@@ -160,28 +163,17 @@ public sealed class HostController : IDisposable
         Report(RecorderState.Stopped, "TapScribe is not running.");
     }
 
-    /// <summary>What the menu currently says. The shell re-renders from this after any
-    /// change of its own (a Bridge command greying things out, say).</summary>
-    public HostView Current
-    {
-        get
-        {
-            lock (_gate)
-                return Render(_state, _message);
-        }
-    }
-
     private static HostView Render(RecorderState state, string message) => state switch
     {
         // Nothing to offer while it is coming up: a second Start would spawn a second
         // preflight, and Stop has nothing to stop yet.
-        RecorderState.Preflight => new HostView(message, CanStart: false, CanStop: false, Managed: true),
-        RecorderState.Running => new HostView(message, CanStart: false, CanStop: true, Managed: true),
+        RecorderState.Preflight => new HostView(message, CanStart: false, CanStop: false),
+        RecorderState.Running => new HostView(message, CanStart: false, CanStop: true),
         // Shown, and deliberately UNSTOPPABLE. Start is offered because the operator may
         // stop the other one themselves and want this tray to take over.
-        RecorderState.Unmanaged => new HostView(message, CanStart: true, CanStop: false, Managed: false),
+        RecorderState.Unmanaged => new HostView(message, CanStart: true, CanStop: false),
         // Stopped or Failed: the way out is to try again.
-        _ => new HostView(message, CanStart: true, CanStop: false, Managed: true),
+        _ => new HostView(message, CanStart: true, CanStop: false),
     };
 
     public void Dispose() => _supervisor.Dispose();
