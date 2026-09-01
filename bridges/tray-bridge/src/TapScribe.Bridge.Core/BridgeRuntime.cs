@@ -111,9 +111,20 @@ public sealed class BridgeRuntime
         StartedMeeting? started = null;
         try
         {
-            OpenedMeeting? opened = await OpenMeetingAsync(settings).ConfigureAwait(false);
+            OpenedTaps? opened = await OpenTapsAsync(
+                settings,
+                "Could not start meeting",
+                ct => MintAsync(settings, ct)).ConfigureAwait(false);
             if (opened is null)
-                return; // the selection cannot start a meeting, and OpenMeetingAsync said so
+                return; // the selection cannot start a meeting, and OpenTapsAsync said so
+
+            // The mint answers a session id or throws, so this is unreachable in production;
+            // it is here because the type cannot say so, and a meeting whose taps carried no
+            // session would silently become an attached one — recording into whatever the
+            // Recorder had open instead of into its own. Loud beats quiet; the filter below
+            // classifies it.
+            if (opened.SessionId is not { } sessionId)
+                throw new InvalidOperationException("The Recorder returned no session for the meeting.");
 
             // Ownership of the whole set transfers AT THE CALL: StartAll releases everything it
             // was given on every exit that is not a handed-back orchestrator, and the open phase
@@ -146,7 +157,7 @@ public sealed class BridgeRuntime
                 if (!abandoned)
                     // DateTimeOffset.Now is the meeting's wall-clock start, for the
                     // Past-meetings history (#168).
-                    _meeting = new Meeting(orchestrator, opened.SessionId, DateTimeOffset.Now);
+                    _meeting = new Meeting(orchestrator, sessionId, DateTimeOffset.Now);
             }
             if (abandoned)
             {
@@ -198,17 +209,32 @@ public sealed class BridgeRuntime
     }
 
     /// <summary>
-    /// The open phase of a start: resolve the operator's selection against the devices present
-    /// now, mint the session they will tap into, and open one capture per resolved device.
+    /// The open phase of a start OR a connect: resolve the operator's selection against the
+    /// devices present now, run <paramref name="preflight"/>, and open one capture per resolved
+    /// device.
+    ///
+    /// The two modes differ in ONE step, which is why they share this one: a meeting mints the
+    /// detached session its taps route into, an attached tap has nothing to mint and probes the
+    /// Recorder instead. Everything either side of that — the selection resolve and its hard
+    /// stop, the per-device open, the ownership rule below — is the same work, and a second copy
+    /// of it would be the place the two modes quietly stopped agreeing about what a device is.
     ///
     /// Hands back ONE fully owned <see cref="CaptureSet"/> or releases everything it opened,
     /// which is the same total rule <see cref="CaptureOrchestrator.StartAll"/> keeps for the
     /// phase after it. Between the two there is no moment at which a capture or an enumerator
-    /// belongs to <see cref="StartAsync"/>, so that method has nothing to hold, nothing to clear
-    /// and no release of its own to get right. Null means the selection cannot start a meeting
-    /// and the operator has already been told; a throw is the caller's to classify.
+    /// belongs to the caller, so that method has nothing to hold, nothing to clear and no
+    /// release of its own to get right. Null means the selection cannot open any tap and the
+    /// operator has already been told; a throw is the caller's to classify.
     /// </summary>
-    private async Task<OpenedMeeting?> OpenMeetingAsync(BridgeSettings settings)
+    /// <param name="failureTitle">The notice heading for a selection that cannot open —
+    /// "Could not start meeting" or "Could not connect". The BODY is the verdict's own text,
+    /// which names the fix rather than the mode.</param>
+    /// <param name="preflight">The Recorder round-trip this mode needs before any device is
+    /// opened, answering the session the taps route into or <c>null</c> for the current one. It
+    /// THROWS on failure — the mint's own documented contract — so a null answer is
+    /// unambiguously "no session named" rather than "something went wrong".</param>
+    private async Task<OpenedTaps?> OpenTapsAsync(
+        BridgeSettings settings, string failureTitle, Func<CancellationToken, Task<string?>> preflight)
     {
         IAudioDeviceEnumerator enumerator = _deps.OpenEnumerator();
         // The set is filled in place: TryAddSpec appends to this same list, so the release below
@@ -231,16 +257,17 @@ public sealed class BridgeRuntime
                 settings.EffectiveDevices, enumerator.List(), baseOptions.Identity);
             if (resolution.Verdict != SelectionVerdict.Ok)
             {
-                FailToIdle("Could not start meeting", DescribeVerdict(resolution.Verdict));
+                FailToIdle(failureTitle, DescribeVerdict(resolution.Verdict));
                 return null;
             }
 
-            // 2) Mint a detached session. This doubles as the connection pre-flight: an
-            //    unreachable Recorder or a rejected token throws here, before any device is
-            //    opened.
-            string sessionId;
-            using (var cts = new CancellationTokenSource(_budgets.MintTimeout))
-                sessionId = await _deps.MintDetachedSession(settings, cts.Token).ConfigureAwait(false);
+            // 2) The Recorder round-trip, before any device is opened: an unreachable Recorder
+            //    or a rejected token throws here rather than being discovered by the first
+            //    person to speak. A meeting's mint IS that round-trip and answers the detached
+            //    session; an attached tap has no mint, so it probes and answers null.
+            string? sessionId;
+            using (var cts = new CancellationTokenSource(_budgets.PreflightTimeout))
+                sessionId = await preflight(cts.Token).ConfigureAwait(false);
 
             // 3) One tap per resolved device, each routing into the one session under its own
             //    identity/name and its OWN gate (#151). ToTapOptions preserves the Resolved
@@ -265,7 +292,7 @@ public sealed class BridgeRuntime
             // so nothing that can throw stands between the open and the transfer.
             var tally = new DeviceTally(specs.Count);
             handedOver = true;
-            return new OpenedMeeting(opened, sessionId, tally, resolution.Missing);
+            return new OpenedTaps(opened, sessionId, tally, resolution.Missing);
         }
         finally
         {
@@ -279,13 +306,20 @@ public sealed class BridgeRuntime
         }
     }
 
-    /// <summary>A meeting's devices, open and not yet streaming: the
+    /// <summary>A bracketed meeting's pre-flight: mint the detached session its taps route
+    /// into. The mint IS the Recorder round-trip, so a meeting needs no probe of its own — an
+    /// unreachable Recorder or a refused token throws out of here.</summary>
+    private async Task<string?> MintAsync(BridgeSettings settings, CancellationToken cancellationToken) =>
+        await _deps.MintDetachedSession(settings, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>One mode's devices, open and not yet streaming: the
     /// <see cref="CaptureSet"/> that <see cref="CaptureOrchestrator.StartAll"/> takes ownership
-    /// of, the detached session they will tap into, the <see cref="DeviceTally"/> sized by how
-    /// many opened, and the selections that did not resolve. One value, so the handover is one
-    /// statement with nothing between it and the open that could strand the set.</summary>
-    private sealed record OpenedMeeting(
-        CaptureSet Captures, string SessionId, DeviceTally Tally, IReadOnlyList<DeviceSelection> Missing);
+    /// of, the session they will tap into (null for an attached tap, which names none), the
+    /// <see cref="DeviceTally"/> sized by how many opened, and the selections that did not
+    /// resolve. One value, so the handover is one statement with nothing between it and the
+    /// open that could strand the set.</summary>
+    private sealed record OpenedTaps(
+        CaptureSet Captures, string? SessionId, DeviceTally Tally, IReadOnlyList<DeviceSelection> Missing);
 
     /// <summary>A published, streaming meeting's presentation state: the live
     /// <see cref="DeviceTally"/> and the selections that did not resolve. Its non-nullness is
