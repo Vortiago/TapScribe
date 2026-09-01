@@ -193,6 +193,11 @@ def main() -> None:
         backend_pref = "cpu"
     config.AUTH_ENABLED = not args.no_auth
     config.AUTO_START_LIVE = args.auto_live
+    # What the dashboard session cookie is scoped and secured by — see the two
+    # constants' own comment in config.py. Stamped here, beside AUTH_ENABLED, so
+    # every boot-time fact the auth layer needs is set in one place.
+    config.PORT = args.port
+    config.TLS_ENABLED = args.tls or bool(args.cert or args.key)
 
     live_config_kwargs: dict[str, object] = dict(
         model=args.live_model,
@@ -279,7 +284,7 @@ def main() -> None:
     # files; reuse it across restarts so browsers only prompt once.
     ssl_certfile: str | None = None
     ssl_keyfile: str | None = None
-    use_tls = args.tls or bool(args.cert or args.key)
+    use_tls = config.TLS_ENABLED
     if use_tls:
         from pathlib import Path as _Path
 

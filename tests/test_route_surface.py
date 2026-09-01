@@ -134,6 +134,8 @@ _GOLDEN = frozenset(
         ("GET", "/dashboard.css", "dashboard_css"),
         ("GET", "/health", "health"),
         ("GET", "/healthz", "healthz"),
+        ("GET", "/login", "login"),
+        ("POST", "/api/login-link", "api_login_link"),
         ("GET", "/next.css", "next_css"),
         ("GET", "/sessions", "list_sessions_simple"),
         ("GET", "/setup", "setup_page"),

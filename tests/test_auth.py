@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from tapscribe import auth
 from tapscribe import config as _config
+from tapscribe.login_links import LoginLinks
 
 TAP_TOKEN = "tap-secret-token"
 BASIC_PASS = "basic-secret-pass"
@@ -45,10 +46,22 @@ def _mini_app() -> FastAPI:
     async def _whatever() -> dict:
         return {"scheme": "basic"}
 
+    @app.post("/api/whatever")  # the same scheme, state-changing
+    async def _write() -> dict:
+        return {"scheme": "basic"}
+
+    @app.post("/api/tap/write")  # tap-bearer scheme, state-changing
+    async def _tap_write() -> dict:
+        return {"scheme": "tap"}
+
     app.state.recorder = SimpleNamespace(
         tap=SimpleNamespace(value=TAP_TOKEN),
         auth=SimpleNamespace(value=BASIC_PASS),
     )
+    # The mini app runs no lifespan, so the store the real one builds is wired
+    # by hand — a middleware that finds none must refuse every cookie, and these
+    # tests are where that is pinned.
+    app.state.login_links = LoginLinks()
     return app
 
 

@@ -54,6 +54,14 @@ async def lifespan(app: FastAPI):
 
         install_json_logging()
 
+    # The dashboard's login-link store (ADR-0023). Per-app rather than a module
+    # global, so tests never share one another's sessions; in memory, so a
+    # Recorder restart logs the browser out, which is one tray click and no
+    # third secret at rest.
+    from .login_links import LoginLinks
+
+    app.state.login_links = LoginLinks()
+
     recorder: Recorder | None = getattr(app.state, "recorder", None)
     if recorder is not None and config.AUTO_START_LIVE:
         # Reconcile the boot channel toward the operator's persisted default

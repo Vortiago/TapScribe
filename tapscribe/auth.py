@@ -33,7 +33,37 @@ TAP_SUBPROTOCOL_PREFIX: str = "tapscribe.v1.tap."
 _TAP_PREFIX_SLASH: str = config.TAP_PREFIX + "/"
 
 
-def _utf8_compare_digest(a: str, b: str) -> bool:
+#: Methods whose handling changes something. The Origin check below applies to
+#: these and not to reads: a GET's response is protected by not being READABLE
+#: cross-origin (`allow_credentials` is false), where a write executes whether
+#: or not the attacker can see the answer.
+_STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _session_cookie_name() -> str:
+    """The dashboard session cookie's name. Deferred to `routes.login` so the
+    port-carrying spelling has ONE owner: a middleware that spelled it
+    differently would silently stop accepting the sessions that route mints,
+    which reads exactly like "the login link is broken"."""
+    from .routes.login import cookie_name
+
+    return cookie_name()
+
+
+def _is_cross_origin(request: Request) -> bool:
+    """Whether the request carries an `Origin` that is not this server's own.
+
+    Compared against the request's own scheme/host/port rather than a configured
+    origin, because the Recorder has no notion of its public URL and a loopback
+    dashboard's origin IS whatever the browser used to reach it.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    return origin.rstrip("/") != str(request.base_url).rstrip("/")
+
+
+def utf8_compare_digest(a: str, b: str) -> bool:
     """`hmac.compare_digest` needs equal-type operands, but every credential
     here starts life as `str`. Centralizing the `.encode("utf-8")` in one
     place means a future credential-comparison site can't forget it and
@@ -54,7 +84,7 @@ def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> 
         if not proto.startswith(TAP_SUBPROTOCOL_PREFIX):
             continue
         offered_token = proto[len(TAP_SUBPROTOCOL_PREFIX) :]
-        if _utf8_compare_digest(offered_token, expected_token):
+        if utf8_compare_digest(offered_token, expected_token):
             return proto
     return None
 
@@ -76,7 +106,7 @@ def check_tap_bearer(authorization: str | None, expected_token: str) -> bool:
     scheme, _, token = (authorization or "").partition(" ")
     if scheme.lower() != "bearer":
         return False
-    return _utf8_compare_digest(token.strip(), expected_token)
+    return utf8_compare_digest(token.strip(), expected_token)
 
 
 async def basic_auth_middleware(request: Request, call_next):
@@ -93,8 +123,12 @@ async def basic_auth_middleware(request: Request, call_next):
                      bearer (`check_tap_bearer`), so a bearer-less
                      /api/tap/* route is impossible by construction and the
                      handlers carry no gate of their own.
-      * BASIC      — everything else: dashboard HTTP Basic against
-                     `recorder.auth.value`.
+      * BASIC      — everything else: the dashboard / REST default, in
+                     either of TWO credential FORMS for the same login —
+                     HTTP Basic against `recorder.auth.value`, or the
+                     session cookie a login link minted (ADR-0023). Two
+                     forms, still ONE scheme: no route is gated
+                     differently by which of them a caller used.
 
     The /tap WebSocket is a separate path: middlewares of this kind don't
     see WS upgrades, so it carries the token in `Sec-WebSocket-Protocol`,
@@ -129,8 +163,38 @@ async def basic_auth_middleware(request: Request, call_next):
             return JSONResponse({"detail": "invalid tap token"}, status_code=401)
         return await call_next(request)
 
-    # BASIC scheme — the dashboard / REST default.
-    realm_header = {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
+    # BASIC scheme — the dashboard / REST default. TWO credential FORMS, one
+    # scheme (ADR-0023 amending ADR-0008): an `Authorization: Basic` header, or
+    # the dashboard session cookie a login link minted. No route is gated
+    # differently by which of the two a caller used.
+    #
+    # Cross-site request forgery, before either form is read. Scoped to this
+    # branch and to state-changing methods on purpose:
+    #   - the TAP-BEARER branch above is where the SpatialChat extension's
+    #     cross-origin POSTs land, and `allow_origins=["*"]` is load-bearing for
+    #     them, so widening this would break the one bridge that needs it;
+    #   - a GET carries no side effect worth an Origin check, and /health (which
+    #     that extension also calls cross-origin) is PUBLIC-exempt anyway;
+    #   - an ABSENT Origin passes: curl, the tray and every other non-browser
+    #     caller send none, and a browser always does on a state-changing
+    #     request.
+    # SameSite=Strict already stops a cross-SITE page attaching the cookie, but
+    # site scoping ignores PORTS, so a hostile page on another localhost port is
+    # same-site to this one. This is what closes that.
+    if request.method.upper() in _STATE_CHANGING and _is_cross_origin(request):
+        return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+
+    cookie = request.cookies.get(_session_cookie_name())
+    links = getattr(request.app.state, "login_links", None)
+    if cookie is not None and links is not None and links.validate(cookie):
+        return await call_next(request)
+
+    # A caller that PRESENTED a cookie gets no `WWW-Authenticate`. Otherwise a
+    # Recorder restart — which invalidates every session, the store being in
+    # memory — turns the dashboard's 500 ms /api/state poll into the browser's
+    # native Basic dialog, which is the one prompt the login link exists to
+    # remove. The dashboard's own fetch sees the 401 and can say so quietly.
+    realm_header = {} if cookie is not None else {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
     auth_header = request.headers.get("authorization") or ""
     if not auth_header.lower().startswith("basic "):
         return JSONResponse({"detail": "Authentication required"}, status_code=401, headers=realm_header)
@@ -141,8 +205,8 @@ async def basic_auth_middleware(request: Request, call_next):
             {"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header
         )
     user, _, pw = decoded.partition(":")
-    user_ok = _utf8_compare_digest(user, config.AUTH_USER)
-    pass_ok = _utf8_compare_digest(pw, recorder.auth.value)
+    user_ok = utf8_compare_digest(user, config.AUTH_USER)
+    pass_ok = utf8_compare_digest(pw, recorder.auth.value)
     if not (user_ok and pass_ok):
         return JSONResponse({"detail": "Invalid credentials"}, status_code=401, headers=realm_header)
     return await call_next(request)
