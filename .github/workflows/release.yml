@@ -373,9 +373,107 @@ jobs:
           path: dist-bundle/TapScribe-Setup-win-x64.exe
           if-no-files-found: error
 
+  bundle-macos:
+    name: build the macOS Bundle (.pkg)
+    # Must be macos-latest, for the same reason `tray-macos` is: the .app it
+    # packages is produced by the macos workload against Xcode's SDK, and
+    # `pkgbuild`, `ditto` and `codesign` are all macOS tools. It also pip-installs
+    # into an osx-arm64 interpreter, and those wheels do not cross-compile.
+    #
+    # Needs `tray-macos` as well as `build`, and REUSES its .app rather than
+    # publishing the tray a second time: one tray per OS is the whole of ADR-0022,
+    # and building it twice is exactly where the two copies would drift. The zip
+    # artifact is the bundle before the payload goes in, which is what the
+    # bridge-only download stays.
+    needs: [build, tray-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive version from tag
+        run: echo "VER=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      # The SAME wheel PyPI gets. The Bundle installs this rather than resolving
+      # `tapscribe` from PyPI, so the shipped installer's version can never drift
+      # from the server it starts (ADR-0015).
+      - name: Download the wheel built upstream
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download the tray published upstream
+        uses: actions/download-artifact@v8
+        with:
+          name: bridge-tray-macos
+          path: tray/
+
+      # The zip, not the .pkg: this job lays a payload INSIDE the bundle, so it
+      # needs the bundle itself. ditto, never `unzip`, for the symlinks and exec
+      # bits the archive carries and a naive unpack drops.
+      - name: Unpack the tray bundle
+        run: |
+          set -euo pipefail
+          ditto -x -k tray/TapScribe.TrayBridge-osx-arm64.zip unpacked
+          test -d unpacked/TapScribe.app
+          echo "APP=$PWD/unpacked/TapScribe.app" >> "$GITHUB_ENV"
+
+      - name: Fetch the embedded CPython (python-build-standalone)
+        run: |
+          set -euo pipefail
+          # A standalone, relocatable CPython — NOT a framework build, which
+          # hard-codes its own prefix and cannot be copied into the operator's
+          # data root the way ADR-0024 needs.
+          tag="${{ env.PBS_TAG }}"
+          asset="cpython-${{ env.PBS_PYTHON }}+$tag-aarch64-apple-darwin-install_only.tar.gz"
+          url="https://github.com/astral-sh/python-build-standalone/releases/download/$tag/$asset"
+          echo "Fetching $url"
+          curl -fsSL "$url" -o pbs.tar.gz
+          mkdir -p staging
+          tar -xzf pbs.tar.gz -C staging
+          # The archive unpacks to staging/python/…. Asserted, because
+          # BundleLayout.Python hard-codes bin/python3 and an upstream layout
+          # change has to fail HERE rather than as a silent "nothing happens when
+          # I click the tray icon". One interpreter, not two: macOS has no
+          # pythonw twin, which is why BundleLayout.Pythonw is the same binary.
+          test -x staging/python/bin/python3
+
+      # Core deps only — the same trade the Windows Bundle makes. Model backends
+      # are /setup's job at runtime, because shipping them would multiply an
+      # already large payload for extras most operators do not want.
+      - name: Install TapScribe's core dependencies into the interpreter
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/tapscribe-*.whl)
+          test -f "$wheel"
+          staging/python/bin/python3 -m pip install "$wheel"
+          echo "WHEEL=$PWD/$wheel" >> "$GITHUB_ENV"
+
+      # The script, not inline flags: it stages the payload where
+      # BundleLayout.MacOSPayload looks, re-signs over it, and then delegates to
+      # the SAME build-macos-pkg.sh that ci.yml's quarantine proof exercises — so
+      # the packaging recipe this ships is the one that gate tests.
+      - name: Build the Bundle package
+        run: >
+          packaging/macos/build-bundle-pkg.sh
+          "$APP"
+          "$PWD/staging/python"
+          "$WHEEL"
+          ${{ env.VER }}
+          TapScribe-Bundle-osx-arm64.pkg
+
+      - name: Upload macOS bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-bundle
+          # Stable, UNVERSIONED filename so releases/latest/download/<name>
+          # stays a permanent URL across versions (ADR-0012).
+          path: TapScribe-Bundle-osx-arm64.pkg
+          if-no-files-found: error
+
   github-release:
     name: github release
-    needs: [build, extension, tray, tray-macos, bundle]
+    needs: [build, extension, tray, tray-macos, bundle, bundle-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -415,6 +513,12 @@ jobs:
           name: windows-bundle
           path: bundle-artifacts/
 
+      - name: Download macos bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-bundle
+          path: bundle-artifacts/
+
       - name: Draft release notes (release-drafter)
         id: drafter
         uses: release-drafter/release-drafter@v7
@@ -437,6 +541,7 @@ jobs:
             bridge-artifacts/TapScribe.TrayBridge-osx-arm64.pkg
             bridge-artifacts/TapScribe.TrayBridge-osx-arm64.zip
             bundle-artifacts/TapScribe-Setup-win-x64.exe
+            bundle-artifacts/TapScribe-Bundle-osx-arm64.pkg
           fail_on_unmatched_files: true
 
   # PyPI Trusted Publishing. The publisher is registered on PyPI against THIS

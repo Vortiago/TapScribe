@@ -115,9 +115,13 @@ Two behaviours there are load-bearing and easy to undo by accident:
   running-but-unmanaged and outlives Quit. Which it is comes from the spawn
   attempt plus a `/health` probe, never from parsing the child's output.
 
-macOS has no Bundle yet (ADR-0024 is still proposed), so the Mac shell references
-no Bundle assembly and builds no `TrayHost` at all: it is bridge-only by
-construction, not by `HostPayloadPresent` answering false.
+The Mac shell carries the same role (`MacTrayHost`), with two differences that are
+macOS's rather than the role's (ADR-0024). The interpreter is COPIED out of the
+`.app` on first launch, because pip writing inside a signed bundle would invalidate
+its signature — so an upgrade re-copies and says the model backends are gone. And
+the menu carries **Reveal recordings in Finder**, because the data root is under
+`~/Library/Application Support`, which Finder hides; that location was chosen over
+`~/Documents` precisely because those are TCC-protected.
 
 ## Prerequisites
 

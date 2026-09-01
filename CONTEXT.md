@@ -196,8 +196,10 @@ The tray points `TAPSCRIBE_BASE_DIR` at the operator's data directory, boots the
 Recorder and supervises it — the [host role](#host-role); it is not the server,
 it starts one. That tray is the [Tray Bridge](#tray-bridge), which is the same
 executable the bridge-only artifact ships and carries the extra role because the
-payload is beside it. Windows only; ADR-0015, ADR-0022. ADR-0024 (proposed) adds
-the macOS shape.
+payload is beside it. Windows and macOS; ADR-0015, ADR-0022, ADR-0024. The two
+differ in where pip may write: on Windows the shipped interpreter IS the one it
+installs into, while a macOS Bundle copies it out of the `.app` on first launch,
+because writing inside a signed bundle invalidates its signature.
 
 A Bundle is **not a Bridge**: a Bridge taps audio *into* a Recorder, a Bundle
 *is* one, packaged. Shipping a Bridge inside one is composition, not identity —

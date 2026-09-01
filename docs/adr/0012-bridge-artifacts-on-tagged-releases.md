@@ -21,6 +21,12 @@ under **stable, unversioned filenames**:
   card — you need a Bundle to have a dashboard. It ships the same tray the
   Windows zip does, which is why the release job reuses that artifact rather than
   publishing a second copy (ADR-0022).
+- `TapScribe-Bundle-osx-arm64.pkg` — the macOS [Bundle](../../CONTEXT.md#bundle)
+  (ADR-0024). Everything said above about the Windows one holds: same
+  `bundle-artifacts/` path, absent from `BRIDGE_ARTIFACTS`, and built from the
+  `.app` the macOS tray job already published rather than a second publish of the
+  same tray. It is that `.app` with a read-only interpreter and wheel laid inside
+  it, which is why the two macOS assets differ in size and not in tray.
 
 The dashboard's Settings "Get a bridge" card links to
 `https://github.com/{GITHUB_REPO}/releases/latest/download/<asset>`.
