@@ -604,7 +604,7 @@ jobs:
         run: |
           set -euo pipefail
           app=$(find bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release \
-            -maxdepth 3 -type d -name 'TapScribe.TrayBridge.MacOS.app' -not -path '*/publish/*')
+            -maxdepth 3 -type d -name 'TapScribe.app' -not -path '*/publish/*')
           # Exactly one match, and NO match fails: the build above guarantees the
           # bundle, so an empty result means the path drifted rather than that
           # there is nothing to check. `wc -l` alone would not catch it, since
@@ -623,7 +623,7 @@ jobs:
           xattr -p com.apple.quarantine probe.pkg
 
           sudo installer -pkg probe.pkg -target /
-          installed=/Applications/TapScribe.TrayBridge.MacOS.app
+          installed=/Applications/TapScribe.app
           # Named failures, not bare `test`: a silent one-line exit says only
           # that the step failed, and this pair caught a real relocation bug
           # whose diagnosis took a local repro it should not have needed.
@@ -634,7 +634,7 @@ jobs:
             echo "build-macos-pkg.sh still clears BundleIsRelocatable."
             exit 1
           fi
-          if [ ! -x "$installed/Contents/MacOS/TapScribe.TrayBridge.MacOS" ]; then
+          if [ ! -x "$installed/Contents/MacOS/TapScribe" ]; then
             echo "FAIL: the installed bundle has no executable at Contents/MacOS/."
             exit 1
           fi
@@ -669,7 +669,7 @@ jobs:
         timeout-minutes: 3
         run: |
           set -euo pipefail
-          bin=/Applications/TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS
+          bin=/Applications/TapScribe.app/Contents/MacOS/TapScribe
           HOME=$(mktemp -d) "$bin" > launch.log 2>&1 &
           pid=$!
           # A crash on launch is immediate, so this is a grace period rather than

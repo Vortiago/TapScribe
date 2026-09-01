@@ -16,7 +16,7 @@ public class ProgramTests
     {
         using var complaints = new StringWriter();
 
-        int exit = Program.Run(new Version(14, 3), complaints, NeverLaunch);
+        int exit = Program.Run(new Version(14, 3), complaints, NeverLaunch, NeverTidy);
 
         Assert.NotEqual(0, exit);
         Assert.Contains("14.4", complaints.ToString());
@@ -27,7 +27,7 @@ public class ProgramTests
     {
         using var complaints = new StringWriter();
 
-        int exit = Program.Run(null, complaints, NeverLaunch);
+        int exit = Program.Run(null, complaints, NeverLaunch, NeverTidy);
 
         Assert.NotEqual(0, exit);
         Assert.NotEmpty(complaints.ToString());
@@ -40,7 +40,7 @@ public class ProgramTests
         // anything written here on a healthy launch is noise nobody will ever read.
         using var complaints = new StringWriter();
 
-        int exit = Program.Run(new Version(14, 4), complaints, static () => { });
+        int exit = Program.Run(new Version(14, 4), complaints, static () => { }, static () => { });
 
         Assert.Equal(0, exit);
         Assert.Empty(complaints.ToString());
@@ -52,7 +52,7 @@ public class ProgramTests
         using var complaints = new StringWriter();
         int launched = 0;
 
-        Program.Run(new Version(15, 0), complaints, () => launched++);
+        Program.Run(new Version(15, 0), complaints, () => launched++, static () => { });
 
         Assert.Equal(1, launched);
     }
@@ -66,9 +66,27 @@ public class ProgramTests
         // it is reached rather than reported afterwards.
         using var complaints = new StringWriter();
 
-        Program.Run(new Version(13, 6), complaints, NeverLaunch);
+        Program.Run(new Version(13, 6), complaints, NeverLaunch, NeverTidy);
+    }
+
+    [Fact]
+    public void Run_AtTheFloor_RemovesTheAppItReplacedBeforeLaunching()
+    {
+        // Ordering, not just occurrence: the launch does not return — quitting terminates
+        // the process from inside AppKit's run loop — so anything sequenced after it never
+        // happens, and the orphaned bundle ADR-0024's rename exists to remove would sit in
+        // /Applications for the life of the install.
+        using var complaints = new StringWriter();
+        var order = new List<string>();
+
+        Program.Run(new Version(15, 0), complaints, () => order.Add("launch"), () => order.Add("tidy"));
+
+        Assert.Equal(["tidy", "launch"], order);
     }
 
     private static void NeverLaunch() =>
         Assert.Fail("the shell launched a menu bar on a Mac it had already refused");
+
+    private static void NeverTidy() =>
+        Assert.Fail("the shell deleted the app it replaced on a Mac it had already refused");
 }

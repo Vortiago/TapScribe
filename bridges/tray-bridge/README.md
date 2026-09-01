@@ -156,7 +156,7 @@ On macOS:
 # from this directory (bridges/tray-bridge/)
 dotnet test  tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj -c Release
 dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
-open src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
+open src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.app
 ```
 
 `open` rather than `dotnet run`, because the app has to launch as a **bundle**:
@@ -222,7 +222,7 @@ installer, code signing, or auto-update: it's a copy-and-run exe. Ships as
 ```bash
 # from this directory (bridges/tray-bridge/)
 dotnet publish src/TapScribe.TrayBridge.MacOS -c Release -p:CreatePackage=false
-APP=src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
+APP=src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.app
 tools/build-macos-pkg.sh "$APP" 0.0.0 TapScribe.TrayBridge-osx-arm64.pkg
 ditto -c -k --keepParent "$APP" TapScribe.TrayBridge-osx-arm64.zip
 ```
@@ -259,7 +259,7 @@ if it is wrong:
    section, and click **Open Anyway**. The button disappears about an hour after
    the blocked attempt, so if it is not there, try opening the package again
    first. On macOS 26 this step also asks for an admin password.
-3. Let the installer put `TapScribe.TrayBridge.MacOS.app` in `/Applications`,
+3. Let the installer put `TapScribe.app` in `/Applications`,
    then open it. The icon appears in the **menu bar**, with no Dock icon and no
    window, which is what `LSUIElement` buys. **No Terminal step, and no second
    Gatekeeper prompt.**
@@ -277,7 +277,7 @@ part on a real runner, since Apple documents none of it.
 If you took the zip instead, the `xattr` step is still the only escape:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app
+xattr -dr com.apple.quarantine /Applications/TapScribe.app
 ```
 
 Notarisation is what removes the block in step 2, and it needs a paid Apple
@@ -313,7 +313,7 @@ knowing before you reach for one:
   opened from Finder, the Dock or `open -a` inherits `launchd`'s environment,
   not your shell's, so an export in `~/.zshrc` is simply not there. Launching
   the binary inside the bundle from a terminal
-  (`TAPSCRIBE_HOST=… TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
+  (`TAPSCRIBE_HOST=… TapScribe.app/Contents/MacOS/TapScribe`)
   does seed it, and so does typing the values into Settings once.
 - **An update asks for your login password to reach the token.** A Keychain
   item's ACL trusts the app that created it, identified by its code signature,
@@ -384,7 +384,7 @@ everything below, still needs a person.
 
 1. Start a Recorder: `python -m tapscribe --no-auth` (or `./start.ps1`).
 2. `dotnet run --project src/TapScribe.TrayBridge.Windows`. On macOS launch the built
-   bundle instead (`open …/TapScribe.TrayBridge.MacOS.app`, or its inner binary
+   bundle instead (`open …/TapScribe.app`, or its inner binary
    from a terminal when you want the stderr): only the bundle carries the
    `Info.plist` that makes it a menu-bar app and names the microphone in the TCC
    prompt, and only a bundle gets its own grants rather than inheriting the

@@ -1,4 +1,5 @@
 using TapScribe.Bridge.MacOS;
+using TapScribe.Bundle.Core;
 
 namespace TapScribe.TrayBridge.MacOS;
 
@@ -15,17 +16,27 @@ namespace TapScribe.TrayBridge.MacOS;
 /// </summary>
 internal static class Program
 {
-    private static int Main() => Run(MacOSProductVersion.Current(), Console.Error, TrayShell.RunMenuBar);
+    private static int Main() => Run(
+        MacOSProductVersion.Current(),
+        Console.Error,
+        TrayShell.RunMenuBar,
+        () => LegacyAppBundle.RemoveSuperseded(
+            LegacyAppBundle.ContainingApp(AppContext.BaseDirectory), Console.Error.WriteLine));
 
     /// <summary>The launch decision, with the ambient read, the output stream and the launch itself
     /// passed in so it can be driven for a macOS this box is not running and without AppKit, which
     /// cannot be constructed under a test host. Returns the process exit code: non-zero refuses the
     /// launch.</summary>
     /// <param name="running">This Mac's macOS version, or null when it could not be read.</param>
-    internal static int Run(Version? running, TextWriter complaints, Action launch)
+    /// <param name="tidyUp">Removes the <c>.app</c> this one replaced (ADR-0024). AFTER the
+    /// version floor, so an unsupported Mac that is refusing to run does not delete the app
+    /// the operator may still want to drag somewhere; and before the launch, which does not
+    /// return.</param>
+    internal static int Run(Version? running, TextWriter complaints, Action launch, Action tidyUp)
     {
         ArgumentNullException.ThrowIfNull(complaints);
         ArgumentNullException.ThrowIfNull(launch);
+        ArgumentNullException.ThrowIfNull(tidyUp);
 
         string? refusal = MacOSVersionFloor.Refusal(running);
         if (refusal is not null)
@@ -33,6 +44,8 @@ internal static class Program
             complaints.WriteLine(refusal);
             return 1;
         }
+
+        tidyUp();
 
         // Returns when AppKit's run loop stops, which on a normal run it does not: quitting
         // terminates the process from inside the loop.
