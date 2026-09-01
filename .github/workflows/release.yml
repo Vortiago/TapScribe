@@ -278,7 +278,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: packaging/windows/global.json
+          global-json-file: packaging/bundle/global.json
 
       - name: Derive version from tag
         shell: bash
@@ -336,7 +336,7 @@ jobs:
       - name: Publish the Launcher
         shell: pwsh
         run: >
-          dotnet publish packaging/windows/src/TapScribe.Bundle.Launcher
+          dotnet publish packaging/bundle/src/TapScribe.Bundle.Launcher
           -c Release -r win-x64 --self-contained
           -p:PublishSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true

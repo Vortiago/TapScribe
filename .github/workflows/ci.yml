@@ -718,7 +718,7 @@ jobs:
       - name: Build + test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 
-  # The Windows Bundle's Launcher (packaging/windows/, ADR-0015) uses the same
+  # The Windows Bundle's Launcher (packaging/bundle/, ADR-0015) uses the same
   # Core/Windows split as the tray Bridge above and for the same reason: the
   # path resolution, argv construction, log-rotation policy and password read
   # live in a cross-platform Core so they're testable off Windows. Only the
@@ -733,10 +733,10 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: packaging/windows/global.json
+          global-json-file: packaging/bundle/global.json
 
       - name: Build + test bundle-core only
-        run: dotnet test packaging/windows/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
+        run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
 
   # Compiles the WinForms Launcher on its native OS. The release `bundle` job
   # publishes it, but only on a tag — without this, a Launcher that doesn't
@@ -750,10 +750,10 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: packaging/windows/global.json
+          global-json-file: packaging/bundle/global.json
 
       - name: Build the whole bundle solution
-        run: dotnet build packaging/windows/TapScribe.Bundle.slnx -c Release
+        run: dotnet build packaging/bundle/TapScribe.Bundle.slnx -c Release
 
   # The cross-platform job above runs the bridge-core tests but SKIPS the
   # real-Recorder meeting E2E (RealRecorderMeetingE2ETests, via the
