@@ -755,6 +755,13 @@ jobs:
       - name: Build the whole bundle solution
         run: dotnet build packaging/bundle/TapScribe.Bundle.slnx -c Release
 
+      # The reaper's Windows half. Its tests are [RequiresWindows] and skip
+      # everywhere else, so this job is the only place they actually run —
+      # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and self-enrolment are kernel
+      # behaviour no Linux leg can answer for.
+      - name: Test the Windows reaper
+        run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Windows.Tests/TapScribe.Bundle.Windows.Tests.csproj -c Release
+
   # The cross-platform job above runs the bridge-core tests but SKIPS the
   # real-Recorder meeting E2E (RealRecorderMeetingE2ETests, via the
   # RequiresPythonAsr attribute) because it has no Python ASR stack. This job

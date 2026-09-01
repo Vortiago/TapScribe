@@ -1,12 +1,16 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
+using TapScribe.Bundle.Core;
 
-namespace TapScribe.Bundle.Launcher;
+namespace TapScribe.Bundle.Windows;
 
 /// <summary>
 /// A Windows Job Object with <c>JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</c>, used as the
-/// Bundle's reaper: whatever the Launcher started dies with the Launcher, including
-/// processes it never had a handle to.
+/// Bundle's <see cref="IProcessReaper"/>: whatever the tray started dies with the tray,
+/// including processes it never had a handle to, and including a tray that CRASHED —
+/// KILL_ON_JOB_CLOSE fires on process death, not on a clean exit. That is the property
+/// the macOS side has to reconstruct out of a process group plus a parent-death watch.
 ///
 /// That last part is the whole point. The Recorder spawns
 /// <c>whisperlivekit-server</c> as its own child (<c>tapscribe/live.py</c>), and the repo
@@ -17,19 +21,19 @@ namespace TapScribe.Bundle.Launcher;
 /// notification area would produce exactly that orphan on every quit; a job object makes
 /// the kernel clean up instead of the operator.
 ///
-/// <para><b>Why the Launcher assigns ITSELF rather than the child.</b> A process created
+/// <para><b>Why the tray enrols ITSELF rather than the child.</b> A process created
 /// by a process already in a job is placed in that job automatically, so assigning
 /// ourselves once, before any spawn, closes the window between <c>Process.Start</c> and
 /// <c>AssignProcessToJobObject</c> in which the child could have already forked a
-/// grandchild that then escapes the job. The cost is that the job contains the Launcher
+/// grandchild that then escapes the job. The cost is that the job contains the tray
 /// too — which is the intended semantics ("when the tray goes, everything goes") and is
 /// harmless because the handle is held for the process lifetime and only ever released
-/// at exit. <see cref="AssignProcess"/> remains as the fallback when self-assignment is
-/// refused (a Launcher already inside someone else's job that forbids nesting).</para>
+/// at exit. <see cref="Adopt"/> remains as the fallback when self-enrolment is refused
+/// (a tray already inside someone else's job that forbids nesting).</para>
 ///
 /// <b>Not unit-tested — Windows-only kernel behaviour.</b> Verified on windows-latest.
 /// </summary>
-internal sealed class JobObject : IDisposable
+public sealed class JobObject : IProcessReaper
 {
     /// <summary>JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation.</summary>
     private const int ExtendedLimitInformationClass = 9;
@@ -40,7 +44,7 @@ internal sealed class JobObject : IDisposable
     /// CREATE_BREAKAWAY_FROM_JOB) leave the job. Nothing TapScribe spawns asks for it, so
     /// the Recorder and its WhisperLiveKit grandchild are still reaped as before; this
     /// only stops the kernel from refusing a breakaway that the shell may request when
-    /// LauncherContext.ShellOpen hands a URL or a file to explorer.exe.
+    /// the tray's ShellOpen hands a URL or a file to explorer.exe.
     /// </summary>
     private const uint JobObjectLimitBreakawayOk = 0x00000800;
 
@@ -49,20 +53,20 @@ internal sealed class JobObject : IDisposable
     private JobObject(SafeFileHandle handle, bool selfAssigned)
     {
         _handle = handle;
-        SelfAssigned = selfAssigned;
+        CoversChildrenByInheritance = selfAssigned;
     }
 
     /// <summary>
-    /// True when the Launcher itself is in the job, so every process it spawns is placed
+    /// True when the tray itself is in the job, so every process it spawns is placed
     /// there by the kernel and no per-child assignment is needed (nor wanted — assigning
     /// a process that is already a member fails). False means the caller must fall back
-    /// to <see cref="AssignProcess"/> for each child it starts.
+    /// to <see cref="Adopt"/> for each child it starts.
     /// </summary>
-    public bool SelfAssigned { get; }
+    public bool CoversChildrenByInheritance { get; }
 
     /// <summary>
     /// Create the job and put the current process in it. Returns <c>null</c> — after
-    /// logging why — rather than throwing: no reaper is a degraded Launcher, not a
+    /// logging why — rather than throwing: no reaper is a degraded tray, not a
     /// broken one, and refusing to start the Recorder over it would be a worse trade.
     /// </summary>
     public static JobObject? TryCreate(Action<string> log)
@@ -117,12 +121,16 @@ internal sealed class JobObject : IDisposable
     /// grandchildren spawned in the first instants of the child's life — see the type
     /// docs for why self-assignment is preferred.
     /// </summary>
-    public bool AssignProcess(IntPtr processHandle) => AssignProcessToJobObject(_handle, processHandle);
+    public bool Adopt(Process child)
+    {
+        ArgumentNullException.ThrowIfNull(child);
+        return AssignProcessToJobObject(_handle, child.Handle);
+    }
 
     /// <summary>
     /// Releases the job. With <c>KILL_ON_JOB_CLOSE</c> this terminates every process
     /// still in it — the Recorder and its WhisperLiveKit grandchild — so it must only
-    /// ever run at Launcher exit.
+    /// ever run at tray exit.
     /// </summary>
     public void Dispose() => _handle.Dispose();
 

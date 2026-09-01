@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\TapScribe.Bundle.Core\TapScribe.Bundle.Core.csproj" />
+    <ProjectReference Include="..\TapScribe.Bundle.Windows\TapScribe.Bundle.Windows.csproj" />
   </ItemGroup>
 
 </Project>

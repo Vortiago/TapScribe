@@ -1,12 +1,11 @@
 using System.Globalization;
 using System.Text;
-using TapScribe.Bundle.Core;
 
-namespace TapScribe.Bundle.Launcher;
+namespace TapScribe.Bundle.Core;
 
 /// <summary>
-/// The Launcher's log file: every line the Recorder writes to stdout/stderr, plus the
-/// Launcher's own lifecycle notes, timestamped and size-bounded. A Bundle has no
+/// The tray's log file: every line the Recorder writes to stdout/stderr, plus the
+/// tray's own lifecycle notes, timestamped and size-bounded. A Bundle has no
 /// terminal, so this file is the only place a startup failure can be read after the fact
 /// — "Show log" in the tray menu opens it.
 ///
@@ -15,7 +14,7 @@ namespace TapScribe.Bundle.Launcher;
 /// <see cref="FileShare.ReadWrite"/> so the operator can keep it open in Notepad while
 /// TapScribe runs.
 /// </summary>
-internal sealed class RotatingLogWriter : IDisposable
+public sealed class RotatingLogWriter : IDisposable
 {
     private readonly string _directory;
     private readonly string _fileName;

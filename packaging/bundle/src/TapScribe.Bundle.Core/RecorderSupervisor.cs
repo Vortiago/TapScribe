@@ -1,10 +1,9 @@
 using System.Diagnostics;
-using TapScribe.Bundle.Core;
 
-namespace TapScribe.Bundle.Launcher;
+namespace TapScribe.Bundle.Core;
 
 /// <summary>What the tray shows about the Recorder.</summary>
-internal enum RecorderState
+public enum RecorderState
 {
     Preflight,
     Running,
@@ -20,16 +19,20 @@ internal enum RecorderState
 /// Deliberately thin. Every decision it makes — which interpreter, which argv, which
 /// environment — comes from <see cref="RecorderCommand"/> in the cross-platform Core and
 /// is unit-tested there; what is left here is <c>Process.Start</c>, two event handlers,
-/// and a kill. Reaping is not this class's job: the <see cref="JobObject"/> the Launcher
+/// and a kill. Reaping is not this class's job: the <see cref="IProcessReaper"/> the tray
 /// holds covers the grandchildren (<c>whisperlivekit-server</c>) that this class never
-/// gets a handle to.
+/// gets a handle to, and IT is where the two platforms differ.
 ///
-/// <b>Not unit-tested — needs a real Windows interpreter to spawn.</b>
+/// In Core rather than beside a shell because the lifecycle is the same on both, the way
+/// the capture lifecycle already is (ADR-0022): only the reaping is platform-shaped, and
+/// that is behind the seam.
+///
+/// <b>The spawn itself is not unit-tested — it needs a real interpreter.</b>
 /// </summary>
-internal sealed class RecorderSupervisor : IDisposable
+public sealed class RecorderSupervisor : IDisposable
 {
     private readonly BundleLayout _layout;
-    private readonly JobObject? _job;
+    private readonly IProcessReaper? _reaper;
     private readonly Action<string> _log;
     private readonly Action<RecorderState, string> _onState;
     private readonly Lock _gate = new();
@@ -38,10 +41,10 @@ internal sealed class RecorderSupervisor : IDisposable
     private Process? _preflight;
     private bool _stopping;
 
-    public RecorderSupervisor(BundleLayout layout, JobObject? job, Action<string> log, Action<RecorderState, string> onState)
+    public RecorderSupervisor(BundleLayout layout, IProcessReaper? reaper, Action<string> log, Action<RecorderState, string> onState)
     {
         _layout = layout;
-        _job = job;
+        _reaper = reaper;
         _log = log;
         _onState = onState;
     }
@@ -100,8 +103,8 @@ internal sealed class RecorderSupervisor : IDisposable
         // Preflight blocks on an unbounded pip install that can pull torch — minutes,
         // gigabytes. If the operator hit Quit during it, Stop() already ran and found no
         // Recorder to kill, so spawning one now would start a process nobody is left to
-        // reap. The JobObject usually covers it, but TryCreate returning null is an
-        // explicitly supported degraded path, and on THAT path the Recorder plus its
+        // reap. The reaper usually covers it, but a null one is an explicitly supported
+        // degraded path, and on THAT path the Recorder plus its
         // WhisperLiveKit grandchild would be orphaned holding port 8001 — the exact leak
         // this class exists to prevent.
         lock (_gate)
@@ -203,8 +206,8 @@ internal sealed class RecorderSupervisor : IDisposable
     }
 
     /// <summary>
-    /// Ask the Recorder to go away, then let the job object take the rest. The kill is
-    /// <c>entireProcessTree</c> for the ordinary case; the job is the backstop for the
+    /// Ask the Recorder to go away, then let the reaper take the rest. The kill is
+    /// <c>entireProcessTree</c> for the ordinary case; the reaper is the backstop for the
     /// case this misses (a grandchild that re-parented).
     /// </summary>
     public void Stop()
@@ -252,8 +255,8 @@ internal sealed class RecorderSupervisor : IDisposable
         catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
         {
             // Already gone, or exited between HasExited and Kill. Nothing to do — and the
-            // job object's KILL_ON_JOB_CLOSE reaps anything still alive when we exit,
-            // which is exactly the leak this Stop() is trying to avoid.
+            // reaper takes down anything still alive when we exit, which is exactly the
+            // leak this Stop() is trying to avoid.
             _log($"stop: {error.Message}");
         }
     }
@@ -289,10 +292,10 @@ internal sealed class RecorderSupervisor : IDisposable
         _log($"$ {command.Executable} {string.Join(' ', command.Arguments)}");
         process.Start();
 
-        // Only when the Launcher could NOT put itself in the job: otherwise the child is
-        // already a member by inheritance and a second assignment fails.
-        if (_job is { SelfAssigned: false } job && !job.AssignProcess(process.Handle))
-            _log("job object: could not assign the child — a crash may leave whisperlivekit-server running.");
+        // Only when the tray could NOT put ITSELF in the reaper: otherwise the child is
+        // already a member by inheritance and a second enrolment fails.
+        if (_reaper is { CoversChildrenByInheritance: false } reaper && !reaper.Adopt(process))
+            _log("reaper: could not enrol the child — a crash may leave whisperlivekit-server running.");
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();

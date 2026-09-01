@@ -1,9 +1,11 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/TapScribe.Bundle.Core/TapScribe.Bundle.Core.csproj" />
+    <Project Path="src/TapScribe.Bundle.Windows/TapScribe.Bundle.Windows.csproj" />
     <Project Path="src/TapScribe.Bundle.Launcher/TapScribe.Bundle.Launcher.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj" />
+    <Project Path="tests/TapScribe.Bundle.Windows.Tests/TapScribe.Bundle.Windows.Tests.csproj" />
   </Folder>
 </Solution>
