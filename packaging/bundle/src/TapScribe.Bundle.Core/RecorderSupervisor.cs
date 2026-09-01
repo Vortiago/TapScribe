@@ -34,7 +34,7 @@ public enum RecorderState
 /// reason — so the decisions an operator meets when something is wrong are tested on the
 /// Linux leg rather than by breaking a real install by hand.
 /// </summary>
-public sealed class RecorderSupervisor : IDisposable
+public sealed class RecorderSupervisor : IRecorderHost
 {
     private readonly BundleLayout _layout;
     private readonly IProcessReaper? _reaper;
