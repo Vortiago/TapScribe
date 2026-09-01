@@ -166,6 +166,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     internal ContextMenuStrip Menu => _menu;
     internal ToolStripMenuItem StartItem => _startItem;
     internal ToolStripMenuItem EndItem => _endItem;
+    internal ToolStripMenuItem ConnectItem => _connectItem;
+    internal ToolStripMenuItem DisconnectItem => _disconnectItem;
     internal ToolStripMenuItem PastMeetingsItem => _pastMeetingsItem;
     internal string StatusHeader => _statusItem.Text ?? "";
 

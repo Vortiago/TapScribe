@@ -243,6 +243,90 @@ public class RealRecorderMeetingE2ETests
         Assert.Equal(session, remembered.SessionId);
     }
 
+    [RequiresPythonAsr]
+    public async Task Runtime_AnAttachedTapAgainstTheRealRecorder_LandsInTheCurrentSession()
+    {
+        // ADR-0025 end to end, against the real thing: Connect opens taps that name no session,
+        // and the Recorder puts them in the one it has open. Everything else in this file mints
+        // a detached session and then looks in it — here the whole claim is that the audio ends
+        // up somewhere this bridge never named, so the session id is READ BACK from the
+        // Recorder's own `/api/state` rather than known in advance.
+        string repoRoot = FindRepoRoot();
+        (_, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
+
+        var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 3000, PreRollMs: 0);
+        using var harness = new RuntimeHarness
+        {
+            RealMint = true, // wired, and the point is that it is never reached
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = rec.Port,
+                Token = "", // --no-auth, so the tap token is not the subject here
+                Identity = "Nora",
+                Name = "Nora",
+                Devices =
+                [
+                    new DeviceSelection.FollowDefault(DeviceFlow.Capture, "Nora", "Nora", gate),
+                    new DeviceSelection.FollowDefault(DeviceFlow.Render, "Ed", "Ed", gate),
+                ],
+            },
+            Budgets = new RuntimeBudgets
+            {
+                PollInterval = TimeSpan.FromMilliseconds(500),
+                StartSettleTimeout = TimeSpan.FromSeconds(30),
+                QuitTeardownCap = TimeSpan.FromSeconds(30),
+            },
+        };
+        FakeAudioCapture nora = harness.AddDevice("mic", DeviceFlow.Capture);
+        FakeAudioCapture ed = harness.AddDevice("out", DeviceFlow.Render);
+
+        var runtime = new BridgeRuntime(
+            harness.View, harness.Dispatcher, harness.Dependencies, harness.Settings, harness.Budgets);
+
+        runtime.Connect();
+        await runtime.ConnectTask!.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.True(harness.View.CanDisconnect, "the tray never offered Disconnect, so nothing attached");
+
+        await Task.WhenAll(FeedAsync(nora, ReadWavPcm(norwegianWav)), FeedAsync(ed, ReadWavPcm(englishWav)));
+        await Task.Delay(TimeSpan.FromSeconds(1)); // let the last frames drain to the Recorder
+
+        runtime.Disconnect();
+        await runtime.DisconnectTask!.WaitAsync(TimeSpan.FromSeconds(60));
+
+        // Nothing was minted. The real ControlClient is wired and would have answered; it was
+        // never asked, which is what "attached" means.
+        Assert.False(harness.MintReached.IsCompleted, "connecting minted a detached session");
+        Assert.Null(harness.SessionIdInUse);
+
+        // Where the audio actually went: the session the Recorder calls current, read from the
+        // same payload the dashboard badges live from.
+        using var http = new HttpClient();
+        using JsonDocument state = JsonDocument.Parse(
+            await http.GetStringAsync(new Uri($"http://127.0.0.1:{rec.Port}/api/state")));
+        string current = state.RootElement.GetProperty("current_session").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(current));
+
+        string sessionDir = Path.Join(rec.BaseDir, "recordings", current);
+        Assert.True(Directory.Exists(sessionDir), $"the Recorder's current session has no folder: {sessionDir}");
+        string[] wavs = Directory.GetFiles(sessionDir, "*.wav", SearchOption.TopDirectoryOnly);
+        // One per speaker, drained and finalised by Disconnect — the barrier that keeps the
+        // last Utterance from being a truncated file.
+        Assert.True(
+            wavs.Any(w => Path.GetFileName(w).Contains("Nora", StringComparison.OrdinalIgnoreCase)),
+            $"no WAV for Nora in the current session: [{string.Join(", ", wavs.Select(Path.GetFileName))}]");
+        Assert.True(
+            wavs.Any(w => Path.GetFileName(w).Contains("Ed", StringComparison.OrdinalIgnoreCase)),
+            $"no WAV for Ed in the current session: [{string.Join(", ", wavs.Select(Path.GetFileName))}]");
+
+        // Disconnect triggers nothing, so the tray is idle and Past meetings is untouched: an
+        // attached tap has no session id to key a pipeline, a history entry or a resume on.
+        Assert.True(harness.View.CanConnect);
+        Assert.False(harness.View.CanDisconnect);
+        Assert.Empty(harness.HistoryStore.Load().Meetings);
+    }
+
     // Who the merged transcript attributes segments to.
     private static HashSet<string> SpeakersIn(JsonElement transcript) =>
         transcript.GetProperty("segments").EnumerateArray()
