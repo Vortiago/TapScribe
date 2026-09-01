@@ -70,11 +70,11 @@ public class TrayIndicatorTests
         Assert.True(tray.StartItem.Enabled);
         Assert.False(tray.EndItem.Enabled);
 
-        sta.Run(() => ((ITrayView)tray).SetMenuState(canStart: false, canEnd: true));
+        sta.Run(() => ((ITrayView)tray).SetCommands(TrayCommands.MeetingRunning));
         Assert.False(tray.StartItem.Enabled);
         Assert.True(tray.EndItem.Enabled);
 
-        sta.Run(() => ((ITrayView)tray).SetMenuState(canStart: false, canEnd: false));
+        sta.Run(() => ((ITrayView)tray).SetCommands(TrayCommands.Busy));
         Assert.False(tray.StartItem.Enabled);
         Assert.False(tray.EndItem.Enabled);
     }

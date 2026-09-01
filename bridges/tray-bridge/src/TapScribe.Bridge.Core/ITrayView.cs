@@ -16,6 +16,28 @@ public enum NoticeKind
 }
 
 /// <summary>
+/// Which tap commands the operator may reach. Named constants rather than four bools at each
+/// call site: <c>(false, false, false, false)</c> reads as an error state and is in fact the
+/// normal one three times over, and the number of legal COMBINATIONS is four, not sixteen.
+/// </summary>
+public sealed record TrayCommands(bool CanStart, bool CanEnd, bool CanConnect, bool CanDisconnect)
+{
+    /// <summary>Everything off: starting, connecting, ending, or a pipeline in flight.</summary>
+    public static readonly TrayCommands Busy = new(false, false, false, false);
+
+    /// <summary>Nothing streaming: either mode is available.</summary>
+    public static readonly TrayCommands Idle = new(true, false, true, false);
+
+    /// <summary>A bracketed meeting is streaming: End is the only move.</summary>
+    public static readonly TrayCommands MeetingRunning = new(false, true, false, false);
+
+    /// <summary>An attached tap is streaming. Start stays ENABLED, deliberately: from here it
+    /// is a takeover — drain the attached taps, then mint and start (ADR-0025). Connect is off
+    /// because it is already what is happening.</summary>
+    public static readonly TrayCommands Attached = new(true, false, false, true);
+}
+
+/// <summary>
 /// Everything the meeting runtime needs from a tray shell, and nothing else. The WinForms
 /// <c>TrayContext</c> implements it over a <c>NotifyIcon</c> and a <c>ContextMenuStrip</c>;
 /// the AppKit shell implements it over an <c>NSStatusItem</c>: so the lifecycle in
@@ -52,14 +74,14 @@ public interface ITrayView
     /// </summary>
     void ClearNotice();
 
-    /// <summary>Enable or disable the two meeting commands. Both false is a legitimate state:
-    /// a meeting that is ending, or a pipeline in flight.</summary>
-    void SetMenuState(bool canStart, bool canEnd);
+    /// <summary>Enable or disable the tap commands. <see cref="TrayCommands.Busy"/> is a
+    /// legitimate state: a meeting that is ending, or a pipeline in flight.</summary>
+    void SetCommands(TrayCommands commands);
 
     /// <summary>
     /// Open a window for one meeting's notes and hand it back for the runtime to render into.
     /// Each call is a NEW window: a finished meeting and a re-opened past one are independent,
-    /// and neither may disturb the live status line or the Start/End commands.
+    /// and neither may disturb the live status line or the tap commands.
     /// </summary>
     IMeetingWindow OpenMeetingWindow();
 

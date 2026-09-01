@@ -15,8 +15,7 @@ internal sealed class FakeTrayView : ITrayView
     private readonly object _lock = new();
     private readonly List<(string Title, string Message, NoticeKind Kind)> _notices = [];
     private StatusView? _status;
-    private bool _canStart = true;
-    private bool _canEnd;
+    private TrayCommands _commands = TrayCommands.Idle;
 
     /// <summary>The status the tray is currently showing, or null before the first render.</summary>
     public StatusView? LastStatus
@@ -30,15 +29,19 @@ internal sealed class FakeTrayView : ITrayView
         get { lock (_lock) return [.. _notices]; }
     }
 
-    public bool CanStart
+    /// <summary>Which commands the menu is offering.</summary>
+    public TrayCommands Commands
     {
-        get { lock (_lock) return _canStart; }
+        get { lock (_lock) return _commands; }
     }
 
-    public bool CanEnd
-    {
-        get { lock (_lock) return _canEnd; }
-    }
+    public bool CanStart => Commands.CanStart;
+
+    public bool CanEnd => Commands.CanEnd;
+
+    public bool CanConnect => Commands.CanConnect;
+
+    public bool CanDisconnect => Commands.CanDisconnect;
 
     public void ShowStatus(StatusView status)
     {
@@ -65,14 +68,11 @@ internal sealed class FakeTrayView : ITrayView
         lock (_lock) _cleared++;
     }
 
-    public void SetMenuState(bool canStart, bool canEnd)
+    public void SetCommands(TrayCommands commands)
     {
-        lock (_lock)
-        {
-            _canStart = canStart;
-            _canEnd = canEnd;
-        }
+        lock (_lock) _commands = commands;
     }
+
 
     /// <summary>Every meeting window opened, in order. A window per call is the contract, so
     /// the count is how a test says "the summary opened once" or "re-opening a past meeting
@@ -399,6 +399,15 @@ internal sealed class RuntimeHarness : IDisposable
         Devices = [],
     };
 
+    /// <summary>Settings whose End drains and closes the taps but fires no pipeline, so a
+    /// lifecycle test runs with no Recorder in the picture at all.</summary>
+    public static BridgeSettings NoProcessOnEnd()
+    {
+        BridgeSettings settings = DefaultSettings();
+        settings.ProcessOnEnd = false;
+        return settings;
+    }
+
     /// <summary>Register a device the enumerator will report and hand out a capture for.
     /// <paramref name="capture"/> is for a test that needs a scripted one (a start that throws,
     /// a detach that throws) rather than the plain one built here.</summary>
@@ -485,6 +494,25 @@ internal sealed class RuntimeHarness : IDisposable
         Task? start = runtime.StartTask;
         Assert.NotNull(start);
         await start.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    /// <summary>Await the in-flight Connect, on the same terms as
+    /// <see cref="StartSettledAsync"/>.</summary>
+    public static async Task ConnectSettledAsync(BridgeRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        Task? connect = runtime.ConnectTask;
+        Assert.NotNull(connect);
+        await connect.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    /// <summary>Await the in-flight Disconnect, on the same terms.</summary>
+    public static async Task DisconnectSettledAsync(BridgeRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        Task? disconnect = runtime.DisconnectTask;
+        Assert.NotNull(disconnect);
+        await disconnect.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
     }
 
     /// <summary>Await the in-flight End (or Resume) flow, on the same terms.</summary>

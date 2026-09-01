@@ -5,7 +5,7 @@ namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// The tray shell: a NotifyIcon with a status header line, Start meeting / End meeting /
-/// Past meetings / Settings / Quit. It owns the WinForms half of the bridge and nothing else.
+/// Connect to live / Disconnect / Past meetings / Settings / Quit. It owns the WinForms half of the bridge and nothing else.
 /// Every decision about what a meeting DOES (resolve the device selection, mint the detached
 /// session, run one capture pipeline per device, drain, trigger the end-of-meeting pipeline,
 /// resume one across a restart) belongs to <see cref="BridgeRuntime"/>, which is written once
@@ -25,6 +25,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _startItem;
     private readonly ToolStripMenuItem _endItem;
+    private readonly ToolStripMenuItem _connectItem;
+    private readonly ToolStripMenuItem _disconnectItem;
     private readonly ToolStripMenuItem _pastMeetingsItem;
     private readonly TrayDependencies _deps;
     // Held only until the message loop starts, which is when the runtime that owns them
@@ -58,6 +60,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         _statusItem = new ToolStripMenuItem(StatusView.For(new TrayStatus.Idle()).Header) { Enabled = false };
         _startItem = new ToolStripMenuItem("Start meeting", null, (_, _) => OnRuntime(r => r.Start()));
         _endItem = new ToolStripMenuItem("End meeting", null, (_, _) => OnRuntime(r => r.End())) { Enabled = false };
+        // Connect to live (ADR-0025): stream into whatever session the Recorder has open,
+        // rather than minting one. Beside Start/End rather than under a submenu — it is the
+        // other way to do the one thing this tray is for.
+        _connectItem = new ToolStripMenuItem("Connect to live", null, (_, _) => OnRuntime(r => r.Connect()));
+        _disconnectItem = new ToolStripMenuItem("Disconnect", null, (_, _) => OnRuntime(r => r.Disconnect())) { Enabled = false };
         // Past meetings (#168): rebuilt from the persisted history each time it opens, so it
         // reflects meetings ended since it was last shown. Each item opens that meeting's
         // own window; the submenu never touches the live status line or Start/End controls.
@@ -73,6 +80,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(_startItem);
         _menu.Items.Add(_endItem);
+        _menu.Items.Add(_connectItem);
+        _menu.Items.Add(_disconnectItem);
         _menu.Items.Add(_pastMeetingsItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(settingsItem);
@@ -192,11 +201,15 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     {
     }
 
-    public void SetMenuState(bool canStart, bool canEnd)
+    public void SetCommands(TrayCommands commands)
     {
-        _startItem.Enabled = canStart;
-        _endItem.Enabled = canEnd;
+        ArgumentNullException.ThrowIfNull(commands);
+        _startItem.Enabled = commands.CanStart;
+        _endItem.Enabled = commands.CanEnd;
+        _connectItem.Enabled = commands.CanConnect;
+        _disconnectItem.Enabled = commands.CanDisconnect;
     }
+
 
     /// <summary>A new window per call, shown immediately in its Loading state so an empty frame
     /// is never on screen, and released by its own FormClosed handler. The runtime renders into
