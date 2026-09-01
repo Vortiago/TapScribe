@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hmac
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -46,11 +47,17 @@ def _is_cross_origin(request: Request) -> bool:
     Compared against the request's own scheme/host/port rather than a configured
     origin, because the Recorder has no notion of its public URL and a loopback
     dashboard's origin IS whatever the browser used to reach it.
+
+    Scheme + netloc only, which is exactly what an `Origin` header is (RFC 6454
+    serialises it with no path). `base_url` carries the ASGI `root_path` and a
+    trailing slash, so comparing the whole string refuses every same-origin write
+    the moment the Recorder is mounted under a path prefix.
     """
     origin = request.headers.get("origin")
     if not origin:
         return False
-    return origin.rstrip("/") != str(request.base_url).rstrip("/")
+    base = urlsplit(str(request.base_url))
+    return origin != f"{base.scheme}://{base.netloc}"
 
 
 def utf8_compare_digest(a: str, b: str) -> bool:
@@ -184,19 +191,35 @@ async def basic_auth_middleware(request: Request, call_next):
     # memory — turns the dashboard's 500 ms /api/state poll into the browser's
     # native Basic dialog, which is the one prompt the login link exists to
     # remove. The dashboard's own fetch sees the 401 and can say so quietly.
-    realm_header = {} if cookie is not None else {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
+    #
+    # A top-level NAVIGATION is the exception, and it has to be: the browser
+    # RENDERS that answer, so with the challenge suppressed the operator meets
+    # raw JSON with no prompt, no form and no way back — a checkout install has
+    # no tray to mint a fresh link from, and the cookie outlives the process that
+    # issued it. So a navigating request is challenged, and its dead cookie is
+    # cleared on the way out so it stops being replayed at every later request
+    # (including at a DIFFERENT Recorder on another port, which never issued it).
+    navigating = request.headers.get("sec-fetch-dest") == "document"
+    quiet = cookie is not None and not navigating
+    realm_header = {} if quiet else {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
+    clear_cookie = cookie is not None and navigating
+
+    def refuse(detail: str) -> JSONResponse:
+        response = JSONResponse({"detail": detail}, status_code=401, headers=realm_header)
+        if clear_cookie:
+            response.delete_cookie(config.session_cookie_name(), path="/")
+        return response
+
     auth_header = request.headers.get("authorization") or ""
     if not auth_header.lower().startswith("basic "):
-        return JSONResponse({"detail": "Authentication required"}, status_code=401, headers=realm_header)
+        return refuse("Authentication required")
     try:
         decoded = base64.b64decode(auth_header.split(" ", 1)[1].strip(), validate=False).decode("utf-8")
     except Exception:
-        return JSONResponse(
-            {"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header
-        )
+        return refuse("Malformed Authorization header")
     user, _, pw = decoded.partition(":")
     user_ok = utf8_compare_digest(user, config.AUTH_USER)
     pass_ok = utf8_compare_digest(pw, recorder.auth.value)
     if not (user_ok and pass_ok):
-        return JSONResponse({"detail": "Invalid credentials"}, status_code=401, headers=realm_header)
+        return refuse("Invalid credentials")
     return await call_next(request)

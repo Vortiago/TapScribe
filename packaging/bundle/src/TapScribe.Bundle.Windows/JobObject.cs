@@ -100,7 +100,7 @@ public sealed class JobObject : IProcessReaper
             bool selfAssigned = AssignProcessToJobObject(handle, GetCurrentProcess());
             if (!selfAssigned)
             {
-                log($"job object: could not assign the Launcher itself (win32 {Marshal.GetLastWin32Error()}); " +
+                log($"job object: could not assign the tray itself (win32 {Marshal.GetLastWin32Error()}); " +
                     "falling back to assigning the Recorder after spawn.");
             }
 
@@ -135,7 +135,7 @@ public sealed class JobObject : IProcessReaper
 
     // Classic DllImport rather than the source-generated LibraryImport: the generated
     // stubs require <AllowUnsafeBlocks>, and turning unsafe code on across the whole
-    // Launcher to save four hand-written declarations is a bad trade.
+    // tray to save four hand-written declarations is a bad trade.
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateJobObjectW(IntPtr lpJobAttributes, string? lpName);
 

@@ -80,6 +80,21 @@ def test_a_401_omits_www_authenticate_when_a_cookie_was_presented(auth_on: TestC
     assert "WWW-Authenticate" in bare.headers
 
 
+def test_a_navigation_with_a_dead_cookie_is_still_challenged(auth_on: TestClient) -> None:
+    """The quiet 401 is for the POLL. A browser RENDERS a navigation's answer, so
+    suppressing the challenge there would leave the operator reading raw JSON with
+    no prompt and no way in — a checkout install has no tray to mint a fresh link
+    from. The dead cookie is cleared on the same answer so it stops being replayed
+    (including at a different Recorder on another port, which never issued it)."""
+    auth_on.cookies.set(cookie_name(), "stale")
+
+    navigation = auth_on.get("/api/whatever", headers={"Sec-Fetch-Dest": "document"})
+
+    assert navigation.status_code == 401
+    assert "WWW-Authenticate" in navigation.headers
+    assert cookie_name() in navigation.headers.get("set-cookie", "")
+
+
 def test_a_cross_origin_write_is_refused_on_the_basic_scheme(auth_on: TestClient) -> None:
     """SameSite=Strict stops a cross-SITE page attaching the cookie, but site
     scoping ignores PORTS: a hostile page on another localhost port is same-site

@@ -23,7 +23,9 @@
 #define MyAppName "TapScribe"
 #define MyAppPublisher "TapScribe contributors"
 #define MyAppURL "https://github.com/Vortiago/TapScribe"
-#define MyAppExeName "TapScribe.exe"
+; The tray's assembly name (TapScribe.TrayBridge.Windows.csproj), which is what the
+; bridge-only zip contains and what the `bundle` job stages into staging\tray\.
+#define MyAppExeName "TapScribe.TrayBridge.exe"
 
 [Setup]
 AppId={{8F3B6F2A-9C41-4E2D-B7A6-5D2C1E0A9B44}
@@ -96,6 +98,13 @@ Name: "startup"; Description: "Start {#MyAppName} when I sign in"; GroupDescript
 ; pip-installs the operator's chosen model backends in there, and wiping it on
 ; upgrade would re-download multi-GB of extras every time.
 Type: files; Name: "{app}\wheel\*.whl"
+
+; The retired Launcher's exe, which shipped as {app}\TapScribe.exe. The tray is
+; TapScribe.TrayBridge.exe, so an upgrade would otherwise leave the old binary in
+; place — launchable from Explorer or any pinned shortcut, holding the old mutex,
+; with no bridge role. Drop this line once no supported upgrade path starts from a
+; Launcher install, alongside the AppMutex entry above.
+Type: files; Name: "{app}\TapScribe.exe"
 
 [Files]
 ; The embedded interpreter AND its site-packages. `recursesubdirs` matters —

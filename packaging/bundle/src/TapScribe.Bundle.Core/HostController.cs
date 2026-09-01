@@ -8,10 +8,15 @@ namespace TapScribe.Bundle.Core;
 /// tray icon, which stays the Bridge's tap state (ADR-0022): the icon is what an operator
 /// watches during a call, and a Recorder that is merely stopped must not read as a meeting
 /// that failed.</param>
+/// <param name="Alert">Whether this state is one the operator must be told about out loud
+/// rather than on next opening the menu. A Recorder that crashed or failed to boot leaves NO
+/// ambient signal otherwise: the tray icon stays the Bridge's tap state by design, so the
+/// only cue would be a greyed line the operator has to right-click to find. False for a stop
+/// they asked for — a balloon out of a click whose outcome they already know is noise.</param>
 /// <remarks>There is deliberately no "is it ours" flag: a shell that wanted one would be
 /// re-deriving what <paramref name="CanStop"/> already says, since an unmanaged Recorder is
 /// exactly the one this tray may not stop, and the header says so in words.</remarks>
-public sealed record HostView(string Header, bool CanStart, bool CanStop);
+public sealed record HostView(string Header, bool CanStart, bool CanStop, bool Alert = false);
 
 /// <summary>
 /// Everything the host role needs from a tray shell. Its own seam in
@@ -122,16 +127,23 @@ public sealed class HostController : IDisposable
     /// it — and because a test that had to reach a private method to drive the menu would
     /// be testing the reflection.
     /// </summary>
-    public void Report(RecorderState state, string message)
+    public void Report(RecorderState state, string message) => Report(state, message, alert: true);
+
+    private void Report(RecorderState state, string message, bool alert)
     {
         lock (_gate)
         {
             _state = state;
             _message = message;
         }
-        HostView view = Render(state, message);
+        HostView view = Render(state, message) with { Alert = alert && IsBad(state) };
         _post(() => _view.ShowHost(view));
     }
+
+    /// <summary>States the operator has to hear about: the Recorder is not there and they
+    /// did not ask for that. <c>Stopped</c> counts — it is what a crash-loop reports.</summary>
+    private static bool IsBad(RecorderState state) =>
+        state is RecorderState.Failed or RecorderState.Stopped;
 
     /// <summary>
     /// The operator asked for the Recorder to start (again). Refused when the menu would
@@ -157,10 +169,19 @@ public sealed class HostController : IDisposable
     /// </summary>
     public void StopRecorder()
     {
+        lock (_gate)
+        {
+            // Asked of Render for the same reason StartRecorder is, rather than of the
+            // supervisor: a new RecorderState must not be reachable here while the menu
+            // that offers it says otherwise.
+            if (!Render(_state, _message).CanStop)
+                return;
+        }
         if (!_supervisor.Manages)
             return;
         _supervisor.Stop();
-        Report(RecorderState.Stopped, "TapScribe is not running.");
+        // No alert: the operator asked for this one.
+        Report(RecorderState.Stopped, "TapScribe is not running.", alert: false);
     }
 
     private static HostView Render(RecorderState state, string message) => state switch

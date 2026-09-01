@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- CROSS-PLATFORM on purpose: no WinForms, no P/Invoke, no Windows-only
-       APIs, so every decision the Launcher makes (layout resolution, argv
+       APIs, so every decision the host role makes (layout resolution, argv
        construction, log rotation, password reading) is unit-tested on the
        Linux CI leg. System.IO *is* cross-platform, so the two types that
        genuinely need the disk (BundleLayout's wheel scan, PasswordFile)

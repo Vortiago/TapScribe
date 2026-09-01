@@ -88,8 +88,20 @@ public sealed class RecorderSupervisor : IRecorderHost
     /// Boot the Recorder on a background thread; the tray keeps pumping messages. The
     /// shell ignores the returned task — that is the point of booting off-thread — and a
     /// test awaits it rather than racing the thread pool.
+    ///
+    /// Clearing <see cref="_stopping"/> is what makes Start-after-Stop a boot rather than a
+    /// no-op: <c>Stop()</c> is the operator's <b>Stop Recorder</b> as well as Quit's teardown
+    /// (ADR-0022), so the flag has to mean "this run was cancelled" and not "the tray is
+    /// going away". Left latched, the next Start spawns a preflight, kills it on its own
+    /// quit-race check and returns silently, wedging the menu on "Preparing TapScribe…"
+    /// with both commands disabled.
     /// </summary>
-    public Task Start() => Task.Run(Run);
+    public Task Start()
+    {
+        lock (_gate)
+            _stopping = false;
+        return Task.Run(Run);
+    }
 
     private void Run()
     {
@@ -209,25 +221,37 @@ public sealed class RecorderSupervisor : IRecorderHost
     private void StartRecorder(string wheel)
     {
         BundleProcess command = RecorderCommand.Recorder(_layout, wheel);
+        IChildProcess process;
+
+        // Only the SPAWN is "could not start the Recorder". Anything after it throws with
+        // the child alive and `_recorder` published, and reporting Failed there would offer
+        // Start for a Recorder that is running and refuse Stop for one this tray owns —
+        // a second Start would then spawn a sibling and orphan the first. Those reach Run()'s
+        // catch-all instead, which logs the full exception.
         try
         {
-            IChildProcess process = _spawn(command);
-            lock (_gate)
-                _recorder = process;
-
-            Enrol(process);
-
-            // Subscribed before the child is allowed to raise it (the seam guarantees the
-            // order): a Recorder that dies instantly would otherwise raise into an empty
-            // delegate, leaving the tray green and "running" over a dead dashboard.
-            process.Exited += (_, _) => OnRecorderExited(process);
-
-            _onState(RecorderState.Running, "TapScribe is running.");
+            process = _spawn(command);
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
             Fail($"Could not start the Recorder ({command.Executable}): {error.Message}");
+            return;
         }
+
+        lock (_gate)
+            _recorder = process;
+
+        Enrol(process);
+
+        // Running is published BEFORE the subscription, and that order is load-bearing: the
+        // seam sets EnableRaisingEvents inside the `add`, which for a child that has ALREADY
+        // exited raises Exited synchronously. Reporting Running afterwards would overwrite
+        // the Unmanaged/Stopped verdict OnRecorderExited just produced, leaving the tray
+        // green and "running" over a dead dashboard — the exact failure this ordering is
+        // meant to prevent. Process latches the exit, so a subscription that lands after the
+        // child is gone still fires.
+        _onState(RecorderState.Running, "TapScribe is running.");
+        process.Exited += (_, _) => OnRecorderExited(process);
     }
 
     /// <summary>
@@ -248,15 +272,20 @@ public sealed class RecorderSupervisor : IRecorderHost
     {
         lock (_gate)
         {
-            if (_stopping)
+            // A superseded child says nothing about the Recorder the tray now holds: Stop
+            // owns disposal on the quitting path, so only the identity case falls through.
+            if (_stopping || !ReferenceEquals(_recorder, process))
                 return;
             // Ownership ends here: whatever is on the port now, this tray no longer has a
             // handle to it, so Quit must not try to kill it.
-            if (ReferenceEquals(_recorder, process))
-                _recorder = null;
+            _recorder = null;
         }
 
+        // Read the code BEFORE disposing — ExitCode throws once the Process is closed. Stop()
+        // disposes the handle it takes; this is the other path, and without it a crash-loop
+        // strands one undisposed child per cycle.
         int code = process.ExitCode;
+        process.Dispose();
         _log($"recorder exited with code {code}");
 
         if (_recorderAnswers())

@@ -80,5 +80,13 @@ public sealed class DeviceTally
         ? _attached
             ? new TrayStatus.Attached(_live.Count, Total)
             : new TrayStatus.Streaming(_live.Count, Total)
-        : new TrayStatus.Error($"{string.Join(", ", _dropped)} stopped — recording {_live.Count}/{Total} devices");
+        // The verb follows the mode here too, not just in the healthy sentence: an attached
+        // tap is not recording a meeting of its own, it feeds whatever session the Recorder
+        // has open, and an operator told a failing one is "recording" would look for an End
+        // that is not offered.
+        : new TrayStatus.Error(
+            $"{string.Join(", ", _dropped)} stopped — "
+            + (_attached
+                ? $"feeding the current session from {_live.Count}/{Total} devices"
+                : $"recording {_live.Count}/{Total} devices"));
 }

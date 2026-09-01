@@ -4,9 +4,9 @@ namespace TapScribe.Bundle.Core.Tests;
 
 /// <summary>
 /// Tests for <see cref="LogRotation"/> — the pure size+count decision behind the
-/// Launcher's rotating log. No filesystem here at all: the input is a list of
+/// host role's rotating log. No filesystem here at all: the input is a list of
 /// (name, size) and the output is "roll to this archive name, delete these files",
-/// which the Launcher's writer then performs. That split is what makes the policy
+/// which the host role's writer then performs. That split is what makes the policy
 /// testable on Linux while the file handles stay in the Windows shell.
 /// </summary>
 public class LogRotationTests

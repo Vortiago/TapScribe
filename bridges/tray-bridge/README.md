@@ -43,37 +43,6 @@ Session).
   Disconnect / Past meetings / Settings… / Quit), the 4-tab Settings dialog,
   and the per-meeting summary window with Copy. What a meeting DOES is
   `BridgeRuntime`'s. It also carries `TrayHost` — the **host role**, below.
-
-## Two roles, one tray
-
-There is ONE tray per OS (ADR-0022). It is always a Bridge; it ALSO boots,
-supervises and reaps a co-located Recorder — the **host role** — when a host
-payload sits beside it on disk, which is what a
-[Bundle](../../CONTEXT.md#bundle) install puts there. The role is a fact about
-the install, not a flag, a build variant or a setting: the same executable ships
-in the bridge-only zip and inside the Windows installer, and a bridge-only tray
-renders exactly the menu it did before the role existed.
-
-The rules live in `packaging/bundle/`'s `HostController` and are tested there;
-the shell owns the widgets. Its section adds **Start Recorder** / **Stop
-Recorder** (separate from Quit — stopping the server is not quitting the tray),
-**Open dashboard**, **Copy password** and **Show log**, with the Recorder's state
-in that section's header line. The tray ICON stays the Bridge's tap state: it is
-what an operator watches during a call.
-
-Two behaviours there are load-bearing and easy to undo by accident:
-
-- **Open dashboard mints a login link** (ADR-0023) against the LOCAL Recorder, so
-  the browser lands signed in and never shows the native password prompt. Never
-  the host in bridge settings — a tray may supervise one Recorder and tap into
-  another.
-- **Quit stops only a Recorder this tray started.** One that was already running
-  (a `start.sh` in a terminal, another install holding port 8001) shows as
-  running-but-unmanaged and outlives Quit. Which it is comes from the spawn
-  attempt plus a `/health` probe, never from parsing the child's output.
-
-macOS has no Bundle yet (ADR-0024 is still proposed), so `HostPayloadPresent` is
-false there and the Mac tray is bridge-only.
 - **`src/TapScribe.Bridge.MacOS`** (net10.0): the Mac platform layer. Today the
   macOS 14.4 floor, the sysctl that reads this Mac's version, and the Mac half
   of the storage layer: `KeychainTapTokenStore` (the tap token in the login
@@ -117,6 +86,38 @@ false there and the Mac tray is bridge-only.
 **The cross-platform invariant:** `TapScribe.Bridge.Core` references **no
 NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
 tests the core on Linux and fails the moment it takes a Windows dependency.
+
+## Two roles, one tray
+
+There is ONE tray per OS (ADR-0022). It is always a Bridge; it ALSO boots,
+supervises and reaps a co-located Recorder — the **host role** — when a host
+payload sits beside it on disk, which is what a
+[Bundle](../../CONTEXT.md#bundle) install puts there. The role is a fact about
+the install, not a flag, a build variant or a setting: the same executable ships
+in the bridge-only zip and inside the Windows installer, and a bridge-only tray
+renders exactly the menu it did before the role existed.
+
+The rules live in `packaging/bundle/`'s `HostController` and are tested there;
+the shell owns the widgets. Its section adds **Start Recorder** / **Stop
+Recorder** (separate from Quit — stopping the server is not quitting the tray),
+**Open dashboard**, **Copy password** and **Show log**, with the Recorder's state
+in that section's header line. The tray ICON stays the Bridge's tap state: it is
+what an operator watches during a call.
+
+Two behaviours there are load-bearing and easy to undo by accident:
+
+- **Open dashboard mints a login link** (ADR-0023) against the LOCAL Recorder, so
+  the browser lands signed in and never shows the native password prompt. Never
+  the host in bridge settings — a tray may supervise one Recorder and tap into
+  another.
+- **Quit stops only a Recorder this tray started.** One that was already running
+  (a `start.sh` in a terminal, another install holding port 8001) shows as
+  running-but-unmanaged and outlives Quit. Which it is comes from the spawn
+  attempt plus a `/health` probe, never from parsing the child's output.
+
+macOS has no Bundle yet (ADR-0024 is still proposed), so the Mac shell references
+no Bundle assembly and builds no `TrayHost` at all: it is bridge-only by
+construction, not by `HostPayloadPresent` answering false.
 
 ## Prerequisites
 

@@ -83,6 +83,23 @@ public class RecorderSupervisorTests
     }
 
     [Fact]
+    public void StopThenStartBootsAgainRatherThanWedging()
+    {
+        // Stop() is the operator's "Stop Recorder" as well as Quit's teardown (ADR-0022).
+        // While the quitting flag was a one-way latch, the next Start spawned a preflight,
+        // killed it on its own quit-race check and returned with no state report — leaving
+        // the menu on "Preparing TapScribe…" with Start AND Stop both disabled, forever.
+        using var world = new Fake();
+        world.Boot();
+
+        world.Supervisor.Stop();
+        world.Boot();
+
+        Assert.Equal(RecorderState.Running, world.LastState);
+        Assert.Equal(4, world.Spawned.Count);
+    }
+
+    [Fact]
     public void QuitStopsARecorderTheTrayDidStart()
     {
         using var world = new Fake();
@@ -247,7 +264,10 @@ public class RecorderSupervisorTests
                 spawn: command =>
                 {
                     Spawned.Add(command.Executable);
-                    bool isPreflight = Spawned.Count == 1;
+                    // Every boot spawns preflight then the Recorder, so the ODD spawns are
+                    // the preflights — a second Boot() after a Stop is a supported sequence
+                    // and `Count == 1` would mislabel its preflight as the Recorder.
+                    bool isPreflight = Spawned.Count % 2 == 1;
                     var child = new FakeChild
                     {
                         Executable = command.Executable,

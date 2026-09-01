@@ -46,13 +46,13 @@ public class BundleLayoutTests
     [Fact]
     public void Resolve_PointsAtTheRecordersOwnAuthPasswordFile()
     {
-        // config.AUTH_PASSWORD_FILE is BASE_DIR / ".auth-password", and the Launcher
+        // config.AUTH_PASSWORD_FILE is BASE_DIR / ".auth-password", and the tray
         // sets TAPSCRIBE_BASE_DIR to the data dir — so the two must agree.
         Assert.Equal(Path.Join("/home/op", "TapScribe", ".auth-password"), Layout().PasswordFile);
     }
 
     [Fact]
-    public void Resolve_PutsTheLauncherLogInItsOwnFolderUnderTheDataDirectory()
+    public void Resolve_PutsTheHostLogInItsOwnFolderUnderTheDataDirectory()
     {
         BundleLayout layout = Layout();
 
@@ -63,7 +63,7 @@ public class BundleLayoutTests
     [Fact]
     public void Resolve_MakesRelativeInputsAbsolute()
     {
-        // pip runs with a different cwd than the Launcher, so every path handed
+        // pip runs with a different cwd than the tray, so every path handed
         // onward has to be absolute (install_target.resolve_install_spec absolutises
         // the wheel too, but a relative TAPSCRIBE_BASE_DIR would silently follow cwd).
         BundleLayout layout = BundleLayout.Resolve("prog", "profile");

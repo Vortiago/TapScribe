@@ -43,7 +43,7 @@ public sealed class RotatingLogWriter : IDisposable
     public string Path => _path;
 
     /// <summary>
-    /// Append one timestamped line. Never throws: a Launcher that dies because it could
+    /// Append one timestamped line. Never throws: a tray that dies because it could
     /// not write its own log is strictly worse than one that runs without a log.
     /// </summary>
     public void Write(string line)
@@ -81,7 +81,7 @@ public sealed class RotatingLogWriter : IDisposable
                 // the correct behaviour — logging is a convenience here, and a failed
                 // write must not take down the tray or stop the Recorder. What is lost is
                 // this line (and, once the handle is dropped, until the next successful
-                // Open()). Nothing else in the Launcher depends on the log.
+                // Open()). Nothing else in the host role depends on the log.
                 _writer?.Dispose();
                 _writer = null;
                 _written = -1;

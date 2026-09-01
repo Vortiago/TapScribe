@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -61,7 +62,8 @@ public static class LoginLink
                 {
                     Authorization = new AuthenticationHeaderValue(
                         "Basic",
-                        Convert.ToBase64String(Encoding.UTF8.GetBytes($"admin:{password}"))),
+                        Convert.ToBase64String(
+                            Encoding.UTF8.GetBytes($"{BundleDefaults.DashboardUser}:{password}"))),
                 },
             };
             using HttpResponseMessage response = http.Send(request, deadline.Token);
@@ -73,8 +75,15 @@ public static class LoginLink
             string? path = body.RootElement.GetProperty("path").GetString();
             return string.IsNullOrEmpty(path) ? root + "/" : root + path;
         }
+        // InvalidOperationException and IOException are the shapes a 200 with the WRONG BODY
+        // takes: `GetProperty` on a non-object root, `GetString()` on a non-string value, a
+        // truncated read. A proxy, a captive portal or a Recorder version mismatch all land
+        // there, and without them the "never throws" contract above is not kept — the caller
+        // gets a "Something went wrong" balloon and no browser instead of the signed-out
+        // dashboard.
         catch (Exception error) when (
-            error is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException)
+            error is HttpRequestException or TaskCanceledException or JsonException
+                or KeyNotFoundException or InvalidOperationException or IOException)
         {
             // Only the message, never anything derived from the password
             // (CodeQL cs/cleartext-storage-of-sensitive-information).

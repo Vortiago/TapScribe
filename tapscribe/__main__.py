@@ -31,7 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="TapScribe — local-first transcription recorder + dashboard.",
     )
     p.add_argument("--host", default="localhost", help="Bind address. Use 0.0.0.0 to expose on LAN.")
-    p.add_argument("--port", type=int, default=8001)
+    # Defaulted FROM config, which `main()` then stamps back onto it: one declaration of the
+    # port, rather than a literal here that a launch skipping argparse would disagree with.
+    p.add_argument("--port", type=int, default=config.PORT)
     p.add_argument(
         "--live-model",
         default="tiny.en",
@@ -162,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="What pip installs TapScribe from when /setup installs model "
         "backends: omitted (a dev checkout, the default), a path to the "
         "Windows Bundle's shipped .whl, or a pinned 'tapscribe==X.Y.Z'. "
-        "The Bundle's Launcher passes its wheel. See ADR-0015.",
+        "The Bundle's tray passes its wheel. See ADR-0015.",
     )
     return p
 

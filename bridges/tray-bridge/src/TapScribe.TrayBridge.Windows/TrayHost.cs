@@ -30,6 +30,12 @@ internal sealed class TrayHost : IHostView, IDisposable
     // a CancellationTokenSource, not from HttpClient.Timeout, which is per-client.
     private readonly HttpClient _http = new();
     private readonly Action<string, string, NoticeKind> _notify;
+    /// <summary>The shell's marshaller. Held because the host role does work OFF the UI
+    /// thread (the login-link mint) and every menu and balloon touch has to come back.</summary>
+    private readonly Action<Action> _post;
+    /// <summary>The last header balloon'd, so a re-render of the same bad state does not
+    /// balloon again on every tick.</summary>
+    private string _alerted = "";
 
     private readonly ToolStripSeparator _separator = new();
     private readonly ToolStripMenuItem _statusItem;
@@ -50,18 +56,37 @@ internal sealed class TrayHost : IHostView, IDisposable
     internal static TrayHost? TryAttach(Action<Action> post, Action<string, string, NoticeKind> notify)
     {
         string program = AppContext.BaseDirectory;
-        if (!BundleLayout.HostPayloadPresent(program))
-            return null;
+        try
+        {
+            if (!BundleLayout.HostPayloadPresent(program))
+                return null;
 
-        BundleLayout layout = BundleLayout.Resolve(
-            program, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-        return new TrayHost(layout, post, notify);
+            BundleLayout layout = BundleLayout.Resolve(
+                program, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            return new TrayHost(layout, post, notify);
+        }
+        catch (Exception error) when (error is ArgumentException or IOException)
+        {
+            // A profile-less session answers "" for UserProfile, and an invalid path throws
+            // out of Path.GetFullPath. This runs from the TrayContext CONSTRUCTOR, before
+            // Application.Run pumps anything, so an escaping throw takes the whole tray down
+            // — the BRIDGE role with it — behind an unhandled-exception dialog. A dialog is
+            // the only way to be heard here (no tray icon exists yet, so `notify` would NRE),
+            // and degrading to a bridge-only tray keeps the half that needs no layout.
+            MessageBox.Show(
+                $"TapScribe could not work out where it is installed:\n\n{error.Message}",
+                "TapScribe",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return null;
+        }
     }
 
     private TrayHost(BundleLayout layout, Action<Action> post, Action<string, string, NoticeKind> notify)
     {
         _layout = layout;
         _notify = notify;
+        _post = post;
         _log = new RotatingLogWriter(layout);
 
         // Created BEFORE anything is spawned: a process started by a process already in a
@@ -70,10 +95,17 @@ internal sealed class TrayHost : IHostView, IDisposable
         _reaper = JobObject.TryCreate(_log.Write);
 
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
-        _startItem = new ToolStripMenuItem("Start Recorder", null, (_, _) => Guarded(() => _controller!.StartRecorder()));
+        // Both DISABLED until the first ShowHost, like the Bridge half's End/Disconnect. The
+        // menu is spliced in and the icon made visible by the shell's constructor, while
+        // Startup lands a message-loop tick later: an operator who clicked Start Recorder in
+        // that window would boot a second preflight and a second Recorder on top of the one
+        // Startup is about to boot, and only the last would be reachable by Stop or Quit.
+        _startItem = new ToolStripMenuItem("Start Recorder", null, (_, _) => Guarded(() => _controller!.StartRecorder()))
+        { Enabled = false };
         // Separate from Quit, deliberately: stopping the server is not quitting the tray,
         // and an operator who wants the port free should not have to lose their bridge.
-        _stopItem = new ToolStripMenuItem("Stop Recorder", null, (_, _) => Guarded(() => _controller!.StopRecorder()));
+        _stopItem = new ToolStripMenuItem("Stop Recorder", null, (_, _) => Guarded(() => _controller!.StopRecorder()))
+        { Enabled = false };
         _dashboardItem = new ToolStripMenuItem("Open dashboard", null, (_, _) => Guarded(OpenDashboard));
         _passwordItem = new ToolStripMenuItem("Copy password", null, (_, _) => Guarded(CopyPassword));
         _logItem = new ToolStripMenuItem("Show log", null, (_, _) => Guarded(ShowLog));
@@ -106,6 +138,14 @@ internal sealed class TrayHost : IHostView, IDisposable
         _statusItem.Text = host.Header;
         _startItem.Enabled = host.CanStart;
         _stopItem.Enabled = host.CanStop;
+
+        // The Recorder's state lives in the MENU, which an operator only sees when they open
+        // it — and the tray ICON stays the Bridge's tap state by design (ADR-0022). So a
+        // crash or a failed boot has no ambient signal at all unless it says so out loud.
+        // Keyed on the header so a repeated render of the same bad state balloons once.
+        if (host.Alert && host.Header != _alerted)
+            _notify("TapScribe", host.Header, NoticeKind.Warning);
+        _alerted = host.Alert ? host.Header : "";
     }
 
     /// <summary>
@@ -118,8 +158,31 @@ internal sealed class TrayHost : IHostView, IDisposable
     ///
     /// A failed mint falls back to the plain URL — the operator then meets the password
     /// prompt they met before this existed, with Copy password one item below.
+    ///
+    /// Off the UI thread, and that is not an optimisation: the mint is a loopback round-trip
+    /// with a 5 s deadline, and the state an operator is most likely to click in — a Recorder
+    /// still grinding through preflight's pip install, or one that accepted the socket and
+    /// went quiet — is exactly the one that spends the whole budget. On the message loop that
+    /// is a frozen menu, a "Not Responding" tray, and every marshalled Bridge status behind
+    /// it for a meeting that may be streaming.
     /// </summary>
-    private void OpenDashboard() => ShellOpen(DashboardUrl());
+    private void OpenDashboard() => _ = Task.Run(() =>
+    {
+        string url = BundleDefaults.DashboardUrl;
+        try
+        {
+            url = DashboardUrl();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The link is the convenience; the signed-out dashboard is what the whole feature
+            // degrades to, so open THAT rather than nothing. Logged here rather than
+            // balloon'd because the balloon needs the UI thread and this is not it.
+            _log.Write($"open dashboard: {error}");
+        }
+
+        _post(() => Guarded(() => ShellOpen(url)));
+    });
 
     /// <summary>The password file is the shell's to read (it is on THIS machine, at a path this
     /// layout resolved); the round-trip is <see cref="LoginLink"/>'s, in Bundle.Core, where both
@@ -162,10 +225,25 @@ internal sealed class TrayHost : IHostView, IDisposable
             return;
         }
 
-        _notify("TapScribe", $"{lookup.Message} Username: admin.", NoticeKind.Information);
+        _notify(
+            "TapScribe",
+            $"{lookup.Message} Username: {BundleDefaults.DashboardUser}.",
+            NoticeKind.Information);
     }
 
-    private void ShowLog() => ShellOpen(_log.Path);
+    private void ShowLog()
+    {
+        // ShellOpen hands the path to explorer.exe, which returns 0 whether or not the target
+        // exists — so without this the one case an operator most needs an answer in (the log
+        // directory is unwritable, and RotatingLogWriter has been swallowing the IOException
+        // by design) is a click that silently does nothing.
+        if (!File.Exists(_log.Path))
+        {
+            _notify("TapScribe", $"No log yet at {_log.Path}.", NoticeKind.Information);
+            return;
+        }
+        ShellOpen(_log.Path);
+    }
 
     /// <summary>
     /// Hand a URL or a file to the shell's default handler, VIA EXPLORER.
@@ -200,10 +278,23 @@ internal sealed class TrayHost : IHostView, IDisposable
         {
             // No handler registered for http/.log, or the shell refused. Not fatal — the
             // operator can open it themselves, so say what we tried and carry on.
-            _log.Write($"could not open {target}: {error.Message}");
-            _notify("TapScribe", $"Could not open {target}.", NoticeKind.Warning);
+            string said = WithoutSecrets(target);
+            _log.Write($"could not open {said}: {error.Message}");
+            _notify("TapScribe", $"Could not open {said}.", NoticeKind.Warning);
         }
     }
+
+    /// <summary>
+    /// A target with its query stripped. The one URL this class opens is a login link, whose
+    /// <c>?k=</c> IS a live single-use dashboard credential (ADR-0023) — and the failure path
+    /// above writes to a rotating log file the operator is invited to open and paste, and to
+    /// a balloon anyone at the machine can read. Unspent, that token stays valid for its whole
+    /// TTL. Same anti-leak rule the password reads keep: say what was tried, never the secret.
+    /// </summary>
+    private static string WithoutSecrets(string target) =>
+        Uri.TryCreate(target, UriKind.Absolute, out Uri? uri) && !uri.IsFile && uri.Query.Length > 0
+            ? uri.GetLeftPart(UriPartial.Path)
+            : target;
 
     /// <summary>
     /// Whether SOMETHING is serving the Recorder's port — the discriminator between

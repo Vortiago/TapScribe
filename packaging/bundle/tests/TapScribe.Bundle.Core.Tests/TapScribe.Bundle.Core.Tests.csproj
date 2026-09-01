@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- References the Core ONLY (never the WinForms Launcher), so it builds and
+  <!-- References the Core ONLY (never a WinForms shell), so it builds and
        runs on the ubuntu CI leg. Mirrors the tray Bridge's Core.Tests project. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>

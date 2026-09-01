@@ -11,7 +11,7 @@ public sealed class BundleLayoutException : Exception
 
 /// <summary>
 /// Where everything in a Windows <b>Bundle</b> lives (ADR-0015), resolved from just two
-/// inputs: the directory the Launcher exe sits in, and the operator's user profile.
+/// inputs: the directory the tray exe sits in, and the operator's user profile.
 ///
 /// Two roots, deliberately separate:
 /// <list type="bullet">
@@ -21,7 +21,7 @@ public sealed class BundleLayoutException : Exception
 ///   elevation.</item>
 ///   <item><b>Data</b> (<c>%USERPROFILE%\TapScribe</c>) — what
 ///   <c>TAPSCRIBE_BASE_DIR</c> points at: recordings, config, <c>.auth-password</c>, and
-///   the Launcher's own logs. Outside the program dir so an uninstall cannot delete
+///   the host role's own logs. Outside the program dir so an uninstall cannot delete
 ///   someone's meetings.</item>
 /// </list>
 ///
@@ -48,7 +48,7 @@ public sealed record BundleLayout
     /// <summary>The data dir's name under the user profile — also the Windows installer's app name.</summary>
     public const string DataFolder = "TapScribe";
 
-    /// <summary>The Launcher's log folder inside the data dir.</summary>
+    /// <summary>The host role's log folder inside the data dir.</summary>
     public const string LogFolder = "logs";
 
     /// <summary>The active log file. <see cref="LogRotation"/> derives archive names from it.</summary>
@@ -63,7 +63,7 @@ public sealed record BundleLayout
         DataDirectory = dataDirectory;
     }
 
-    /// <summary>Where the Launcher exe lives; carries the interpreter and the wheel.</summary>
+    /// <summary>Where the tray exe lives; carries the interpreter and the wheel.</summary>
     public string ProgramDirectory { get; }
 
     /// <summary>What <c>TAPSCRIBE_BASE_DIR</c> is set to.</summary>
@@ -94,9 +94,9 @@ public sealed record BundleLayout
     public string LogFile => Path.Join(LogDirectory, LogFileName);
 
     /// <summary>
-    /// Resolve the layout from the Launcher's own directory and the user profile.
+    /// Resolve the layout from the tray's own directory and the user profile.
     /// Both are made absolute: pip and the Recorder run with a different cwd than the
-    /// Launcher, so a relative path handed onward would silently follow theirs.
+    /// tray, so a relative path handed onward would silently follow theirs.
     /// </summary>
     public static BundleLayout Resolve(string programDirectory, string userProfileDirectory)
     {

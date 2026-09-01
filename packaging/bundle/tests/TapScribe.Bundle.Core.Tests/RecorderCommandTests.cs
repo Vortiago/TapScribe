@@ -49,8 +49,8 @@ public class RecorderCommandTests
     [Fact]
     public void Recorder_PassesTheWheelAsAnAbsolutePath()
     {
-        // pip runs with a different cwd than the Launcher; install_target absolutises
-        // the spec, but handing it a relative path would make the Launcher's own
+        // pip runs with a different cwd than the tray; install_target absolutises
+        // the spec, but handing it a relative path would make the tray's own
         // "wheel not found" diagnostics depend on cwd.
         BundleProcess cmd = RecorderCommand.Recorder(Layout, Wheel);
 
@@ -81,7 +81,7 @@ public class RecorderCommandTests
     [Fact]
     public void DashboardUrl_IsTheRecordersLoopbackPort()
     {
-        // The Launcher only ever opens the LOCAL dashboard — a Bundle is a Recorder on
+        // The host role only ever opens the LOCAL dashboard — a Bundle is a Recorder on
         // this machine (ADR-0015). 8001 is config.py's port.
         Assert.Equal("http://localhost:8001/", BundleDefaults.DashboardUrl);
     }

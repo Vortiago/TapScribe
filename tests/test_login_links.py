@@ -101,6 +101,20 @@ def test_an_unspent_link_expires():
     assert links.spend(token) is None
 
 
+def test_an_unspent_link_expires_even_when_the_sweep_never_runs():
+    """`test_an_unspent_link_expires` passes on the sweep alone, so it would not
+    notice `spend` losing its own TTL check — and then throttling the sweep, or
+    moving it to `mint`, would turn every never-spent link into a permanent
+    credential. This holds `spend` to the rule directly."""
+    links, clock = store()
+    token = links.mint()
+    links._sweep = lambda: None  # type: ignore[method-assign]
+
+    clock.advance(TOKEN_TTL_S + 1)
+
+    assert links.spend(token) is None
+
+
 def test_an_unknown_token_is_refused():
     links, _ = store()
     links.mint()

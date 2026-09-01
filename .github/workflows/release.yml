@@ -313,7 +313,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path staging | Out-Null
           tar -xzf pbs.tar.gz -C staging
           # The archive unpacks to staging/python/…. Assert BOTH interpreters:
-          # the Launcher spawns the Recorder with pythonw.exe (no console
+          # the tray spawns the Recorder with pythonw.exe (no console
           # window) and runs preflight with python.exe, and BundleLayout hard-
           # codes those paths. An upstream layout change has to fail here, not
           # as a silent "nothing happens when I click the tray icon".
@@ -342,7 +342,7 @@ jobs:
       # switches on the payload staged above being on disk beside it (ADR-0022), so
       # the same executable is a bridge-only tray in the zip and a Bundle's tray here.
       - name: Stage the tray
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bridge-tray
           path: bridge-tray

@@ -6,7 +6,7 @@ namespace TapScribe.Bundle.Core;
 public sealed record LogFileInfo(string Name, long Size);
 
 /// <summary>
-/// The size + count bound on the Launcher's log directory. Both limits are required:
+/// The size + count bound on the host role's log directory. Both limits are required:
 /// size alone lets archives accumulate forever, count alone lets one archive grow without
 /// bound.
 /// </summary>
@@ -42,7 +42,7 @@ public sealed record LogRotationPlan(
     IReadOnlyList<string> Delete);
 
 /// <summary>
-/// The Launcher's log rotation, as a <b>pure decision</b> over a list of
+/// The host role's log rotation, as a <b>pure decision</b> over a list of
 /// <c>(name, size)</c>. No filesystem: the Windows shell lists the directory, calls
 /// <see cref="Plan"/>, and performs the rename/deletes. That split is the point — the
 /// policy (when to roll, what to delete, and above all what NOT to delete) is the part

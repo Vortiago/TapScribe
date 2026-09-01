@@ -18,6 +18,9 @@ public abstract record TrayStatus
     /// <summary>An attached tap is being opened (probing the Recorder, opening devices).</summary>
     public sealed record Connecting : TrayStatus;
 
+    /// <summary>An attached tap is being torn down and drained.</summary>
+    public sealed record Disconnecting : TrayStatus;
+
     /// <summary>An attached tap is streaming <paramref name="Connected"/> of
     /// <paramref name="Total"/> selected devices into the Recorder's current session. Its own
     /// case rather than a flag on <see cref="Streaming"/>, because the two say different things
@@ -117,6 +120,12 @@ public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, st
                 "● Ending meeting…",
                 TrayIcon.Streaming,
                 "TapScribe — ending meeting…"),
+            // Its own case for the reason Attached is one: an attached tap has no meeting to
+            // end, so borrowing Ending's sentence would name a thing this tray never had.
+            TrayStatus.Disconnecting => new StatusView(
+                "● Disconnecting…",
+                TrayIcon.Streaming,
+                "TapScribe — disconnecting from the current session…"),
             TrayStatus.Processing p => new StatusView(
                 $"● {p.Label}",
                 TrayIcon.Streaming,

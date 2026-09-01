@@ -761,7 +761,7 @@ jobs:
       # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and self-enrolment are kernel
       # behaviour no Linux leg can answer for.
       - name: Test the Windows reaper
-        run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Windows.Tests/TapScribe.Bundle.Windows.Tests.csproj -c Release
+        run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Windows.Tests/TapScribe.Bundle.Windows.Tests.csproj -c Release --no-build
 
   # The cross-platform job above runs the bridge-core tests but SKIPS the
   # real-Recorder meeting E2E (RealRecorderMeetingE2ETests, via the

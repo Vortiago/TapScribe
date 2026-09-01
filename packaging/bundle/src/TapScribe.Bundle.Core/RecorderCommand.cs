@@ -8,18 +8,28 @@ public static class BundleDefaults
     /// <summary>The Recorder's HTTP port (<c>config.py</c>).</summary>
     public const int RecorderPort = 8001;
 
+    /// <summary>The username the Recorder's Basic scheme expects
+    /// (<c>config.AUTH_USER</c>) — what a login-link mint and the Copy password balloon both
+    /// have to say. One spelling, so the two cannot drift: a mint against the wrong user is a
+    /// 401 that <see cref="LoginLink"/> answers by silently opening the dashboard signed
+    /// out, while the balloon keeps telling the operator the old name.</summary>
+    public const string DashboardUser = "admin";
+
     /// <summary>
     /// What "Open dashboard" navigates to. Always loopback: a Bundle <i>is</i> a Recorder
     /// on this machine (ADR-0015), and the <c>--lan</c>/<c>--tls</c> topologies are about
     /// other machines reaching in, not about where this tray points.
+    ///
+    /// Composed from <see cref="RecorderPort"/> rather than re-typing it, so the port is
+    /// declared once on this side of the wire.
     /// </summary>
-    public const string DashboardUrl = "http://localhost:8001/";
+    public static readonly string DashboardUrl = $"http://localhost:{RecorderPort}/";
 }
 
 /// <summary>
-/// One child process the Launcher runs, as data: the executable, its argv (list form,
+/// One child process the host role runs, as data: the executable, its argv (list form,
 /// never a shell string — CLAUDE.md), and the environment overlay applied on top of the
-/// Launcher's own environment.
+/// tray's own environment.
 /// </summary>
 public sealed record BundleProcess(
     string Executable,
@@ -48,7 +58,7 @@ public static class RecorderCommand
     /// <c>&lt;python.exe&gt; -m tapscribe.preflight --install-spec &lt;wheel&gt;</c>.
     ///
     /// The console interpreter, run to completion before the Recorder starts, with its
-    /// output pumped into the Launcher's log. <c>tapscribe.preflight</c> is where
+    /// output pumped into the tray's log. <c>tapscribe.preflight</c> is where
     /// <c>start.ps1</c>'s homeless bring-up steps moved (Windows CUDA torch swap,
     /// silero-vad repair, the <c>[summarize]</c> probe) so a PowerShell copy and a C#
     /// copy cannot drift.
@@ -69,7 +79,7 @@ public static class RecorderCommand
     ///
     /// The windowless interpreter, because the Recorder is long-lived and a console
     /// window would be the app's most visible feature. Its stdout/stderr are still
-    /// redirected into the Launcher's log — redirection works fine without a console.
+    /// redirected into the tray's log — redirection works fine without a console.
     /// </summary>
     public static BundleProcess Recorder(BundleLayout layout, string wheelPath)
     {

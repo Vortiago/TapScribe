@@ -21,6 +21,7 @@ being a module global: per-app means tests never leak one another's cookies, and
 
 from __future__ import annotations
 
+import hmac
 import secrets
 import time
 from collections.abc import Callable
@@ -67,7 +68,9 @@ class LoginLinks:
     """
 
     _links: dict[str, _Link] = field(default_factory=dict)
-    _cookies: set[str] = field(default_factory=set)
+    #: The issued sessions, held UTF-8-encoded: `validate` compares against every
+    #: one of them on the hottest path, and `hmac.compare_digest` needs bytes.
+    _cookies: set[bytes] = field(default_factory=set)
     #: Injected so the tests drive expiry without sleeping. `time.monotonic` and
     #: not `time.time`: a clock step (NTP, a laptop waking) must not retire a
     #: live link or resurrect a dead one.
@@ -98,10 +101,17 @@ class LoginLinks:
 
         now = self._now()
         link = self._links[found]
+        if link.cookie is None and now >= link.expires_at:
+            # Braces to `_sweep`'s belt, the way the grace window below has them:
+            # without this the TTL is enforced only as a side effect of the sweep
+            # having deleted the link first, so throttling the sweep or moving it
+            # to `mint` would silently turn every never-spent link into a
+            # permanent credential — the one case single-use does not bound.
+            return None
         if link.cookie is None:
             link.cookie = secrets.token_urlsafe(32)
             link.spent_at = now
-            self._cookies.add(link.cookie)
+            self._cookies.add(link.cookie.encode("utf-8"))
             return link.cookie
 
         # Already spent. Inside the grace window this is the scanner/double-click
@@ -114,13 +124,20 @@ class LoginLinks:
         return None
 
     def validate(self, cookie: str | None) -> bool:
-        """Whether `cookie` is a session this store issued. Compared in constant
-        time against every live session, like every other credential check in the
+        """Whether `cookie` is a session this store issued. Each candidate is
+        compared in constant time, like every other credential check in the
         Recorder — a dict/set lookup would answer in a length- and
-        content-dependent time."""
+        content-dependent time.
+
+        The presented cookie is encoded ONCE rather than per stored session: this
+        runs on the hottest path in the app (`auth.basic_auth_middleware`, crossed
+        by the dashboard's 500 ms poll) and the set only grows, one entry per
+        sign-in, for the process lifetime.
+        """
         if not cookie:
             return False
-        return any(utf8_compare_digest(cookie, issued) for issued in tuple(self._cookies))
+        probe = cookie.encode("utf-8")
+        return any(hmac.compare_digest(probe, issued) for issued in self._cookies)
 
     def _find(self, token: str) -> str | None:
         """The stored token equal to `token`, compared in constant time. Returns
