@@ -238,6 +238,8 @@ internal sealed class RuntimeHarness : IDisposable
 {
     private readonly TaskCompletionSource<string> _mint = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _mintReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<ConnectionTestResult> _preflight = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _preflightReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly string _directory =
         Path.Join(Path.GetTempPath(), "tapscribe-runtime-" + Guid.NewGuid().ToString("N"));
 
@@ -270,6 +272,29 @@ internal sealed class RuntimeHarness : IDisposable
     public Exception? MintError { get; init; }
 
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
+
+    /// <summary>Completes once the runtime has run the attached tap's pre-flight and is
+    /// waiting. The Connect-side twin of <see cref="MintReached"/>.</summary>
+    public Task PreflightReached => _preflightReached.Task;
+
+    /// <summary>Whether the pre-flight answers immediately (the default) or parks until
+    /// <see cref="CompletePreflight"/>: the seam that holds a Connect in flight.</summary>
+    public bool HoldPreflight { get; init; }
+
+    /// <summary>What the pre-flight answers with. Default is reachable and accepted; a test
+    /// models an unreachable Recorder or a refused token by handing back a non-Ok result,
+    /// which is how the real <see cref="ConnectionTester"/> reports both — it returns them
+    /// rather than throwing, so <see cref="PreflightError"/> is a different thing.</summary>
+    public ConnectionTestResult PreflightResult { get; init; } =
+        new(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: true, TokenError: null);
+
+    /// <summary>When set, the pre-flight throws it instead of answering: the transport
+    /// failures <see cref="ConnectionTester.TestAsync"/> does not catch, plus the timeout.
+    /// </summary>
+    public Exception? PreflightError { get; init; }
+
+    public void CompletePreflight(ConnectionTestResult? result = null) =>
+        _preflight.TrySetResult(result ?? PreflightResult);
 
     /// <summary>
     /// Mint through a real <see cref="ControlClient"/> at the settings' port, instead of handing
@@ -413,6 +438,15 @@ internal sealed class RuntimeHarness : IDisposable
             if (!HoldMint)
                 return SessionId;
             return await _mint.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        },
+        async (_, cancellationToken) =>
+        {
+            _preflightReached.TrySetResult();
+            if (PreflightError is not null)
+                throw PreflightError;
+            if (!HoldPreflight)
+                return PreflightResult;
+            return await _preflight.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         },
         SettingsStore,
         StateStore,

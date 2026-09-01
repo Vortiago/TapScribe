@@ -64,6 +64,23 @@ public static class ConnectionTester
         }
     }
 
+    /// <summary>
+    /// The probe over an operator's settings, shaped as
+    /// <see cref="BridgeDependencies.CheckConnection"/>: what both shells pass as their
+    /// production pre-flight for Connect (ADR-0025). Named here rather than written as a
+    /// lambda at each wiring site, because the two would be character-for-character the same
+    /// and would drift apart the first time one of them learned something.
+    ///
+    /// Connect has no mint to round-trip the Recorder, so without this an unreachable
+    /// Recorder or a refused token stays silent until the first person speaks.
+    /// </summary>
+    public static Task<ConnectionTestResult> CheckSettingsAsync(
+        BridgeSettings settings, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return TestAsync(settings.ToConnectionOptions(), http: null, cancellationToken);
+    }
+
     public static async Task<ConnectionTestResult> TestAsync(
         TapConnectionOptions options, HttpClient? http = null, CancellationToken cancellationToken = default)
     {
