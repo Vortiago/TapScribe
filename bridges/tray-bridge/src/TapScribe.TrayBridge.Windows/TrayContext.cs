@@ -5,7 +5,8 @@ namespace TapScribe.TrayBridge.Windows;
 
 /// <summary>
 /// The tray shell: a NotifyIcon with a status header line, Start meeting / End meeting /
-/// Connect to live / Disconnect / Past meetings / Settings / Quit. It owns the WinForms half of the bridge and nothing else.
+/// Connect to live / Disconnect / Past meetings, the local Recorder's section when this
+/// install carries one, then Settings / Quit. It owns the WinForms half of the bridge and nothing else.
 /// Every decision about what a meeting DOES (resolve the device selection, mint the detached
 /// session, run one capture pipeline per device, drain, trigger the end-of-meeting pipeline,
 /// resume one across a restart) belongs to <see cref="BridgeRuntime"/>, which is written once
@@ -29,10 +30,16 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     private readonly ToolStripMenuItem _disconnectItem;
     private readonly ToolStripMenuItem _pastMeetingsItem;
     private readonly TrayDependencies _deps;
+    /// <summary>The host role, or null on a bridge-only install (ADR-0022).</summary>
+    private readonly TrayHost? _host;
     // Held only until the message loop starts, which is when the runtime that owns them
     // thereafter is built. Read its Settings for the dialog rather than this.
     private readonly BridgeSettings _initialSettings;
     private BridgeRuntime? _runtime;
+    // Captured when the message loop starts, and the host role's marshaller thereafter.
+    // Null before that, which is a moment nothing can report from: the supervisor is not
+    // started until Startup either.
+    private SynchronizationContext? _ui;
     private bool _uiReleased; // Shutdown disposes, and then so does whoever owns the context
 
     public TrayContext()
@@ -83,6 +90,18 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         _menu.Items.Add(_connectItem);
         _menu.Items.Add(_disconnectItem);
         _menu.Items.Add(_pastMeetingsItem);
+        // The host role, if this install carries one. Built BEFORE the menu is attached
+        // so its items are in place from the first open; absent entirely otherwise, which
+        // is why a bridge-only tray's menu is exactly what it was before the role existed.
+        // notify: the ITrayView notice this shell already renders — one
+        // notification surface for both roles, not two.
+        _host = TrayHost.TryAttach(post: PostToUi, notify: ShowNotice);
+        if (_host is not null)
+        {
+            foreach (ToolStripItem item in _host.MenuItems)
+                _menu.Items.Add(item);
+        }
+
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(settingsItem);
         _menu.Items.Add(quitItem);
@@ -106,10 +125,14 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     {
         SynchronizationContext ui = SynchronizationContext.Current
             ?? throw new InvalidOperationException("The tray must start on the WinForms UI thread.");
+        _ui = ui;
         var runtime = new BridgeRuntime(
             this, new SynchronizationContextDispatcher(ui), _deps.Bridge, _initialSettings);
         _runtime = runtime;
         runtime.Startup(); // resume a pipeline a previous tray session left running
+        // The Recorder boots here for the same reason: this is the first moment a
+        // background thread's state change can reach the menu.
+        _host?.Startup();
     }
 
     /// <summary>
@@ -212,6 +235,17 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
         _disconnectItem.Enabled = commands.CanDisconnect;
     }
 
+
+    /// <summary>The host role's marshaller: every supervisor state change reaches the menu
+    /// on the thread that owns it. Inline before the loop starts, which is a moment nothing
+    /// reports from — the Recorder is not booted until Startup.</summary>
+    private void PostToUi(Action action)
+    {
+        if (_ui is { } ui)
+            ui.Post(_ => action(), null);
+        else
+            action();
+    }
 
     /// <summary>A new window per call, shown immediately in its Loading state so an empty frame
     /// is never on screen, and released by its own FormClosed handler. The runtime renders into
@@ -317,6 +351,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
             _pastMeetingsItem.DropDown.Dispose();
             _menu.Dispose();
             _indicator.Dispose();
+            // LAST, and not merely by habit: the host role releases a KILL_ON_JOB_CLOSE
+            // job this process is a member of, which terminates the current process from
+            // inside that call — nothing after it runs. Its own Dispose keeps that same
+            // order internally; this keeps the shell's UI ahead of it.
+            _host?.Dispose();
         }
         base.Dispose(disposing);
     }

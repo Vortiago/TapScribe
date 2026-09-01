@@ -17,6 +17,12 @@
   <ItemGroup>
     <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
     <ProjectReference Include="..\TapScribe.Bridge.Windows\TapScribe.Bridge.Windows.csproj" />
+    <!-- The HOST ROLE (ADR-0022). One tray per OS carries both roles, and the SHELL is
+         where they meet: neither core references the other, so a Bundle stays not-a-Bridge
+         and a bridge-only install just never builds a TrayHost. Across trees on purpose —
+         the Bundle assemblies are packaging, not bridges. -->
+    <ProjectReference Include="..\..\..\..\packaging\bundle\src\TapScribe.Bundle.Core\TapScribe.Bundle.Core.csproj" />
+    <ProjectReference Include="..\..\..\..\packaging\bundle\src\TapScribe.Bundle.Windows\TapScribe.Bundle.Windows.csproj" />
   </ItemGroup>
 
   <!-- TrayContext is internal (it is the app's own shell, not an API), and its meeting
