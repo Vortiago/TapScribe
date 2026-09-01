@@ -154,6 +154,17 @@ internal sealed class MacTrayHost : IHostView, IDisposable
             _log.Write($"runtime copy failed: {error}");
             return;
         }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The backstop, for the reason RunTapsAsync has one: this is FIRE-AND-FORGET, so
+            // anything the filter above does not name faults the task unobserved and nothing
+            // reports it — leaving the menu on "Starting…" with Start AND Stop disabled until
+            // the tray is restarted. Reported as Failed rather than swallowed: the operator
+            // gets a menu they can act on, and the log gets the whole exception.
+            _controller.Report(RecorderState.Failed, "Could not prepare TapScribe. See the log.");
+            _log.Write($"host startup failed: {error}");
+            return;
+        }
 
         _controller.Start();
     });

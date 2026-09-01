@@ -665,6 +665,60 @@ jobs:
       # If this ever fails for a reason that is about the runner rather than the
       # code (no window server for an LSUIElement app, say), delete it. A launch
       # gate that has to be retried is worse than none.
+      # The Bundle's packaging script, RUN — for the same reason `bundle-build`
+      # exists on the Windows side: the release job that uses it fires on a tag
+      # only, so without this a break here is discovered on release day. `bash -n`
+      # is not a substitute; the staging, the re-sign and the delegation are the
+      # parts that go wrong.
+      #
+      # A STUB payload, not python-build-standalone. What is under test is where
+      # the files land and whether the signature survives being written over —
+      # neither is a function of 300 MB, and pulling that into every PR would buy
+      # nothing. (The interpreter's own Mach-O dylibs under Resources are the one
+      # thing this cannot stand in for: `codesign --deep` over a real tree is a
+      # task-36 watch item.)
+      #
+      # Deliberately NOT installed: the quarantine and launch proofs above use the
+      # bridge-only package on purpose, because launching a payload-bearing app
+      # would boot the host role against a fake interpreter — a different test,
+      # and a flakier one.
+      - name: Prove the Bundle package script stages a payload
+        run: |
+          set -euo pipefail
+          app=$(find bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release \
+            -maxdepth 3 -type d -name 'TapScribe.app' -not -path '*/publish/*')
+          test -n "$app"
+
+          stub=$(mktemp -d)
+          mkdir -p "$stub/python/bin"
+          printf '#!/bin/sh\necho stub\n' > "$stub/python/bin/python3"
+          chmod +x "$stub/python/bin/python3"
+          : > "$stub/tapscribe-0.0.0-py3-none-any.whl"
+
+          packaging/macos/build-bundle-pkg.sh \
+            "$app" "$stub/python" "$stub/tapscribe-0.0.0-py3-none-any.whl" 0.0.0 bundle-probe.pkg
+
+          # The three-way contract: BundleLayout.MacOSPayload looks in
+          # Contents/Resources, the tray's role probe asks the same path, and the
+          # script puts it there. Asserted against the PACKAGE's payload rather than
+          # the staging directory, which is what an operator actually installs.
+          expanded=$(mktemp -d)
+          pkgutil --expand bundle-probe.pkg "$expanded/pkg"
+          payload=$(find "$expanded/pkg" -name Payload -maxdepth 2 | head -n 1)
+          test -n "$payload"
+          listed=$(tar -tzf "$payload")
+          for want in \
+            "TapScribe.app/Contents/Resources/python/bin/python3" \
+            "TapScribe.app/Contents/Resources/wheel/tapscribe-0.0.0-py3-none-any.whl"; do
+            if ! printf '%s\n' "$listed" | grep -q "$want"; then
+              echo "FAIL: the package has no $want."
+              echo "BundleLayout.MacOSPayload would read this install as a bridge-only tray,"
+              echo "so the operator's Recorder would simply be absent from the menu."
+              exit 1
+            fi
+          done
+          echo "OK: the Bundle package carries its payload where the layout looks for it."
+
       - name: Prove the installed app launches
         timeout-minutes: 3
         run: |
