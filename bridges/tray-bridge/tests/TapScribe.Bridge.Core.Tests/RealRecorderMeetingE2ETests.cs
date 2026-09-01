@@ -327,6 +327,201 @@ public class RealRecorderMeetingE2ETests
         Assert.Empty(harness.HistoryStore.Load().Meetings);
     }
 
+    [RequiresPythonAsr]
+    public async Task Runtime_AnAttachedTapAcrossARotation_FollowsTheRecorderIntoTheNewSession()
+    {
+        // The half of ADR-0025 that no fake can assert, and the reason "the tray never names a
+        // session" is a property rather than a phrasing: because the taps carry no session id,
+        // it is the RECORDER that decides where each Utterance lands. Rotate the current
+        // session mid-attach — the dashboard's "+ new session", or an operator on another
+        // machine — and the next Utterance follows, without the tray being told and without it
+        // noticing. A bracketed meeting is the opposite by construction: its taps name a
+        // session, and a rotation cannot move them.
+        //
+        // The NEXT Utterance is the unit that moves, deliberately: the Recorder captures the
+        // folder at WS open, so a tap spanning the rotation keeps writing where it started, and
+        // a fresh TapStream per Utterance is what turns that into "the next one follows".
+        string repoRoot = FindRepoRoot();
+        (_, string norwegianWav, string englishWav) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
+
+        // A short hangover, unlike the meeting tests above: this one wants each feed to CLOSE
+        // its Utterance promptly so the rotation lands between two of them. Fragmenting the
+        // speech is free here — the claim is about which folder the WAVs are in, and nothing
+        // transcribes them.
+        var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 400, PreRollMs: 0);
+        using var harness = new RuntimeHarness
+        {
+            RealMint = true, // wired, and never reached: an attached tap mints nothing
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = rec.Port,
+                Token = "",
+                Identity = "Nora",
+                Name = "Nora",
+                Devices = [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "Nora", "Nora", gate)],
+            },
+            Budgets = new RuntimeBudgets
+            {
+                PollInterval = TimeSpan.FromMilliseconds(500),
+                StartSettleTimeout = TimeSpan.FromSeconds(30),
+                QuitTeardownCap = TimeSpan.FromSeconds(30),
+            },
+        };
+        FakeAudioCapture nora = harness.AddDevice("mic", DeviceFlow.Capture);
+
+        var runtime = new BridgeRuntime(
+            harness.View, harness.Dispatcher, harness.Dependencies, harness.Settings, harness.Budgets);
+
+        runtime.Connect();
+        await runtime.ConnectTask!.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.True(harness.View.CanDisconnect, "the tray never offered Disconnect, so nothing attached");
+
+        using var http = new HttpClient();
+        string before = await CurrentSessionAsync(http, rec.Port);
+
+        // Speech, then silence to close what it opened. The trailing silence is the part that
+        // matters: a feed that simply stops leaves the gate open, because the gate counts
+        // FRAMES and there are none. Frames, not wall-clock, is also why this is deterministic
+        // rather than a sleep sized to hope.
+        await FeedAsync(nora, ReadWavPcm(norwegianWav));
+        await FeedSilenceAsync(nora, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            async () => await OpenTapCountAsync(http, rec.Port) == 0
+                && WavsWithAudio(Path.Join(rec.BaseDir, "recordings", before)).Length > 0,
+            TimeSpan.FromSeconds(30),
+            $"the first utterance to close and land in {before}");
+
+        // Rotate, the way the dashboard's "+ new session" does. The tray is not involved and is
+        // not told.
+        using HttpResponseMessage rotated = await http.PostAsync(
+            new Uri($"http://127.0.0.1:{rec.Port}/api/new-session"), content: null);
+        rotated.EnsureSuccessStatusCode();
+        using JsonDocument rotation = JsonDocument.Parse(await rotated.Content.ReadAsStringAsync());
+        string after = rotation.RootElement.GetProperty("current").GetString()!;
+        Assert.NotEqual(before, after);
+
+        // The SAME attached tap, still open, still naming no session.
+        await FeedAsync(nora, ReadWavPcm(englishWav));
+        await FeedSilenceAsync(nora, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            async () => await OpenTapCountAsync(http, rec.Port) == 0
+                && WavsWithAudio(Path.Join(rec.BaseDir, "recordings", after)).Length > 0,
+            TimeSpan.FromSeconds(30),
+            $"the utterance after the rotation to land in {after}");
+
+        runtime.Disconnect();
+        await runtime.DisconnectTask!.WaitAsync(TimeSpan.FromSeconds(60));
+
+        // Both folders now hold audio — the two waits above are the claim, and each fails by
+        // naming the session that stayed empty.
+        //
+        // And the tray stayed attached throughout: no mint, no session id, nothing in the
+        // history. A rotation is not an event it has, or wants.
+        Assert.False(harness.MintReached.IsCompleted, "the rotation made the tray mint a session");
+        Assert.Null(harness.SessionIdInUse);
+        Assert.Empty(harness.HistoryStore.Load().Meetings);
+    }
+
+    [RequiresPythonAsr]
+    public async Task Runtime_StartingAMeetingWhileAttached_DrainsTheLiveTapIntoTheSessionItWasRecordedInto()
+    {
+        // The takeover (ADR-0025 §Start-from-Attached) against the real thing. Against
+        // FakeRecorder this is an ordering assertion; here it is the operator's actual stake:
+        // the room mic was streaming into the live session when they clicked Start meeting, and
+        // the sentence they were half-way through has to survive, IN the session it was spoken
+        // into, as a complete WAV — not be cut mid-word by a teardown racing the new meeting's
+        // first frames.
+        //
+        // The long hangover is load-bearing: it keeps the Utterance OPEN at the moment Start
+        // runs, so the drain is the only thing that can close it. With a short one the tap
+        // would already have closed itself and the test would prove nothing.
+        string repoRoot = FindRepoRoot();
+        (_, string norwegianWav, _) = SpeechFixtures(repoRoot);
+        await using RealRecorder rec = await StartRealRecorderAsync(repoRoot);
+
+        var gate = new GateSettings(GateTuning.ThresholdToSlider(0.01), HangoverMs: 3000, PreRollMs: 0);
+        using var harness = new RuntimeHarness
+        {
+            RealMint = true,
+            Settings = new BridgeSettings
+            {
+                Host = "127.0.0.1",
+                Port = rec.Port,
+                Token = "",
+                Identity = "Nora",
+                Name = "Nora",
+                Devices = [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "Nora", "Nora", gate)],
+            },
+            Budgets = new RuntimeBudgets
+            {
+                PollInterval = TimeSpan.FromMilliseconds(500),
+                StartSettleTimeout = TimeSpan.FromSeconds(30),
+                QuitTeardownCap = TimeSpan.FromSeconds(30),
+            },
+        };
+        FakeAudioCapture nora = harness.AddDevice("mic", DeviceFlow.Capture);
+
+        var runtime = new BridgeRuntime(
+            harness.View, harness.Dispatcher, harness.Dependencies, harness.Settings, harness.Budgets);
+
+        runtime.Connect();
+        await runtime.ConnectTask!.WaitAsync(TimeSpan.FromSeconds(60));
+
+        using var http = new HttpClient();
+        string live = await CurrentSessionAsync(http, rec.Port);
+
+        // HALF the clip, cut mid-sentence: the operator clicks Start while still talking. The
+        // whole fixture would not do — it ends in its own trailing silence, which closes the
+        // Utterance on the way out and leaves the takeover nothing to drain.
+        byte[] speech = ReadWavPcm(norwegianWav);
+        byte[] fed = speech[..(speech.Length / 2 / TapWire.FrameBytes * TapWire.FrameBytes)];
+        await FeedAsync(nora, fed);
+        await WaitUntilAsync(
+            async () => await OpenTapCountAsync(http, rec.Port) > 0,
+            TimeSpan.FromSeconds(30),
+            "the attached tap to open an utterance");
+
+        string liveDir = Path.Join(rec.BaseDir, "recordings", live);
+
+        runtime.Start();
+        await runtime.StartTask!.WaitAsync(TimeSpan.FromSeconds(60));
+
+        // The takeover happened: a bracketed meeting, in a session of its own.
+        Assert.True(harness.View.CanEnd, "the tray never offered End, so the takeover published nothing");
+        Assert.False(harness.View.CanDisconnect, "the tray still thinks it is attached");
+        Assert.NotNull(harness.SessionIdInUse);
+        Assert.NotEqual(live, harness.SessionIdInUse);
+
+        // The drain RAN: the Recorder has no tap left open. This is the assertion, and the
+        // Recorder's own count is what makes it one — a takeover that skipped the drain leaks
+        // the attached tap, which stays connected and keeps writing into the session the
+        // meeting just replaced, so one microphone ends up as two speakers across two
+        // sessions. Nothing feeds the new meeting yet, so with the drain the count is zero;
+        // without it, it never falls below one. Polled because the close is a WebSocket
+        // handshake whose far side is a real server.
+        await WaitUntilAsync(
+            async () => await OpenTapCountAsync(http, rec.Port) == 0,
+            TimeSpan.FromSeconds(20),
+            "the takeover to close the attached tap rather than leave it streaming into "
+                + $"{live}");
+
+        // And what it wrote is the whole utterance, not a fragment: the drain is a barrier, so
+        // the audio streamed before the click is on disk in the session it was spoken into.
+        // (`wave.writeframes` patches the RIFF header on every write, so this measures what the
+        // Recorder RECEIVED — a takeover that cut the tap off mid-flight would leave less.)
+        byte[] landed = ReadWavPcm(Assert.Single(WavsWithAudio(liveDir)));
+        Assert.True(
+            landed.Length >= fed.Length * 0.9,
+            $"the live session holds {landed.Length} of the {fed.Length} bytes streamed before "
+                + "the takeover — the utterance was cut off rather than drained");
+
+        // Quit rather than End: this test is about the takeover, and End would spend three
+        // minutes running a pipeline two other tests in this file already cover.
+        await runtime.QuitAsync();
+    }
+
     // Who the merged transcript attributes segments to.
     private static HashSet<string> SpeakersIn(JsonElement transcript) =>
         transcript.GetProperty("segments").EnumerateArray()
@@ -374,6 +569,89 @@ public class RealRecorderMeetingE2ETests
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static string Trunc(string s) => s.Length <= 200 ? s : s[..200];
+
+    /// <summary>The session the Recorder is putting un-named taps into right now, read from
+    /// the same `/api/state` payload the dashboard badges `● live` from.</summary>
+    private static async Task<string> CurrentSessionAsync(HttpClient http, int port)
+    {
+        using JsonDocument state = JsonDocument.Parse(
+            await http.GetStringAsync(new Uri($"http://127.0.0.1:{port}/api/state")).ConfigureAwait(false));
+        return state.RootElement.GetProperty("current_session").GetString()!;
+    }
+
+    /// <summary>How many taps the Recorder has open — its own count, not the bridge's idea of
+    /// one, so "the utterance closed" is observed at the end that writes the file.</summary>
+    private static async Task<int> OpenTapCountAsync(HttpClient http, int port)
+    {
+        using JsonDocument state = JsonDocument.Parse(
+            await http.GetStringAsync(new Uri($"http://127.0.0.1:{port}/api/state")).ConfigureAwait(false));
+        return state.RootElement.GetProperty("active").GetArrayLength();
+    }
+
+    /// <summary>
+    /// The WAVs in <paramref name="dir"/> that hold audio — header data chunk non-empty.
+    ///
+    /// Deliberately NOT a "closed file" test, which it cannot be: the Recorder writes through
+    /// <c>wave.writeframes</c>, which re-patches the RIFF header on every write, so an
+    /// Utterance still streaming already declares its size. Whether a tap is closed is asked of
+    /// the Recorder instead (<see cref="OpenTapCountAsync"/>), which is the only end that
+    /// knows. What this rules out is a folder with an EMPTY placeholder in it.
+    /// </summary>
+    private static string[] WavsWithAudio(string dir)
+    {
+        if (!Directory.Exists(dir))
+            return [];
+        return [.. Directory.GetFiles(dir, "*.wav", SearchOption.TopDirectoryOnly).Where(HasAudio)];
+
+        static bool HasAudio(string path)
+        {
+            try
+            {
+                return ReadWavPcm(path).Length > 0;
+            }
+            catch (InvalidDataException)
+            {
+                // Opened but not yet written to: no data chunk at all. Absent for this
+                // purpose, and true again on a later poll.
+                return false;
+            }
+            catch (IOException)
+            {
+                // Mid-write on a platform that locks it. Same answer, same reason.
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Poll <paramref name="condition"/> to a deadline. Every wait in the two attached
+    /// tests goes through this rather than a bare delay: what they are waiting for is a real
+    /// server finishing real work, and a sleep long enough to be safe on CI is a sleep every
+    /// run pays.</summary>
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, TimeSpan timeout, string what)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            if (await condition().ConfigureAwait(false))
+                return;
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+        Assert.Fail($"timed out after {timeout.TotalSeconds:0}s waiting for {what}");
+    }
+
+    /// <summary>Emit digital silence, which is what CLOSES an Utterance: the gate counts silent
+    /// FRAMES, not wall-clock, so this is deterministic and runs far faster than the hangover
+    /// it satisfies. Without it a feed that simply stops leaves the gate open forever — no
+    /// frames, no decision.</summary>
+    private static async Task FeedSilenceAsync(FakeAudioCapture capture, TimeSpan duration)
+    {
+        var chunk = new byte[10 * TapWire.FrameBytes]; // 200 ms
+        for (int sent = 0; sent < duration.TotalMilliseconds; sent += 200)
+        {
+            capture.Emit(chunk);
+            await Task.Delay(20);
+        }
+    }
 
     /// <summary>Emit <paramref name="pcm"/> into <paramref name="capture"/> in ~500 ms
     /// chunks at ≈20× real time, so the bridge stream sends frames as it goes rather

@@ -2,7 +2,7 @@ using System.Collections.ObjectModel;
 
 namespace TapScribe.Bundle.Core;
 
-/// <summary>Constants the Launcher shares with the Recorder it boots.</summary>
+/// <summary>Constants the host role shares with the Recorder it boots.</summary>
 public static class BundleDefaults
 {
     /// <summary>The Recorder's HTTP port (<c>config.py</c>).</summary>

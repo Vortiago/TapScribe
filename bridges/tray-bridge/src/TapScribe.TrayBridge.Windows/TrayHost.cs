@@ -1,8 +1,5 @@
 using System.Diagnostics;
 using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
 using TapScribe.Bridge.Core;
 using TapScribe.Bundle.Core;
 using TapScribe.Bundle.Windows;
@@ -122,9 +119,12 @@ internal sealed class TrayHost : IHostView, IDisposable
     /// A failed mint falls back to the plain URL — the operator then meets the password
     /// prompt they met before this existed, with Copy password one item below.
     /// </summary>
-    private void OpenDashboard() => ShellOpen(BundleDefaults.DashboardUrl.TrimEnd('/') + MintLoginPath());
+    private void OpenDashboard() => ShellOpen(DashboardUrl());
 
-    private string MintLoginPath()
+    /// <summary>The password file is the shell's to read (it is on THIS machine, at a path this
+    /// layout resolved); the round-trip is <see cref="LoginLink"/>'s, in Bundle.Core, where both
+    /// shells and the ubuntu CI leg can reach it.</summary>
+    private string DashboardUrl()
     {
         PasswordLookup lookup = PasswordFile.Read(_layout.PasswordFile);
         if (!lookup.IsOk || lookup.Password is null)
@@ -132,41 +132,10 @@ internal sealed class TrayHost : IHostView, IDisposable
             // Never the file-derived text: only the status. Same anti-leak rule as
             // CopyPassword below (CodeQL cs/cleartext-storage-of-sensitive-information).
             _log.Write($"login link: password unavailable ({lookup.Status}) — opening the dashboard signed out.");
-            return "/";
+            return BundleDefaults.DashboardUrl;
         }
 
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            using var request = new HttpRequestMessage(
-                HttpMethod.Post, new Uri(BundleDefaults.DashboardUrl.TrimEnd('/') + "/api/login-link"))
-            {
-                // Per-request rather than on the shared client: the password is this call's
-                // business and must not ride along on anything else the tray sends.
-                Headers =
-                {
-                    Authorization = new AuthenticationHeaderValue(
-                        "Basic",
-                        Convert.ToBase64String(Encoding.UTF8.GetBytes($"admin:{lookup.Password}"))),
-                },
-            };
-            using HttpResponseMessage response = _http
-                .Send(request, timeout.Token);
-            response.EnsureSuccessStatusCode();
-            using JsonDocument body = JsonDocument.Parse(
-                response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
-            string? path = body.RootElement.GetProperty("path").GetString();
-            return string.IsNullOrEmpty(path) ? "/" : path;
-        }
-        catch (Exception error) when (
-            error is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException)
-        {
-            // The Recorder is not up yet, or is an older build with no /api/login-link.
-            // Not fatal and not worth a balloon: the dashboard still opens, and the
-            // operator signs in the way they always could.
-            _log.Write($"login link: {error.Message} — opening the dashboard signed out.");
-            return "/";
-        }
+        return LoginLink.SignedInUrl(_http, BundleDefaults.DashboardUrl, lookup.Password, _log.Write);
     }
 
     private void CopyPassword()

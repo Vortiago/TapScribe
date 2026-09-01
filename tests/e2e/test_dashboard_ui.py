@@ -8069,5 +8069,103 @@ async def test_login_link_signs_the_browser_in_without_an_auth_dialog(
             await again.goto(base + link, wait_until="domcontentloaded")
             assert again.url.rstrip("/") == base.rstrip("/"), again.url
             assert unauthorized == [], unauthorized
+
+            # A link that is genuinely no good — yesterday's, pasted out of a
+            # chat — is a PAGE, never a 401. This is the assertion the route
+            # test cannot make: a 401 on a navigation is what pops the native
+            # dialog, and only a real browser proves none was asked for.
+            dead = await context.new_page()
+            response = await dead.goto(base + "/login?k=not-a-real-token", wait_until="domcontentloaded")
+            assert response is not None and response.status == 200, response
+            assert "This link is used up" in await dead.inner_text("body")
+            assert unauthorized == [], unauthorized
+        finally:
+            await browser.close()
+
+
+async def test_a_link_signed_in_dashboard_can_still_write(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """The other half of ADR-0023, and the half a green suite would not notice:
+    after the link signs the browser in, the dashboard must still be able to
+    SAVE.
+
+    ADR-0023 adds an Origin check to the BASIC scheme on state-changing methods,
+    because `SameSite=Strict` scopes the cookie by SITE and a site ignores ports
+    — a hostile page on another loopback port is same-site to this dashboard.
+    Every write the dashboard makes therefore now runs through a comparison of
+    the browser's `Origin` against the Recorder's own `base_url`, and nothing
+    else exercises the PASSING side of it honestly: the middleware's own tests
+    hand-write `Origin: http://testserver` (no port at all, so the two port
+    halves cannot disagree), and every OTHER dashboard-UI test runs the auth-off
+    fixture, where the middleware returns before it ever looks. Get that
+    comparison wrong and the Recorder 403s every save in the product while the
+    suite stays green.
+
+    So: sign in the way the tray does, then drive one real save through the UI —
+    the Sessions view's inline rename, a debounced PUT — and require both the
+    badge and the stored value.
+    """
+    rec = running_recorder_auth_on.recorder
+    base = running_recorder_auth_on.base_url
+    password = rec.auth.value
+
+    sid = "2025-05-01T10-00-00Z"
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    synth_speech_like_wav(d / f"{sid}_Dana_dana_0000dddd.wav", seconds=0.4, freq_hz=210.0)
+
+    async with httpx.AsyncClient() as client:
+        minted = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert minted.status_code == 200, minted.text
+        link = minted.json()["path"]
+
+    row = f'#viewRoot .sessrow[data-sid="{sid}"]'
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            # No http_credentials, again: the cookie has to be the only credential
+            # in play, or the write would pass on a header instead.
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # A refused write is a 403 from the Origin check; a refused session is
+            # a 401. Neither shows in the UI beyond a status badge, so collect them
+            # and name them in the failure.
+            refused: list[str] = []
+            page.on(
+                "response",
+                lambda r: (
+                    refused.append(f"{r.status} {r.request.method} {r.url}")
+                    if r.status in (401, 403)
+                    else None
+                ),
+            )
+
+            await page.goto(base + link, wait_until="domcontentloaded")
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            await page.locator(row).wait_for(state="visible", timeout=10000)
+
+            await page.locator(f'{row} [data-slot="rename"]').fill("Quarterly Planning")
+            try:
+                await page.wait_for_function(
+                    f"""() => {{
+                        const el = document.querySelector('{row} [data-slot="renameStatus"]');
+                        return !!el && el.textContent === 'saved';
+                    }}""",
+                    timeout=8000,
+                )
+            except Exception as timeout:
+                # A refused write never reaches the badge, so the bare timeout would
+                # name the symptom and hide the cause. Say which request was refused.
+                raise AssertionError(f"the save never landed; refused: {refused}") from timeout
+            assert refused == [], refused
+
+            # The badge is optimistic on its own — the Recorder is what has to have
+            # taken the write.
+            async with httpx.AsyncClient(base_url=base, auth=("admin", password)) as client:
+                meta = (await client.get(f"/api/session-meta/{sid}")).json()
+            assert meta.get("label") == "Quarterly Planning", meta
         finally:
             await browser.close()
