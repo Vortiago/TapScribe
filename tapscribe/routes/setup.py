@@ -76,7 +76,7 @@ async def api_setup_install(request: Request):
                 selection,
                 live=live,
                 # Set by `python -m tapscribe --install-spec` (the Bundle's
-                # the tray passes its wheel); absent in a checkout.
+                # tray passes its wheel); absent in a checkout.
                 install_spec=getattr(request.app.state, "install_spec", None),
                 on_success=refresh_backend_probes,
             ):

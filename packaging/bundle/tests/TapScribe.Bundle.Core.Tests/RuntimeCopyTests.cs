@@ -191,6 +191,35 @@ public class RuntimeCopyTests
         Assert.Contains(".pkg", error.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SymlinksAreRecreatedRatherThanFollowed()
+    {
+        // The shape a python-build-standalone tree actually has, and the one a naive copy
+        // gets wrong three ways at once: `bin/python3 -> python3.13` becomes a second copy
+        // of the binary, a DANGLING link throws FileNotFoundException and fails the whole
+        // launch, and a directory link pointing at an ancestor recurses until the stack
+        // goes — which no catch tier in the supervisor can absorb. build-bundle-pkg.sh
+        // reaches for `ditto` for exactly this; the in-process copy has to match it.
+        using var world = new Fake();
+        string python = Path.Join(world.Payload, "python");
+        File.WriteAllText(Path.Join(python, "bin", "python3.13"), "#!/bin/sh");
+        File.CreateSymbolicLink(Path.Join(python, "bin", "python-real"), "python3.13");
+        File.CreateSymbolicLink(Path.Join(python, "bin", "python-dangling"), "gone.exe");
+        // Points at its own parent: followed, this walk never ends.
+        Directory.CreateSymbolicLink(Path.Join(python, "lib", "loop"), "..");
+
+        BundleLayout layout = world.MacOS("1.3.0");
+        RuntimeCopyResult result = RuntimeCopy.Ensure(layout, world.Log);
+
+        Assert.Equal(RuntimeCopyOutcome.Fresh, result.Outcome);
+        string copiedBin = Path.Join(layout.PythonDirectory, "bin");
+        Assert.Equal("python3.13", new FileInfo(Path.Join(copiedBin, "python-real")).LinkTarget);
+        Assert.Equal("gone.exe", new FileInfo(Path.Join(copiedBin, "python-dangling")).LinkTarget);
+        Assert.Equal("..", new DirectoryInfo(Path.Join(layout.PythonDirectory, "lib", "loop")).LinkTarget);
+        // And the ordinary files still land, links or no links.
+        Assert.True(File.Exists(layout.Python));
+    }
+
     /// <summary>A payload on disk plus a home to copy it into. Real directories: what is
     /// under test is which of them exists when.</summary>
     private sealed class Fake : IDisposable

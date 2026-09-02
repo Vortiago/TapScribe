@@ -123,7 +123,19 @@ public static class RuntimeCopy
         foreach (string old in superseded)
         {
             log($"runtime: removing the superseded {old}.");
-            Delete(Path.Join(layout.RuntimeRoot, old));
+            try
+            {
+                Delete(Path.Join(layout.RuntimeRoot, old));
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                // Tidy-up, not the boot. The new runtime is complete and about to be used;
+                // letting a locked or unreadable file in the OLD one propagate would turn a
+                // successful upgrade into "TapScribe could not start", which is strictly
+                // worse than one stale folder under the data root. The next launch tries
+                // again, because a runtime for another version is still superseded.
+                log($"runtime: could not remove the superseded {old} ({error.Message}) — carrying on.");
+            }
         }
 
         return new RuntimeCopyResult(outcome, superseded.FirstOrDefault());
@@ -178,20 +190,32 @@ public static class RuntimeCopy
     }
 
     /// <summary>
-    /// A plain recursive file copy.
+    /// A plain recursive file copy that RE-CREATES symlinks rather than following them.
     ///
     /// Deliberately not <c>ditto</c> or <c>cp -R</c> through a subprocess, which would put
     /// this back on the shell-out path CLAUDE.md constrains and make it untestable off
-    /// macOS. python-build-standalone's <c>install_only</c> tree is regular files and
-    /// directories — the executable bit is what matters and
+    /// macOS. The executable bit is what matters for the regular files, and
     /// <see cref="File.Copy(string, string)"/> preserves the unix mode on .NET.
+    ///
+    /// <para>Links are the part a naive copy gets wrong, and the packaging script says so
+    /// out loud — <c>build-bundle-pkg.sh</c> uses <c>ditto</c> "for the symlinks and exec
+    /// bits a .app and a python-build-standalone tree are both made of". Following them
+    /// instead would (a) throw <see cref="FileNotFoundException"/> on a dangling one and
+    /// fail the whole launch, (b) recurse forever into a directory link that points at an
+    /// ancestor, which is a StackOverflow no catch tier can absorb, and (c) silently
+    /// duplicate every linked binary. Recreating the link is all three at once.</para>
     /// </summary>
     private static void CopyTree(string source, string destination)
     {
         Directory.CreateDirectory(destination);
 
         foreach (string file in Directory.EnumerateFiles(source))
-            File.Copy(file, Path.Join(destination, Path.GetFileName(file)), overwrite: true);
+        {
+            string target = Path.Join(destination, Path.GetFileName(file));
+            if (Relink(new FileInfo(file), target, directory: false))
+                continue;
+            File.Copy(file, target, overwrite: true);
+        }
 
         // ONE walk, carrying the destination down with it. The two-sweep shape this
         // replaced read the whole tree twice — once for directories, once for files — and
@@ -200,7 +224,39 @@ public static class RuntimeCopy
         // at once, plus a Path.GetRelativePath per entry, in a menu-bar app that otherwise
         // idles small.
         foreach (string dir in Directory.EnumerateDirectories(source))
-            CopyTree(dir, Path.Join(destination, Path.GetFileName(dir)));
+        {
+            string target = Path.Join(destination, Path.GetFileName(dir));
+            // BEFORE the recursion, never inside it: a directory link is exactly the entry
+            // that must not be walked.
+            if (Relink(new DirectoryInfo(dir), target, directory: true))
+                continue;
+            CopyTree(dir, target);
+        }
+    }
+
+    /// <summary>Reproduce <paramref name="entry"/> at <paramref name="target"/> when it is a
+    /// symlink, answering whether it was one. The RAW target is copied, relative links
+    /// included, so a link into the tree keeps pointing inside the copy.</summary>
+    private static bool Relink(FileSystemInfo entry, string target, bool directory)
+    {
+        if (entry.LinkTarget is not { } linkTarget)
+            return false;
+
+        // Overwrite rather than fail. The copy normally lands in a freshly deleted partial,
+        // so there is nothing here; this is what keeps a re-copy over a surviving entry from
+        // throwing on the name. A DANGLING link answers false to both Exists probes while
+        // still occupying the name, which is why the unlink is unconditional and its own
+        // failure is the caller's to see.
+        if (Directory.Exists(target) && new DirectoryInfo(target).LinkTarget is null)
+            Directory.Delete(target, recursive: true);
+        else
+            File.Delete(target); // no-op when absent; unlinks a link without following it
+
+        if (directory)
+            Directory.CreateSymbolicLink(target, linkTarget);
+        else
+            File.CreateSymbolicLink(target, linkTarget);
+        return true;
     }
 
     /// <summary>Remove a tree if it is there. Absent is the desired state, not an error.</summary>

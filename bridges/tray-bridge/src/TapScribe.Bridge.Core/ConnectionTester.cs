@@ -42,9 +42,6 @@ public readonly record struct ConnectionTestOutcome(string Text, bool Ok);
 /// </summary>
 public static class ConnectionTester
 {
-    /// <summary>Run the probe under the shared timeout and describe every outcome, a throw
-    /// included. Both dialogs run this fire-and-forget from a click, where an escaping exception
-    /// is swallowed by the scheduler and strands the status line on "Testing...".</summary>
     /// <summary>
     /// Whether SOMETHING is serving a Recorder's port — a synchronous <c>GET /health</c> with
     /// a short deadline, answering false for every way of not being there.
@@ -80,6 +77,9 @@ public static class ConnectionTester
         }
     }
 
+    /// <summary>Run the probe under the shared timeout and describe every outcome, a throw
+    /// included. Both dialogs run this fire-and-forget from a click, where an escaping exception
+    /// is swallowed by the scheduler and strands the status line on "Testing...".</summary>
     public static async Task<ConnectionTestOutcome> DescribeAsync(
         TapConnectionOptions options, HttpClient? http = null)
     {

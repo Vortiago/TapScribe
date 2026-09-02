@@ -264,8 +264,39 @@ public sealed class RecorderSupervisor : IRecorderHost
             return;
         }
 
+        // The same quit-race check RunPreflight makes at its own spawn, and for the same
+        // reason: Stop() reads `_recorder` under this lock, so a Quit landing between
+        // RunCore's check and this publish would have found nothing to kill and the child
+        // spawned a moment later would be reached by nobody. The reaper usually covers it,
+        // but a null reaper is an explicitly supported degraded path, and on THAT path the
+        // Recorder plus its WhisperLiveKit grandchild are orphaned holding port 8001 — the
+        // exact leak this class exists to prevent.
+        bool quitRaced;
         lock (_gate)
-            _recorder = process;
+        {
+            quitRaced = _stopping;
+            if (!quitRaced)
+                _recorder = process;
+        }
+
+        if (quitRaced)
+        {
+            // Killed OUTSIDE the lock, like the preflight twin: Stop() takes the same lock
+            // and must not block behind a kill. Disposed here because nothing else holds a
+            // handle to it — `_recorder` was never published.
+            try
+            {
+                if (!process.HasExited)
+                    process.Kill();
+            }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+            {
+                // Already gone, or exited between HasExited and Kill. Nothing to do.
+                _log($"start (quit raced the spawn): {error.Message}");
+            }
+            process.Dispose();
+            return;
+        }
 
         Enrol(process);
 

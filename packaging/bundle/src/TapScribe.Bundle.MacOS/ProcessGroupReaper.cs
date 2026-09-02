@@ -74,10 +74,19 @@ public sealed class ProcessGroupReaper : IProcessReaper
                 "using the one this process is already in.");
         }
 
+        // The group has to be OURS, not merely one we sit in. setpgid failing because this
+        // process is already a session leader is the ordinary case, and it leaves
+        // getpgrp() == our own pid; any OTHER errno leaves us a NON-leader in a group we
+        // inherited, which can hold processes TapScribe never started — and the watchdog
+        // SIGTERMs then SIGKILLs everything in the group once the tray exits. Killing a
+        // stranger's processes is strictly worse than having no backstop, and no backstop is
+        // a state this type already supports and already says out loud.
         int group = Posix.getpgrp();
-        if (group <= 0)
+        if (group <= 0 || group != self)
         {
-            log("reaper: could not read this process's group; a crash may leave whisperlivekit-server running.");
+            log("reaper: this process does not lead its own process group, so reaping that "
+                + "group could reach processes TapScribe never started; going without the "
+                + "parent-death watch. A crash may leave whisperlivekit-server running.");
             return null;
         }
 

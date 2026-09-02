@@ -138,9 +138,21 @@ public sealed class ChildProcess : IChildProcess
         };
 
         log($"$ {command.Executable} {string.Join(' ', command.Arguments)}");
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
+        // Ownership transfers to the ChildProcess on the last line and not before: a
+        // Win32Exception out of Start (a broken install — the case the supervisor's own
+        // catch is written for) would otherwise strand this Process, and with it the pipe
+        // handles the two redirections already asked for.
+        try
+        {
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
         return new ChildProcess(process);
     }
 }

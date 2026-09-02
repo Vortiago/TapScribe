@@ -124,41 +124,54 @@ public sealed class BridgeRuntime
     private async Task StartAsync(BridgeSettings settings)
     {
         bool tookOver = false;
-        bool started = await RunTapsAsync(
-            settings,
-            "Could not start meeting",
-            preflight: ct => MintAsync(settings, ct),
-            // The takeover, and the one step Start has that Connect does not. Draining
-            // BEFORE the mint is the whole of it: the attached taps' last Utterance is
-            // flushed and finalised in the session it was recorded into, instead of being
-            // cut mid-word by a teardown that races the new meeting's first frames.
-            // EndMeetingAsync disposes in its own finally, so there is nothing left here to
-            // release.
-            before: async () =>
-            {
-                if (TakeAttached() is { } handedOver)
+        bool started = false;
+        try
+        {
+            started = await RunTapsAsync(
+                settings,
+                "Could not start meeting",
+                preflight: ct => MintAsync(settings, ct),
+                // The takeover, and the one step Start has that Connect does not. Draining
+                // BEFORE the mint is the whole of it: the attached taps' last Utterance is
+                // flushed and finalised in the session it was recorded into, instead of being
+                // cut mid-word by a teardown that races the new meeting's first frames.
+                // EndMeetingAsync disposes in its own finally, so there is nothing left here
+                // to release.
+                before: async () =>
                 {
-                    tookOver = true;
-                    await handedOver.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
-                }
-            },
-            // Runs under _gate, from RunTapsAsync. DateTimeOffset.Now is the meeting's
-            // wall-clock start, for the Past-meetings history (#168). The session id is
-            // non-null by MintAsync's own contract, which throws rather than answer one.
-            publish: (orchestrator, session) =>
-                _meeting = new Meeting(orchestrator, session!, DateTimeOffset.Now),
-            showLive: ShowMeetingRunning).ConfigureAwait(false);
-
-        // A takeover that did not become a meeting leaves NOTHING streaming, and the drain is
-        // not undoable — the attached taps were closed before the mint, deliberately. Without
-        // this, "Could not start meeting" is the operator's only cue, and it says nothing
-        // about the room microphone that stopped feeding the current session.
-        if (tookOver && !started)
-            _dispatcher.Post(() => _view.ShowNotice(
-                "The attached tap stopped too",
-                "Its taps were drained for the takeover, so nothing is streaming now. "
-                    + "Use Connect to live to resume it.",
-                NoticeKind.Warning));
+                    if (TakeAttached() is { } handedOver)
+                    {
+                        tookOver = true;
+                        await handedOver.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
+                    }
+                },
+                // Runs under _gate, from RunTapsAsync. DateTimeOffset.Now is the meeting's
+                // wall-clock start, for the Past-meetings history (#168). The session id is
+                // non-null by MintAsync's own contract, which throws rather than answer one.
+                publish: (orchestrator, session) =>
+                    _meeting = new Meeting(orchestrator, session!, DateTimeOffset.Now),
+                showLive: ShowMeetingRunning).ConfigureAwait(false);
+        }
+        finally
+        {
+            // A takeover that did not become a meeting leaves NOTHING streaming, and the drain
+            // is not undoable — the attached taps were closed before the mint, deliberately.
+            // Without this, "Could not start meeting" is the operator's only cue, and it says
+            // nothing about the room microphone that stopped feeding the current session.
+            //
+            // In a `finally` and not after the await, because the drain ITSELF is the likeliest
+            // thing to fail here and its failure shapes are disjoint from RunTapsAsync's catch
+            // filter (that method's own finally says so): an IOException out of
+            // EndMeetingAsync — the exact shape DisconnectAsync catches around the same call —
+            // used to skip this notice entirely, which is the one case it was written for.
+            // The exception still propagates; this only makes the cue unconditional.
+            if (tookOver && !started)
+                _dispatcher.Post(() => _view.ShowNotice(
+                    "The attached tap stopped too",
+                    "Its taps were drained for the takeover, so nothing is streaming now. "
+                        + "Use Connect to live to resume it.",
+                    NoticeKind.Warning));
+        }
     }
 
     /// <summary>

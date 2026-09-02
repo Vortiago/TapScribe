@@ -83,6 +83,14 @@ public sealed class HostController : IDisposable
     private string _alerted = "";
     private string _message = "TapScribe is not running.";
 
+    /// <summary>Reports issued, and the highest one already shown. The view is reached
+    /// OUTSIDE <c>_gate</c> — holding it across <see cref="IHostView.ShowHost"/> would run
+    /// shell code under the lock, and one shell's post is an inline call on the current
+    /// thread — so two threads can compute their views in one order and reach the view in
+    /// the other, leaving the menu on the older of the two. Under <c>_gate</c>, both.</summary>
+    private long _reports;
+    private long _shown;
+
     public HostController(IHostView view, Action<Action> post, IRecorderHost supervisor)
     {
         ArgumentNullException.ThrowIfNull(view);
@@ -144,8 +152,10 @@ public sealed class HostController : IDisposable
     {
         HostView rendered = Render(state, message);
         bool sayIt;
+        long stamp;
         lock (_gate)
         {
+            stamp = ++_reports;
             _state = state;
             _message = message;
             // Alert ONCE per distinct bad header, decided here rather than in each shell.
@@ -158,7 +168,20 @@ public sealed class HostController : IDisposable
         }
 
         HostView view = rendered with { Alert = sayIt };
-        _post(() => _view.ShowHost(view));
+        _post(() =>
+        {
+            // Last state wins, not last post. The alternative — the menu header saying
+            // "TapScribe is running." with `_state` recorded as Stopped — disagrees with the
+            // commands the same render enabled, and nothing corrects it until the next
+            // report, which for a stopped Recorder never comes.
+            lock (_gate)
+            {
+                if (stamp < _shown)
+                    return;
+                _shown = stamp;
+            }
+            _view.ShowHost(view);
+        });
     }
 
     /// <summary>States the operator has to hear about: the Recorder is not there and they

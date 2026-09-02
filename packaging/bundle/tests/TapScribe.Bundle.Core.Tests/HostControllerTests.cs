@@ -165,26 +165,62 @@ public class HostControllerTests
         }
     }
 
+    [Fact]
+    public void AReportThatReachesTheViewLateDoesNotOverwriteANewerOne()
+    {
+        // The race, made deterministic: the view is reached outside _gate, so two threads
+        // can compute their views in one order and post them in the other. Driven by holding
+        // the posts and running them backwards, which is the same observable as losing the
+        // scheduling race and needs no threads to reproduce.
+        var world = new World(holdPosts: true);
+
+        world.Controller.Report(RecorderState.Running, "TapScribe is running.");
+        world.Controller.Report(RecorderState.Stopped, "TapScribe is not running.");
+        world.RunPostsNewestFirst();
+
+        // The newer report is what the menu shows, header AND commands together.
+        Assert.Equal("TapScribe is not running.", world.View.Last!.Header);
+        Assert.True(world.View.Last.CanStart);
+        Assert.False(world.View.Last.CanStop);
+        // And the stale one was DROPPED rather than merely re-run and overwritten: it must
+        // not reach the shell at all, since a shell may do more than assign a label.
+        Assert.Equal(1, world.View.Renders);
+    }
+
     private sealed class World
     {
         public FakeHostView View { get; } = new();
 
         public FakeHost Host { get; } = new();
 
+        private readonly List<Action> _held = [];
+
         public int Posted { get; private set; }
 
         public HostController Controller { get; }
 
-        public World()
+        public World(bool holdPosts = false)
         {
             Controller = new HostController(
                 View,
                 post: action =>
                 {
                     Posted++;
-                    action();
+                    if (holdPosts)
+                        _held.Add(action);
+                    else
+                        action();
                 },
                 Host);
+        }
+
+        /// <summary>Run the held posts in reverse: the shape of a newer report reaching the
+        /// view before an older one.</summary>
+        public void RunPostsNewestFirst()
+        {
+            for (int i = _held.Count - 1; i >= 0; i--)
+                _held[i]();
+            _held.Clear();
         }
     }
 }

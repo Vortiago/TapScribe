@@ -27,22 +27,6 @@ public static class LoginLink
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// The URL to open the dashboard with: signed in when the Recorder minted a link, and the
-    /// plain dashboard when it could not.
-    ///
-    /// Never throws, and never surfaces a failure to the operator beyond the log. Falling back
-    /// costs them exactly what they had before this feature existed — the password prompt, with
-    /// "Copy password" one menu item below — where a balloon out of a click they already know
-    /// the outcome of is noise. The Recorder still booting, and a Recorder too old to serve
-    /// <c>/api/login-link</c>, both land here.
-    /// </summary>
-    /// <param name="http">The caller's client; the tray holds one for its lifetime.</param>
-    /// <param name="dashboardUrl">Normally <see cref="BundleDefaults.DashboardUrl"/>.</param>
-    /// <param name="password">The Recorder's Basic password, read from <c>.auth-password</c>.
-    /// Sent per-request rather than on the client, so it cannot ride along on anything else
-    /// the tray sends.</param>
-    /// <param name="log">Where a failed mint says why. Never given the password.</param>
-    /// <summary>
     /// What "Open dashboard" should navigate to for this install: a signed-in link when the
     /// password could be read and the Recorder minted one, and the plain dashboard when
     /// either could not.
@@ -54,6 +38,9 @@ public static class LoginLink
     /// cs/cleartext-storage-of-sensitive-information). A rule about a secret with two
     /// implementations is one edit away from having two behaviours.
     /// </summary>
+    /// <param name="http">The caller's client; the tray holds one for its lifetime.</param>
+    /// <param name="layout">The Bundle's layout, which names the password file.</param>
+    /// <param name="log">Where a failed read or mint says why. Never given the password.</param>
     public static string DashboardUrlFor(HttpClient http, BundleLayout layout, Action<string> log)
     {
         ArgumentNullException.ThrowIfNull(layout);
@@ -93,6 +80,23 @@ public static class LoginLink
             : target;
     }
 
+    /// <summary>
+    /// The URL to open the dashboard with: signed in when the Recorder minted a link, and the
+    /// plain dashboard when it could not.
+    ///
+    /// Never throws, and never surfaces a failure to the operator beyond the log. Falling back
+    /// costs them exactly what they had before this feature existed — the password prompt, with
+    /// "Copy password" one menu item below — where a balloon out of a click they already know
+    /// the outcome of is noise. The Recorder still booting, and a Recorder too old to serve
+    /// <c>/api/login-link</c>, both land here.
+    /// </summary>
+    /// <param name="http">The caller's client; the tray holds one for its lifetime.</param>
+    /// <param name="dashboardUrl">Normally <see cref="BundleDefaults.DashboardUrl"/>.</param>
+    /// <param name="password">The Recorder's Basic password, read from <c>.auth-password</c>.
+    /// Sent per-request rather than on the client, so it cannot ride along on anything else
+    /// the tray sends.</param>
+    /// <param name="log">Where a failed mint says why. Never given the password.</param>
+    /// <param name="timeout">Overrides the loopback deadline; the tests' seam.</param>
     public static string SignedInUrl(
         HttpClient http,
         string dashboardUrl,
