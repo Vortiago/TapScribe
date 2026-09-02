@@ -77,7 +77,7 @@ async function boot() {
  * backend left the catalog (ADR-0015).
  *
  * The picker has always reported this on stderr, which a Bundle operator never
- * sees — the Launcher pipes it to a log file. Without this banner an upgrade
+ * sees — the Bundle's tray pipes it to a log file. Without this banner an upgrade
  * silently stops installing someone's models with nothing to point at. The
  * remedy is re-picking below, which is exactly where they already are.
  *

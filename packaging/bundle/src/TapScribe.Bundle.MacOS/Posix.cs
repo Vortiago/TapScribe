@@ -24,6 +24,12 @@ internal static class Posix
     internal const ushort EvEnable = 0x0004;
     internal const ushort EvOneShot = 0x0010;
 
+    /// <summary>EV_ERROR — set on a RETURNED event when the registration in the same call
+    /// failed. kevent reports that failure through the eventlist rather than through its return
+    /// value whenever there is room for it, so a caller that reads only the return value counts
+    /// a refused registration as a fired watch.</summary>
+    internal const ushort EvError = 0x4000;
+
     /// <summary>NOTE_EXIT — "the watched process exited". The whole point of the watch.</summary>
     internal const uint NoteExit = 0x8000_0000;
 

@@ -407,7 +407,7 @@ class Selection:
         # string per family) is a realistic hand-edit. `Selection.load` only
         # catches OSError/JSONDecodeError, so an AttributeError raised here
         # escapes `main` — `start.sh` prints "install picker failed; aborting"
-        # and exits 1, and the Bundle's Launcher only logs a traceback. A
+        # and exits 1, and the Bundle's tray only logs a traceback. A
         # wrong shape must degrade to the machine defaults exactly as
         # unparsable JSON already does.
         choices_raw = data.get("choices")

@@ -11,6 +11,12 @@ the built `tapscribe` wheel, and a tray **Launcher**. It is deliberately *not*
 a PyInstaller/Nuitka-frozen `.exe`, because two load-bearing facts about the
 Recorder require a real interpreter:
 
+> **Superseded in part by ADR-0022.** The dedicated Launcher executable is
+> gone; the tray Bridge carries the host role when a payload sits beside it,
+> and it is what "the tray" means everywhere below. Nothing else in this
+> decision changed — the payload, the reasons a freeze does not work, and the
+> bring-up split are all as written.
+
 1. **`/setup` runs pip at runtime.** Model backends are not baked in; the
    operator picks families in the browser and the picker shells pip via
    `sys.executable`. Under a freeze, `sys.executable` *is* the frozen exe —
@@ -67,11 +73,11 @@ uninstalling the program cannot delete someone's meeting recordings.
 
 - **Bring-up logic lives in `tapscribe/preflight.py`** — the repair probes
   and the Windows CUDA torch swap — run by `start.sh`/`start.ps1` and by the
-  Launcher as `python -m tapscribe.preflight`, so a check added later cannot
+  tray as `python -m tapscribe.preflight`, so a check added later cannot
   drift between a PowerShell copy and a C# copy. `PYTHONUNBUFFERED=1`
   deliberately did NOT move: it must be set in the recorder's own
   environment, which a separate preflight process cannot do — `start.ps1`
-  sets it, and the Launcher sets it on the child.
+  sets it, and the tray sets it on the child.
 - **The saved model selection (`.tapscribe-install.json`) follows
   `BASE_DIR`** (passed to the picker as `--state-file`), not the package —
   beside a wheel-installed package that would be `site-packages`, and a

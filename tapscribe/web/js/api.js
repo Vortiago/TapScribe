@@ -10,18 +10,39 @@
 import { createResource } from "./lazy-resource.js";
 
 /** The Error a non-OK response throws: `${status} ${detail}`, detail from the
- * JSON body when the server provided one, else the statusText. Async — it
- * reads the body. Shared by _unwrap and fetchState so the two fetch paths
- * can't drift.
+ * JSON body when the server provided one, else the statusText.
+ *
+ * Carries the status as a FIELD as well as in the message, because a caller that
+ * has to act on which failure it was would otherwise parse the sentence — and
+ * one caller does: the poll distinguishes a 401 (the session cookie died with
+ * the Recorder) from every other failure, and a message-prefix match would break
+ * the day a detail string changes.
+ */
+export class HttpError extends Error {
+  /** @param {number} status @param {string} detail */
+  constructor(status, detail) {
+    super(`${status} ${detail}`);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+/** Async — it reads the body. Shared by _unwrap and fetchState so the two fetch
+ * paths can't drift.
  * @param {Response} r */
 async function _httpError(r) {
   let detail = r.statusText;
   try { detail = (await r.json()).detail || detail; } catch { /* not JSON */ }
-  return new Error(`${r.status} ${detail}`);
+  return new HttpError(r.status, detail);
 }
 
-/** Human-readable message for a caught error — String() minus the "Error: " prefix. @param {unknown} e */
-export const errText = (e) => String(e).replace(/^Error:\s*/, "");
+/** Human-readable message for a caught error — String() minus the "Error: "
+ * prefix. An HttpError answers its `message` directly: it is named, so String()
+ * would prefix "HttpError: " into operator-facing text, and a widened regex would
+ * strip the useful half of a "TypeError: Failed to fetch" too.
+ * @param {unknown} e */
+export const errText = (e) =>
+  e instanceof HttpError ? e.message : String(e).replace(/^Error:\s*/, "");
 
 /** @param {Response} r */
 async function _unwrap(r) {

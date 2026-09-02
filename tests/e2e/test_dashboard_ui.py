@@ -57,6 +57,8 @@ import pytest
 from tapscribe import batch_diarize as _batch_diarize
 from tapscribe import transcribers as _transcribers
 from tapscribe import voices
+from tapscribe.app import app as _app
+from tapscribe.login_links import LoginLinks
 from tapscribe.recorder import JobState
 from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_ROSTER_JSON
 from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
@@ -8167,5 +8169,119 @@ async def test_a_link_signed_in_dashboard_can_still_write(
             async with httpx.AsyncClient(base_url=base, auth=("admin", password)) as client:
                 meta = (await client.get(f"/api/session-meta/{sid}")).json()
             assert meta.get("label") == "Quarterly Planning", meta
+        finally:
+            await browser.close()
+
+
+async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """The half of ADR-0023 that only a browser can show: what a signed-in tab
+    does once its session stops existing.
+
+    The store lives in the Recorder's memory, so every restart signs open tabs
+    out — including the tray's own Stop Recorder / Start Recorder, which this
+    release adds and which an operator will use casually. `auth.py` suppresses
+    the `WWW-Authenticate` on that 401 deliberately (a challenge on the 500 ms
+    poll would pop the native Basic dialog, the one prompt the feature exists to
+    remove) and its comment hands the other half to the page: "the dashboard's
+    own fetch sees the 401 and can say so quietly."
+
+    Without that half the tab polls a 401 forever behind a frozen page and says
+    nothing — stale sessions, no captions, no error — which reads as a hung
+    dashboard, and the reload it provokes IS a navigation, which IS challenged.
+    So the silent version does not merely omit a cue: it walks the operator into
+    the dialog.
+    """
+    base = running_recorder_auth_on.base_url
+    password = running_recorder_auth_on.recorder.auth.value
+
+    async def mint() -> str:
+        async with httpx.AsyncClient() as client:
+            answer = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert answer.status_code == 200, answer.text
+        return str(answer.json()["path"])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            # No http_credentials: with them the browser would re-authenticate on
+            # the 401 by itself and there would be no signed-out state to observe.
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            traffic: list[str] = []
+            page.on("response", lambda r: traffic.append(f"{r.status} {r.url}"))
+            modules = lambda: len([line for line in traffic if "/web/js/" in line])  # noqa: E731
+
+            await page.goto(base + await mint(), wait_until="domcontentloaded")
+            await page.wait_for_selector("#tapsRailBody", timeout=10000)
+
+            # Let the module graph finish arriving before killing the session. The
+            # dashboard imports views and components lazily, so invalidating mid-boot
+            # fails those dynamic imports rather than the poll — a different (and
+            # much louder) failure than the one under test, and not one an operator
+            # meets, their tab having been open for minutes. Quiescence is measured
+            # on MODULE fetches specifically: /api/state never goes quiet, that being
+            # the point of it.
+            settled, stable = -1, 0
+            for _ in range(40):
+                # THREE consecutive stable readings, not one: a single 0.5 s gap
+                # mid-boot is a pause, not an end, and on a loaded runner declaring
+                # it settled lands a late import 401 after the store is gone — which
+                # is a flake, and a flake is a bug to fix at the source.
+                stable = stable + 1 if modules() == settled else 0
+                if stable == 3:
+                    break
+                settled = modules()
+                await asyncio.sleep(0.5)
+            else:
+                raise AssertionError(f"the dashboard never finished importing: {traffic[-5:]}")
+
+            # Signed in and polling: #errbar is for real trouble, so it must be
+            # empty here or its appearance later would say nothing.
+            errbar = page.locator("#errbar")
+            assert await errbar.is_hidden(), await errbar.inner_text()
+
+            # What a Recorder restart does to a session, without restarting the
+            # server the browser is attached to: the store is replaced, so every
+            # cookie it issued is now unknown. Same observable state, and the page
+            # keeps its connection, so the POLL's own answer is what is under test
+            # rather than a dropped socket.
+            _app.state.login_links = LoginLinks()
+
+            # The cue arrives on a poll pass, not on a click.
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const el = document.querySelector('#errbar');
+                        return !!el && !el.hidden && el.textContent.includes('Signed out');
+                    }""",
+                    timeout=15000,
+                )
+            except Exception as never:
+                recent = [line for line in traffic[-25:] if "/api/" in line]
+                raise AssertionError(f"the poll went quiet instead of saying so; recent: {recent}") from never
+
+            said = await errbar.inner_text()
+            # BOTH ways back in, because there are two installs: a Bundle has a tray
+            # to mint a fresh link, and a checkout has only the password.
+            assert "tray" in said, said
+            assert "password" in said, said
+
+            # And it clears itself. A fresh link opened elsewhere sets a new cookie
+            # for this origin, so the stale tab recovers on its next pass instead of
+            # wearing a sign-out notice over a working dashboard.
+            second = await context.new_page()
+            await second.goto(base + await mint(), wait_until="domcontentloaded")
+            await second.close()
+
+            await page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('#errbar');
+                    return !!el && el.hidden;
+                }""",
+                timeout=15000,
+            )
         finally:
             await browser.close()

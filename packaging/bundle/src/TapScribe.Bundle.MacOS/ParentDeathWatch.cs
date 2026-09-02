@@ -91,8 +91,19 @@ public static class ParentDeathWatch
 
             // Registration and wait in ONE call, which is what makes this race-free: if the
             // process died between the caller's spawn and here, the register itself fails
-            // with ESRCH rather than arming a watch that will never fire.
-            return Posix.kevent(queue, ref change, 1, ref fired, 1, IntPtr.Zero) >= 0;
+            // rather than arming a watch that will never fire.
+            //
+            // BOTH halves of the answer are needed. kevent reports a failed REGISTRATION not
+            // through its return value but as a returned event carrying EV_ERROR — there was
+            // room in the eventlist for it, so the call answers 1, "one event", and reading
+            // only the return value counts a refusal as an exit. That is the same shape of bug
+            // as the early `return` this method replaced, one step narrower: for the likeliest
+            // errno (ESRCH — the tray is already gone) killing the group is right by accident,
+            // and for every other one the watchdog reaps a live tray's Recorder mid-meeting.
+            // Answering false sends this to PollUntilGone, which settles the already-dead case
+            // on its first kill(pid, 0) anyway.
+            int events = Posix.kevent(queue, ref change, 1, ref fired, 1, IntPtr.Zero);
+            return events > 0 && (fired.Flags & Posix.EvError) == 0;
         }
         finally
         {

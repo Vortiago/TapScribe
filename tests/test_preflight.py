@@ -9,7 +9,7 @@ Windows NVIDIA operator `Available backends: ['cpu']` with no clue why
 (`start.ps1`'s own comment says exactly this).
 
 Rather than reimplement them in C#, they move here and BOTH callers — the
-PowerShell script and the Launcher — run the same module. A fifth check added
+PowerShell script and the tray — run the same module. A fifth check added
 later then can't drift between a PowerShell copy and a C# copy.
 
 The seam is `plan_steps()`, which returns the work as DATA. Every probe is

@@ -6,7 +6,7 @@
 import { tpl, mount, pick, deferIfSelectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
-import { putJson, mutateButton } from "../api.js";
+import { putJson, mutateButton, errText } from "../api.js";
 
 // Per-host render state, keyed by bodyEl (NOT module scope — active-taps renders
 // into several hosts at once on /next: the global rail + the Taps view, so a
@@ -226,7 +226,7 @@ export function wireToggles(bodyEl, { afterMutate }) {
     btn.classList.toggle("on", next);
     mutateButton(btn, () => putJson("/api/tap-settings", { identity, [which]: next }), {
       afterMutate,
-      failMessage: (e) => `Tap setting toggle failed: ${e}`,
+      failMessage: (e) => `Tap setting toggle failed: ${errText(e)}`,
     });
   });
 }
