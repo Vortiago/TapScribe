@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// canonical source: vanilla-web/tools/check-conventions.mjs@b05c263 — vendored copy, do not edit here
+// canonical source: vanilla-web/tools/check-conventions.mjs@b78bdb0 sha256:fb9aecbaa3b824a2e217012c2315c108cb042dffcfd01340ef5a8b3977fc146c
 // @ts-check
 // check-conventions — turns the mechanically checkable SKILL.md invariants into
 // gate failures. An LLM reads the skill once per session; this runs on every

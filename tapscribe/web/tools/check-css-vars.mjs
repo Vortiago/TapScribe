@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// canonical source: vanilla-web/tools/check-css-vars.mjs@b05c263 — vendored copy, do not edit here
+// canonical source: vanilla-web/tools/check-css-vars.mjs@b78bdb0 sha256:3b0abe3f594e6f0655cd867cbc0bacdb8f8248af224cdd135280016591ca2645
 // @ts-check
 // check-css-vars — the no-build stack's guard for CSS custom properties. `tsc`
 // checks the JS; nothing checks `var(--x)`, so an undefined custom property
