@@ -76,7 +76,14 @@ public class LegacyAppBundleTests
     [InlineData("/Users/dev/repo/bin/Release/net10.0-macos/osx-arm64", null)]
     public void ContainingApp_FindsTheBundleAroundTheRunningAssemblies(string baseDir, string? expected)
     {
-        Assert.Equal(expected, LegacyAppBundle.ContainingApp(baseDir));
+        // ContainingApp walks up from Path.GetFullPath(baseDir), so the expectation has to
+        // be normalised the same way: an [InlineData] literal cannot call a helper, and on
+        // Windows a POSIX-rooted "/Applications/…" is drive-RELATIVE, coming back as
+        // "D:\Applications\…". Normalising a null would be a NullReferenceException, and
+        // that case is asserting "no .app anywhere above", which has no path to normalise.
+        Assert.Equal(
+            expected is null ? null : Path.GetFullPath(expected),
+            LegacyAppBundle.ContainingApp(baseDir));
     }
 
     /// <summary>A stand-in Applications folder holding the new app and, optionally, the one

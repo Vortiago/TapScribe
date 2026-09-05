@@ -12,6 +12,13 @@ public class RecorderCommandTests
     private static readonly BundleLayout Layout = BundleLayout.ForWindows("/opt/prog", "/home/op");
     private const string Wheel = "/opt/prog/wheel/tapscribe-1.0.0-py3-none-any.whl";
 
+    /// <summary>The wheel as it lands in argv. <see cref="RecorderCommand"/> makes the
+    /// spec absolute (<see cref="Path.GetFullPath"/>), which is its own tested behaviour
+    /// below, and on Windows a POSIX-rooted literal is drive-RELATIVE, so it comes back as
+    /// "D:\opt\prog\wheel\…". Asserting the raw constant therefore failed on Windows only,
+    /// which CI never sees because this project runs on the ubuntu leg.</summary>
+    private static readonly string WheelArg = Path.GetFullPath(Wheel);
+
     [Fact]
     public void Preflight_RunsTheConsoleInterpreterAsAModule()
     {
@@ -20,7 +27,7 @@ public class RecorderCommandTests
         // python.exe, NOT pythonw.exe: preflight is blocking and its output is logged,
         // so we want a console interpreter with real stdout/stderr.
         Assert.Equal(Layout.Python, cmd.Executable);
-        Assert.Equal(new[] { "-m", "tapscribe.preflight", "--install-spec", Wheel }, cmd.Arguments);
+        Assert.Equal(new[] { "-m", "tapscribe.preflight", "--install-spec", WheelArg }, cmd.Arguments);
     }
 
     [Fact]
@@ -30,7 +37,7 @@ public class RecorderCommandTests
 
         // pythonw.exe: the Recorder is long-lived and must not flash a console window.
         Assert.Equal(Layout.Pythonw, cmd.Executable);
-        Assert.Equal(new[] { "-m", "tapscribe", "--install-spec", Wheel }, cmd.Arguments);
+        Assert.Equal(new[] { "-m", "tapscribe", "--install-spec", WheelArg }, cmd.Arguments);
     }
 
     [Fact]
