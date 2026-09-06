@@ -585,3 +585,21 @@ name you removed (`grep -n '\bslot('`, etc.) before pushing — helpers
 used by expand/download/delete handlers and other rarely exercised
 paths are easy to miss when ripping unused-looking names. (`tsc`'s
 noUnusedLocals catches the opposite case — an import left behind.)
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `Vortiago/TapScribe`. Use the `gh` CLI.
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Each of the five canonical triage roles uses its own name as the label string,
+so no mapping is needed. All five labels already exist on the GitHub repo.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo is single-context. Read `CONTEXT.md` and `docs/adr/` at the repo
+root. See `docs/agents/domain.md`.
