@@ -227,7 +227,7 @@ internal sealed class TrayHost : IHostView, IDisposable
     }
 
     /// <summary>
-    /// Hand a URL or a file to the shell's default handler, VIA EXPLORER.
+    /// Hand a URL or a file to the shell's default handler, outside our job.
     ///
     /// Not <c>UseShellExecute = true</c> directly: the tray self-enrols into a
     /// <see cref="JobObject"/> with KILL_ON_JOB_CLOSE, and for an ordinary
@@ -237,25 +237,21 @@ internal sealed class TrayHost : IHostView, IDisposable
     /// reaped. Quitting from the tray then killed the operator's browser, or every
     /// Notepad tab they had open (Win11 Notepad is single-process).
     ///
-    /// Handing the target to <c>explorer.exe</c> sidesteps it: an explorer instance is
-    /// already running outside our job, the one we start forwards to it and exits
-    /// immediately, and the real application is spawned by THAT explorer — never a member
-    /// of our job. The job also carries BREAKAWAY_OK (see JobObject) so the forwarding
-    /// stub itself can leave.
-    ///
-    /// Cost: explorer returns before the target opens, so a bad URL/handler no longer
-    /// surfaces as an exception here. Acceptable — the failure was already only advisory.
+    /// This used to forward through <c>explorer.exe</c>, which is outside the job and so
+    /// solved that half — but explorer silently DROPS a URL carrying a query string and
+    /// opens a folder window instead. Every minted login link is <c>/login?k=…</c>, so
+    /// Open dashboard opened File Explorer every time, and the only path that ever
+    /// reached a browser was the FALLBACK to the plain signed-out URL. <see cref="ShellTarget"/>
+    /// keeps the out-of-job property and handles the whole URL.
     /// </summary>
     private void ShellOpen(string target)
     {
         try
         {
-            var info = new ProcessStartInfo("explorer.exe") { UseShellExecute = false, CreateNoWindow = true };
-            info.ArgumentList.Add(target);
-            using (Process.Start(info)) { }
+            ShellTarget.Open(target);
         }
         catch (Exception error) when (
-            error is System.ComponentModel.Win32Exception or InvalidOperationException or FileNotFoundException)
+            error is System.ComponentModel.Win32Exception or ArgumentException or InvalidOperationException)
         {
             // No handler registered for http/.log, or the shell refused. Not fatal — the
             // operator can open it themselves, so say what we tried and carry on.

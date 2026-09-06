@@ -40,10 +40,10 @@ public sealed class JobObject : IProcessReaper
 
     /// <summary>
     /// JOB_OBJECT_LIMIT_BREAKAWAY_OK — lets a child that explicitly asks (via
-    /// CREATE_BREAKAWAY_FROM_JOB) leave the job. Nothing TapScribe spawns asks for it, so
-    /// the Recorder and its WhisperLiveKit grandchild are still reaped as before; this
-    /// only stops the kernel from refusing a breakaway that the shell may request when
-    /// the tray's ShellOpen hands a URL or a file to explorer.exe.
+    /// CREATE_BREAKAWAY_FROM_JOB) leave the job. <see cref="ShellTarget"/> is what asks:
+    /// it is how the operator's browser is kept out of KILL_ON_JOB_CLOSE, so without this
+    /// flag Quit would take the browser with it. The Recorder and its WhisperLiveKit
+    /// grandchild ask for nothing and are reaped as before.
     /// </summary>
     private const uint JobObjectLimitBreakawayOk = 0x00000800;
 
