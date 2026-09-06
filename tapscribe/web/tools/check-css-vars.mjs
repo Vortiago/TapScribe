@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// canonical source: vanilla-web/tools/check-css-vars.mjs@b78bdb0 sha256:3b0abe3f594e6f0655cd867cbc0bacdb8f8248af224cdd135280016591ca2645
+// canonical source: vanilla-web/tools/check-css-vars.mjs@a36aeda sha256:4ee4886f58a4aa401677a519d39ee2c7e18a9befdc32536b80947df9c8df9d08
 // @ts-check
 // check-css-vars — the no-build stack's guard for CSS custom properties. `tsc`
 // checks the JS; nothing checks `var(--x)`, so an undefined custom property
@@ -15,9 +15,7 @@
 import { readFileSync } from "node:fs";
 import { ROOT, SKIP, scanPaths } from "./js-scan.mjs";
 
-const files = ["**/*.css", "**/*.js"]
-  .flatMap((p) => scanPaths(p))
-  .filter((p) => !SKIP.test(p + "/"));
+const files = scanPaths(["**/*.css", "**/*.js"]).filter((p) => !SKIP.test(p + "/"));
 
 /** Names with a definition somewhere (CSS decl or JS setProperty). @type {Set<string>} */
 const defined = new Set();

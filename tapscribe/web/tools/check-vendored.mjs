@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// canonical source: vanilla-web/tools/check-vendored.mjs@b78bdb0 sha256:e0c98ec2a1ed9906b603efed3f21e3f70af8b9c260ce13132c62dff4a2bb2148
+// canonical source: vanilla-web/tools/check-vendored.mjs@a36aeda sha256:ea63762b99862f8b588d78bb3dae2a3f1e1aea065b66c5aa8fc16b4fad666de2
 // @ts-check
 // gate: off — needs a toolkit-path argument, so check.mjs skips it; run by hand.
 // check-vendored — drift/staleness report for copy-verbatim consumers. The
@@ -34,7 +34,7 @@
 // blocking commits. Zero-dep (git does the history reads).
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { scanPaths } from "./js-scan.mjs";
+import { lf, scanPaths } from "./js-scan.mjs";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -54,22 +54,8 @@ if (git(["rev-parse", "--git-dir"]).status !== 0) {
 }
 const headRev = git(["rev-parse", "--short", "HEAD"]).stdout?.trim() || "unknown";
 
-/** LF-normalised, which is what both the hash and the body comparison below run
- * on. Git checks the same blob out as CRLF wherever `core.autocrlf` is true, so
- * the bytes on disk are a property of the CHECKOUT, not of canon: hashing them
- * raw makes a stamp written on Linux disagree with the same bytes read on
- * Windows, in both directions, and every copy reads `stale` forever with a
- * re-copy command that changes nothing. The committed blob is LF either way, so
- * LF is the one spelling every checkout can agree on.
- *
- * Strips every CR, not just the ones before an LF, to be exactly `tr -d '\r'` —
- * what `lib-stamp.sh`'s `sha256_of` does, since the two must agree digit for
- * digit or a stamp the shell writes reads as drift the moment node checks it. A
- * lone CR in source text is not a thing worth splitting the two definitions
- * over. @param {string} text */
-const lf = (text) => text.replace(/\r/g, "");
-
-/** @param {string} text */
+/** The hash ADR 0005 classifies on. `lf` (js-scan.mjs) is why it is not over the
+ * raw bytes. @param {string} text */
 const sha256 = (text) => createHash("sha256").update(lf(text), "utf8").digest("hex");
 
 /** Parse a stamp out of a file's first lines. Dialect order matters: the
@@ -119,20 +105,18 @@ function recopyCmd(rel, s, canon) {
 /** @type {string[]} */ const forked = [];
 const tmp = mkdtempSync(join(tmpdir(), "check-vendored-"));
 
-// scanPaths rather than a raw glob: this runs from the CONSUMER repo's root,
-// where node_modules/ is usually present, and the skip below is `/`-shaped
-// while globSync answers native separators (js-scan.mjs says why).
-const files = ["**/*.js", "**/*.mjs", "**/*.css", "**/*.html"]
-  .flatMap((p) => scanPaths(p, process.cwd())).filter((p) => !/(^|\/)node_modules\//.test(p));
+// Scanned from the CONSUMER repo's cwd, not the toolkit's.
+const files = scanPaths(["**/*.js", "**/*.mjs", "**/*.css", "**/*.html"], process.cwd())
+  .filter((p) => !/(^|\/)node_modules\//.test(p));
 
 for (const rel of files) {
   const text = readFileSync(rel, "utf8");
   const stamp = parseStamp(text.split("\n").slice(0, 3).join("\n"), rel);
   if (!stamp) continue;
 
-  // Both sides LF-normalised, for the reason `lf` gives: the copy and the canon
-  // it is compared against sit in two different checkouts, which are free to
-  // disagree about line endings while carrying identical blobs.
+  // Both sides through `lf`: the copy and the canon it is compared against sit
+  // in two different checkouts, free to disagree about line endings while
+  // carrying identical blobs.
   const stripped = lf(stripStamp(text));
   const canon = (() => {
     try { return lf(readFileSync(join(TK, stamp.repoPath), "utf8")); } catch { return null; }

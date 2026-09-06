@@ -12,12 +12,10 @@ public class RecorderCommandTests
     private static readonly BundleLayout Layout = BundleLayout.ForWindows("/opt/prog", "/home/op");
     private const string Wheel = "/opt/prog/wheel/tapscribe-1.0.0-py3-none-any.whl";
 
-    /// <summary>The wheel as it lands in argv. <see cref="RecorderCommand"/> makes the
-    /// spec absolute (<see cref="Path.GetFullPath"/>), which is its own tested behaviour
-    /// below, and on Windows a POSIX-rooted literal is drive-RELATIVE, so it comes back as
-    /// "D:\opt\prog\wheel\…". Asserting the raw constant therefore failed on Windows only,
-    /// which CI never sees because this project runs on the ubuntu leg.</summary>
-    private static readonly string WheelArg = Path.GetFullPath(Wheel);
+    /// <summary>The wheel as it lands in argv: <see cref="RecorderCommand"/> makes the spec
+    /// absolute, which is its own tested behaviour below. <see cref="FixturePath"/> says
+    /// why the raw constant is not what to assert against.</summary>
+    private static readonly string WheelArg = FixturePath.Rooted(Wheel);
 
     [Fact]
     public void Preflight_RunsTheConsoleInterpreterAsAModule()

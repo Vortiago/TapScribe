@@ -12,14 +12,10 @@ namespace TapScribe.Bundle.Core.Tests;
 /// backslashes: the layout is Windows-shaped at runtime but the Core is cross-platform
 /// and these tests run on the Linux CI leg, where the separator is '/'.
 ///
-/// The fixture ROOTS go through <see cref="Rooted"/> for the other half of that, which
-/// the separator alone does not cover: <see cref="BundleLayout"/> normalises what it is
-/// handed through <see cref="Path.GetFullPath"/>, and a POSIX-rooted literal like
-/// "/opt/prog" is not absolute on Windows — it is drive-relative, so it comes back as
-/// "D:\opt\prog" off whatever the current drive happens to be. Comparing the layout's
-/// answer against the raw literal therefore failed on Windows alone, which CI never
-/// sees because it runs this project on the ubuntu leg only. Both sides normalise now,
-/// so the assertion is about the layout's own shape on every OS.
+/// The fixture roots are normalised once, through <see cref="FixturePath"/>, rather than
+/// at each expectation: <see cref="Path.GetFullPath"/> is idempotent, so a normalised root
+/// survives the layout unchanged and an assertion names it directly. Wrapping per
+/// assertion instead leaves every future one needing to remember the wrapper.
 /// </summary>
 public class BundleLayoutTests
 {
@@ -28,18 +24,16 @@ public class BundleLayoutTests
     /// is written out once here rather than derived.</summary>
     private const string MacPayload = "/Applications/TapScribe.app/Contents/Resources";
 
-    /// <summary>A fixture path as the layout will answer it: the same
-    /// <see cref="Path.GetFullPath"/> the layout applies, so an expectation is never
-    /// asserting .NET's own drive-qualification rules. Note what this does NOT weaken:
-    /// the folder names, the joins, and data-outside-program all still fail if wrong.
-    /// Only the root's spelling is delegated to the platform.</summary>
-    private static string Rooted(string path) => Path.GetFullPath(path);
+    private static readonly string Program = FixturePath.Rooted("/opt/prog");
+    private static readonly string Profile = FixturePath.Rooted("/home/op");
+    private static readonly string MacRoot = FixturePath.Rooted(MacPayload);
+    private static readonly string MacHome = FixturePath.Rooted("/Users/op");
 
-    private static BundleLayout Layout(string program = "/opt/prog", string profile = "/home/op") =>
-        BundleLayout.ForWindows(program, profile);
+    private static BundleLayout Layout(string? program = null, string? profile = null) =>
+        BundleLayout.ForWindows(program ?? Program, profile ?? Profile);
 
     private static BundleLayout MacLayout(string version = "1.3.0") =>
-        BundleLayout.ForMacOS(MacPayload, "/Users/op", version);
+        BundleLayout.ForMacOS(MacRoot, MacHome, version);
 
     [Fact]
     public void Resolve_PutsTheEmbeddedInterpreterUnderTheProgramDirectory()
@@ -50,10 +44,10 @@ public class BundleLayoutTests
         // python-build-standalone install_only distribution and pip-installs into it
         // directly (release.yml stages staging/python/python.exe) — there is no venv, so
         // there is no Scripts\python.exe to run.
-        Assert.Equal(Path.Join(Rooted("/opt/prog"), "python"), layout.PythonDirectory);
-        Assert.Equal(Path.Join(Rooted("/opt/prog"), "python", "python.exe"), layout.Python);
-        Assert.Equal(Path.Join(Rooted("/opt/prog"), "python", "pythonw.exe"), layout.Pythonw);
-        Assert.Equal(Path.Join(Rooted("/opt/prog"), "wheel"), layout.WheelDirectory);
+        Assert.Equal(Path.Join(Program, "python"), layout.PythonDirectory);
+        Assert.Equal(Path.Join(Program, "python", "python.exe"), layout.Python);
+        Assert.Equal(Path.Join(Program, "python", "pythonw.exe"), layout.Pythonw);
+        Assert.Equal(Path.Join(Program, "wheel"), layout.WheelDirectory);
     }
 
     [Fact]
@@ -63,7 +57,7 @@ public class BundleLayoutTests
 
         // %USERPROFILE%\TapScribe — never under the program dir (ADR-0015: an
         // uninstall must not be able to delete recordings).
-        Assert.Equal(Path.Join(Rooted("/home/op"), "TapScribe"), layout.DataDirectory);
+        Assert.Equal(Path.Join(Profile, "TapScribe"), layout.DataDirectory);
         Assert.DoesNotContain(layout.PayloadDirectory, layout.DataDirectory, StringComparison.Ordinal);
     }
 
@@ -72,7 +66,7 @@ public class BundleLayoutTests
     {
         // config.AUTH_PASSWORD_FILE is BASE_DIR / ".auth-password", and the tray
         // sets TAPSCRIBE_BASE_DIR to the data dir — so the two must agree.
-        Assert.Equal(Path.Join(Rooted("/home/op"), "TapScribe", ".auth-password"), Layout().PasswordFile);
+        Assert.Equal(Path.Join(Profile, "TapScribe", ".auth-password"), Layout().PasswordFile);
     }
 
     [Fact]
@@ -80,7 +74,7 @@ public class BundleLayoutTests
     {
         BundleLayout layout = Layout();
 
-        Assert.Equal(Path.Join(Rooted("/home/op"), "TapScribe", "logs"), layout.LogDirectory);
+        Assert.Equal(Path.Join(Profile, "TapScribe", "logs"), layout.LogDirectory);
         Assert.Equal(Path.Join(layout.LogDirectory, BundleLayout.LogFileName), layout.LogFile);
     }
 
@@ -260,7 +254,7 @@ public class BundleLayoutTests
         BundleLayout layout = MacLayout();
 
         Assert.Equal(
-            Path.Join(Rooted("/Users/op"), "Library", "Application Support", "TapScribe"),
+            Path.Join(MacHome, "Library", "Application Support", "TapScribe"),
             layout.DataDirectory);
     }
 
@@ -285,8 +279,8 @@ public class BundleLayoutTests
         // The copy's SOURCE, and the only two paths that may point into the bundle.
         BundleLayout layout = MacLayout();
 
-        Assert.Equal(Path.Join(Rooted(MacPayload), "python"), layout.PayloadPythonDirectory);
-        Assert.Equal(Path.Join(Rooted(MacPayload), "wheel"), layout.PayloadWheelDirectory);
+        Assert.Equal(Path.Join(MacRoot, "python"), layout.PayloadPythonDirectory);
+        Assert.Equal(Path.Join(MacRoot, "wheel"), layout.PayloadWheelDirectory);
     }
 
     [Fact]
@@ -342,7 +336,7 @@ public class BundleLayoutTests
         // The SDK has moved managed assemblies between Contents/MonoBundle and
         // Contents/MacOS before, and a wrong guess reads downstream as "no host payload" —
         // a Bundle silently demoted to a bridge-only tray.
-        string expected = Path.Join(Rooted("/Applications/TapScribe.app"), "Contents", "Resources");
+        string expected = Path.Join(FixturePath.Rooted("/Applications/TapScribe.app"), "Contents", "Resources");
 
         Assert.Equal(
             expected,

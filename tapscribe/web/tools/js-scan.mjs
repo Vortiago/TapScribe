@@ -1,4 +1,4 @@
-// canonical source: vanilla-web/tools/js-scan.mjs@b78bdb0 sha256:929c4a73949d5df4b1f8d1087aee8420274a019a9a921e11a6639f6335017438
+// canonical source: vanilla-web/tools/js-scan.mjs@a36aeda sha256:4083e3bd992c0155acf41c0e2c90da0cc093f3b0389ddd139494c6fc153532a7
 // @ts-check
 // js-scan — shared quote/backtick/${}-aware scanning helpers for the check-*.mjs
 // static checkers (check-conventions.mjs, check-slots.mjs). Not a gate half
@@ -15,26 +15,24 @@ export const ROOT = new URL("../", import.meta.url);
  * checkers extend this with their own extra skipped dirs. */
 export const SKIP = /(^|\/)(node_modules|testing)\//;
 
-/** Glob under `cwd` and answer POSIX-separated relative paths. Every checker's
- * file set comes through here, which is the point.
- *
- * `fs.globSync` yields platform-native separators, so on Windows it answers
- * `js\lib\render.js`. Every path predicate in this stack is spelled with `/`:
- * SKIP above, each checker's own extra-skip regex, and the `split("/").pop()`
- * that reduces a path to its basename. None of those match a backslash, so an
- * un-normalised Windows run scans the very lib/ and tools/ files the
- * exemptions exist to spare, then fails on canon it was never meant to read.
- * The gate is green on CI and red for every Windows contributor, and because
- * the findings land on the sanctioned helpers it reads as a false alarm rather
- * than as a bug in the checker.
- *
- * Normalising belongs at the single place paths ENTER, not at each predicate:
- * spread across the predicates, the next checker re-derives the bug by writing
- * one more `/`-shaped regex, which is how this one arrived.
- * @param {string} pattern @param {URL | string} [cwd] @returns {string[]} */
+/** Glob under `cwd`, POSIX-separated. The one door every checker's file set comes
+ * through, so the `/`-shaped predicates (SKIP above, each checker's extra-skip,
+ * `split("/").pop()`) match on Windows too — raw, they match nothing there and the
+ * gate fails on the canon its exemptions exist to spare. Normalise where paths
+ * ENTER; at each predicate, the next checker re-derives the bug. Takes an array as
+ * readily as one, because globSync does.
+ * @param {string | string[]} pattern @param {URL | string} [cwd]
+ * @returns {string[]} */
 export function scanPaths(pattern, cwd = ROOT) {
   return globSync(pattern, { cwd }).map((p) => p.replaceAll("\\", "/"));
 }
+
+/** CR-stripped: the form every comparison of file CONTENT here runs on. Git checks
+ * the same blob out as CRLF under `core.autocrlf`, so raw bytes are a property of
+ * the checkout, not the content, and a copy written on one platform reads as drift
+ * on the other. Strips EVERY CR to match `lib-stamp.sh`'s `tr -d '\r'`, which
+ * cannot import this and must agree digit for digit. @param {string} text */
+export const lf = (text) => text.replace(/\r/g, "");
 
 /** 1-based line of an index into text. @param {string} text @param {number} idx */
 export const lineOf = (text, idx) => text.slice(0, idx).split("\n").length;
