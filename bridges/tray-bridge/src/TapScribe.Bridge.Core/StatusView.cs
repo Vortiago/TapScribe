@@ -15,6 +15,19 @@ public abstract record TrayStatus
     /// <paramref name="Total"/> selected devices.</summary>
     public sealed record Streaming(int Connected, int Total) : TrayStatus;
 
+    /// <summary>An attached tap is being opened (probing the Recorder, opening devices).</summary>
+    public sealed record Connecting : TrayStatus;
+
+    /// <summary>An attached tap is being torn down and drained.</summary>
+    public sealed record Disconnecting : TrayStatus;
+
+    /// <summary>An attached tap is streaming <paramref name="Connected"/> of
+    /// <paramref name="Total"/> selected devices into the Recorder's current session. Its own
+    /// case rather than a flag on <see cref="Streaming"/>, because the two say different things
+    /// to the operator: one is a meeting this tray owns and can end, the other is audio going
+    /// wherever the Recorder is pointed right now.</summary>
+    public sealed record Attached(int Connected, int Total) : TrayStatus;
+
     /// <summary>A failure the operator must see — a rejected token, an unreachable
     /// Recorder, or a device that dropped.</summary>
     public sealed record Error(string Reason) : TrayStatus;
@@ -59,8 +72,9 @@ public enum TrayIcon
 /// operator sees while they are on the call. An exception report, not a readout.</param>
 public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, string Badge = "")
 {
-    // Something has been heard and something else has not.
-    private static bool Unheard(TrayStatus.Streaming s) => s.Connected > 0 && s.Connected < s.Total;
+    // Something has been heard and something else has not. One rule for both streaming modes:
+    // a room mic whose gate never opened is the same never-heard failure as a meeting's.
+    private static bool Unheard(int connected, int total) => connected > 0 && connected < total;
 
     public static StatusView For(TrayStatus status)
     {
@@ -78,9 +92,22 @@ public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, st
             // TrayStatus.Error, naming it, and wears the Error glyph instead.
             TrayStatus.Streaming s => new StatusView(
                 $"● Streaming — {s.Connected}/{s.Total} devices",
-                Unheard(s) ? TrayIcon.Degraded : TrayIcon.Streaming,
+                Unheard(s.Connected, s.Total) ? TrayIcon.Degraded : TrayIcon.Streaming,
                 $"TapScribe — recording {s.Connected} of {s.Total} device(s)",
-                Unheard(s) ? $"{s.Connected}/{s.Total}" : ""),
+                Unheard(s.Connected, s.Total) ? $"{s.Connected}/{s.Total}" : ""),
+            // The same shape as Streaming and deliberately a different sentence: an attached
+            // tap is not recording a meeting of its own, it is feeding whichever session the
+            // Recorder has open, and an operator who reads "Streaming" here would look for an
+            // End that is not offered.
+            TrayStatus.Attached a => new StatusView(
+                $"● Connected to live — {a.Connected}/{a.Total} devices",
+                Unheard(a.Connected, a.Total) ? TrayIcon.Degraded : TrayIcon.Streaming,
+                $"TapScribe — feeding the current session from {a.Connected} of {a.Total} device(s)",
+                Unheard(a.Connected, a.Total) ? $"{a.Connected}/{a.Total}" : ""),
+            TrayStatus.Connecting => new StatusView(
+                "○ Connecting…",
+                TrayIcon.Idle,
+                "TapScribe — connecting to the current session…"),
             TrayStatus.Error e => new StatusView(
                 $"⚠ {e.Reason}",
                 TrayIcon.Error,
@@ -93,6 +120,12 @@ public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip, st
                 "● Ending meeting…",
                 TrayIcon.Streaming,
                 "TapScribe — ending meeting…"),
+            // Its own case for the reason Attached is one: an attached tap has no meeting to
+            // end, so borrowing Ending's sentence would name a thing this tray never had.
+            TrayStatus.Disconnecting => new StatusView(
+                "● Disconnecting…",
+                TrayIcon.Streaming,
+                "TapScribe — disconnecting from the current session…"),
             TrayStatus.Processing p => new StatusView(
                 $"● {p.Label}",
                 TrayIcon.Streaming,

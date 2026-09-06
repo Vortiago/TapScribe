@@ -604,7 +604,7 @@ jobs:
         run: |
           set -euo pipefail
           app=$(find bridges/tray-bridge/src/TapScribe.TrayBridge.MacOS/bin/Release \
-            -maxdepth 3 -type d -name 'TapScribe.TrayBridge.MacOS.app' -not -path '*/publish/*')
+            -maxdepth 3 -type d -name 'TapScribe.app' -not -path '*/publish/*')
           # Exactly one match, and NO match fails: the build above guarantees the
           # bundle, so an empty result means the path drifted rather than that
           # there is nothing to check. `wc -l` alone would not catch it, since
@@ -613,6 +613,10 @@ jobs:
           test "$(printf '%s' "$app" | grep -c '')" = 1
           test -d "$app"
           codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
+          # Published for the Bundle-package step below, so the exactly-one-match rule above
+          # is the only place this path is resolved — a second `find` there would be a copy
+          # with a weaker check, which is the one easier to forget when the path drifts.
+          echo "APP=$app" >> "$GITHUB_ENV"
 
           # The SAME script release.yml ships with, so this gate cannot drift
           # into testing a package nobody downloads.
@@ -623,7 +627,7 @@ jobs:
           xattr -p com.apple.quarantine probe.pkg
 
           sudo installer -pkg probe.pkg -target /
-          installed=/Applications/TapScribe.TrayBridge.MacOS.app
+          installed=/Applications/TapScribe.app
           # Named failures, not bare `test`: a silent one-line exit says only
           # that the step failed, and this pair caught a real relocation bug
           # whose diagnosis took a local repro it should not have needed.
@@ -634,7 +638,7 @@ jobs:
             echo "build-macos-pkg.sh still clears BundleIsRelocatable."
             exit 1
           fi
-          if [ ! -x "$installed/Contents/MacOS/TapScribe.TrayBridge.MacOS" ]; then
+          if [ ! -x "$installed/Contents/MacOS/TapScribe" ]; then
             echo "FAIL: the installed bundle has no executable at Contents/MacOS/."
             exit 1
           fi
@@ -665,11 +669,61 @@ jobs:
       # If this ever fails for a reason that is about the runner rather than the
       # code (no window server for an LSUIElement app, say), delete it. A launch
       # gate that has to be retried is worse than none.
+      # The Bundle's packaging script, RUN — for the same reason `bundle-build`
+      # exists on the Windows side: the release job that uses it fires on a tag
+      # only, so without this a break here is discovered on release day. `bash -n`
+      # is not a substitute; the staging, the re-sign and the delegation are the
+      # parts that go wrong.
+      #
+      # A STUB payload, not python-build-standalone. What is under test is where
+      # the files land and whether the signature survives being written over —
+      # neither is a function of 300 MB, and pulling that into every PR would buy
+      # nothing. (The interpreter's own Mach-O dylibs under Resources are the one
+      # thing this cannot stand in for: `codesign --deep` over a real tree is a
+      # task-36 watch item.)
+      #
+      # Deliberately NOT installed: the quarantine and launch proofs above use the
+      # bridge-only package on purpose, because launching a payload-bearing app
+      # would boot the host role against a fake interpreter — a different test,
+      # and a flakier one.
+      - name: Prove the Bundle package script stages a payload
+        run: |
+          set -euo pipefail
+          stub=$(mktemp -d)
+          mkdir -p "$stub/python/bin"
+          printf '#!/bin/sh\necho stub\n' > "$stub/python/bin/python3"
+          chmod +x "$stub/python/bin/python3"
+          : > "$stub/tapscribe-0.0.0-py3-none-any.whl"
+
+          packaging/macos/build-bundle-pkg.sh \
+            "$APP" "$stub/python" "$stub/tapscribe-0.0.0-py3-none-any.whl" 0.0.0 bundle-probe.pkg
+
+          # The three-way contract: BundleLayout.MacOSPayload looks in
+          # Contents/Resources, the tray's role probe asks the same path, and the
+          # script puts it there. Asserted against the PACKAGE's payload rather than
+          # the staging directory, which is what an operator actually installs.
+          expanded=$(mktemp -d)
+          pkgutil --expand bundle-probe.pkg "$expanded/pkg"
+          payload=$(find "$expanded/pkg" -name Payload -maxdepth 2 | head -n 1)
+          test -n "$payload"
+          listed=$(tar -tzf "$payload")
+          for want in \
+            "TapScribe.app/Contents/Resources/python/bin/python3" \
+            "TapScribe.app/Contents/Resources/wheel/tapscribe-0.0.0-py3-none-any.whl"; do
+            if ! printf '%s\n' "$listed" | grep -q "$want"; then
+              echo "FAIL: the package has no $want."
+              echo "BundleLayout.MacOSPayload would read this install as a bridge-only tray,"
+              echo "so the operator's Recorder would simply be absent from the menu."
+              exit 1
+            fi
+          done
+          echo "OK: the Bundle package carries its payload where the layout looks for it."
+
       - name: Prove the installed app launches
         timeout-minutes: 3
         run: |
           set -euo pipefail
-          bin=/Applications/TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS
+          bin=/Applications/TapScribe.app/Contents/MacOS/TapScribe
           HOME=$(mktemp -d) "$bin" > launch.log 2>&1 &
           pid=$!
           # A crash on launch is immediate, so this is a grace period rather than
@@ -718,14 +772,14 @@ jobs:
       - name: Build + test the macOS platform layer
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.MacOS.Tests/TapScribe.Bridge.MacOS.Tests.csproj -c Release
 
-  # The Windows Bundle's Launcher (packaging/windows/, ADR-0015) uses the same
+  # The Windows Bundle (packaging/bundle/, ADR-0015) uses the same
   # Core/Windows split as the tray Bridge above and for the same reason: the
   # path resolution, argv construction, log-rotation policy and password read
   # live in a cross-platform Core so they're testable off Windows. Only the
   # tray, the Job Object and the actual spawn are Windows-only, and those are
   # covered by the compile in `bundle-build` below.
   bundle-core-crossplatform:
-    name: bundle launcher core (ubuntu)
+    name: bundle core (ubuntu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -733,16 +787,28 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: packaging/windows/global.json
+          global-json-file: packaging/bundle/global.json
 
       - name: Build + test bundle-core only
-        run: dotnet test packaging/windows/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
+        run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
 
-  # Compiles the WinForms Launcher on its native OS. The release `bundle` job
-  # publishes it, but only on a tag — without this, a Launcher that doesn't
-  # compile would not be discovered until release day.
+      # Both platform halves COMPILE here, which is the whole reason neither carries a
+      # platform TFM: a DllImport into kernel32 or libc needs none. Nothing referenced by
+      # Bundle.Core.Tests reaches them, so without this step the macOS reaper's only
+      # compile gate would be the one CI job that can build the macOS shell — and the
+      # Windows one's would be the windows job. A build, not a test: their behaviour is
+      # kernel behaviour, asserted where the kernel is.
+      - name: Compile both platform reapers
+        run: |
+          dotnet build packaging/bundle/src/TapScribe.Bundle.MacOS/TapScribe.Bundle.MacOS.csproj -c Release
+          dotnet build packaging/bundle/src/TapScribe.Bundle.Windows/TapScribe.Bundle.Windows.csproj -c Release
+
+  # Builds the Bundle solution on its native OS: the cross-platform Core (already
+  # tested above) plus the Windows reaper, whose kernel behaviour only Windows can
+  # answer for. The release `bundle` job runs on a tag only, so without this a
+  # break here would not be discovered until release day.
   bundle-build:
-    name: bundle launcher build (windows)
+    name: bundle build + reaper tests (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -750,10 +816,17 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: packaging/windows/global.json
+          global-json-file: packaging/bundle/global.json
 
       - name: Build the whole bundle solution
-        run: dotnet build packaging/windows/TapScribe.Bundle.slnx -c Release
+        run: dotnet build packaging/bundle/TapScribe.Bundle.slnx -c Release
+
+      # The reaper's Windows half. Its tests are [RequiresWindows] and skip
+      # everywhere else, so this job is the only place they actually run —
+      # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and self-enrolment are kernel
+      # behaviour no Linux leg can answer for.
+      - name: Test the Windows reaper
+        run: dotnet test packaging/bundle/tests/TapScribe.Bundle.Windows.Tests/TapScribe.Bundle.Windows.Tests.csproj -c Release --no-build
 
   # The cross-platform job above runs the bridge-core tests but SKIPS the
   # real-Recorder meeting E2E (RealRecorderMeetingE2ETests, via the

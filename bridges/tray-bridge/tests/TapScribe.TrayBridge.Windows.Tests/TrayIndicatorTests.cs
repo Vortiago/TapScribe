@@ -69,14 +69,28 @@ public class TrayIndicatorTests
         TrayContext tray = sta.Build(harness);
         Assert.True(tray.StartItem.Enabled);
         Assert.False(tray.EndItem.Enabled);
+        Assert.True(tray.ConnectItem.Enabled);
+        Assert.False(tray.DisconnectItem.Enabled);
 
-        sta.Run(() => ((ITrayView)tray).SetMenuState(canStart: false, canEnd: true));
+        sta.Run(() => ((ITrayView)tray).SetCommands(TrayCommands.MeetingRunning));
         Assert.False(tray.StartItem.Enabled);
         Assert.True(tray.EndItem.Enabled);
+        Assert.False(tray.ConnectItem.Enabled, "Connect stayed live over a bracketed meeting");
 
-        sta.Run(() => ((ITrayView)tray).SetMenuState(canStart: false, canEnd: false));
+        // Attached is the one state where two commands are live at once: Disconnect, and Start
+        // as a takeover (ADR-0025). A shell that greyed Start out here would leave the operator
+        // no way to turn a room mic into a meeting without disconnecting first.
+        sta.Run(() => ((ITrayView)tray).SetCommands(TrayCommands.Attached));
+        Assert.True(tray.StartItem.Enabled, "Start was greyed out, so the takeover is unreachable");
+        Assert.False(tray.EndItem.Enabled);
+        Assert.False(tray.ConnectItem.Enabled);
+        Assert.True(tray.DisconnectItem.Enabled);
+
+        sta.Run(() => ((ITrayView)tray).SetCommands(TrayCommands.Busy));
         Assert.False(tray.StartItem.Enabled);
         Assert.False(tray.EndItem.Enabled);
+        Assert.False(tray.ConnectItem.Enabled);
+        Assert.False(tray.DisconnectItem.Enabled);
     }
 
     [Fact]

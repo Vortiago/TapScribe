@@ -181,7 +181,7 @@ fi
 # from source by default).
 #
 # These used to be inlined here and, near-identically, in start.ps1. They now
-# live in `tapscribe.preflight` so the Windows Bundle's Launcher — which has no
+# live in `tapscribe.preflight` so the Windows Bundle's tray — which has no
 # start.ps1 to inherit them from — runs the SAME steps rather than a C#
 # reimplementation that drifts (ADR-0015). `plan_steps` is pure and unit-tested;
 # `--dry-run` prints what it would do.

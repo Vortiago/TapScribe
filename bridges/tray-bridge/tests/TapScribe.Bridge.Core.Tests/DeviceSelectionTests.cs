@@ -214,6 +214,36 @@ public class DeviceSelectionTests
     }
 
     [Fact]
+    public void ToTapOptions_WithNoSession_OmitsTheQueryParameterOnEveryDevice()
+    {
+        // An attached tap (ADR-0025): the same per-device split, routed at nothing in
+        // particular, so the Recorder puts it in whatever session is current. Asserted at
+        // the URI rather than at the field, because omitting the parameter IS the mode —
+        // a Session that round-trips as null but still spells "session=" on the wire would
+        // pass a field check and open a tap the Recorder rejects.
+        ResolveResult result = DeviceSelection.Resolve(
+            [
+                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic"),
+                new DeviceSelection.FollowDefault(DeviceFlow.Render, "system", "System Audio"),
+            ],
+            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)], Base);
+
+        var baseConn = new TapConnectionOptions { Host = "rec", Port = 9000, Token = "tok" };
+        IReadOnlyList<TapConnectionOptions> options = result.ToTapOptions(null, baseConn);
+
+        Assert.Equal(2, options.Count);
+        Assert.All(options, o => Assert.Null(o.Session));
+        Assert.All(options, o => Assert.DoesNotContain("session=", o.BuildTapUri().Query, StringComparison.Ordinal));
+
+        // Everything else is stamped exactly as a meeting's taps are: same identities,
+        // same names, same per-flow tap mode. Only the routing differs.
+        TapConnectionOptions mic = Assert.Single(options, o => o.Identity == "mic");
+        Assert.Equal("My Mic", mic.Name);
+        TapConnectionOptions system = Assert.Single(options, o => o.Identity == "system");
+        Assert.Equal("System Audio", system.Name);
+    }
+
+    [Fact]
     public void Resolve_FollowDefault_WhenNoDeviceIsDefault_BindsToFirstOfThatFlow()
     {
         // Active mics present but none marked default (headless / RDP / no default

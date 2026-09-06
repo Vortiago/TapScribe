@@ -5,11 +5,11 @@
 	<key>CFBundleName</key>
 	<string>TapScribe</string>
 	<key>CFBundleDisplayName</key>
-	<string>TapScribe Bridge</string>
+	<string>TapScribe</string>
 	<key>CFBundleIdentifier</key>
 	<string>net.havso.tapscribe.traybridge</string>
 	<key>CFBundleExecutable</key>
-	<string>TapScribe.TrayBridge.MacOS</string>
+	<string>TapScribe</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>NSMicrophoneUsageDescription</key>

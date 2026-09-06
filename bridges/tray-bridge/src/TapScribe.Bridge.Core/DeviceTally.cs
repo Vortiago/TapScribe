@@ -30,13 +30,22 @@ public sealed class DeviceTally
     private readonly HashSet<string> _live = new(StringComparer.Ordinal);
     private readonly SortedSet<string> _dropped = new(StringComparer.Ordinal);
 
-    public DeviceTally(int total)
+    private readonly bool _attached;
+
+    /// <param name="total">How many devices the taps were opened on.</param>
+    /// <param name="attached">Whether these taps are an attached tap rather than a bracketed
+    /// meeting, which is the ONE thing that differs: the counting is identical and only the
+    /// sentence the operator reads changes. Carried here rather than swapped at the render,
+    /// because the tally is what the status line is built from and a second place to decide it
+    /// is a second place to get it wrong.</param>
+    public DeviceTally(int total, bool attached = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(total);
         Total = total;
+        _attached = attached;
     }
 
-    /// <summary>How many devices the meeting was started on.</summary>
+    /// <summary>How many devices the taps were opened on.</summary>
     public int Total { get; }
 
     /// <summary>A device's tap connected: it is streaming.</summary>
@@ -68,6 +77,16 @@ public sealed class DeviceTally
     /// down, otherwise the plain streaming count. Sorted, so the message is a function of
     /// the state and not of the order the failures happened to arrive in.</summary>
     public TrayStatus Status => _dropped.Count == 0
-        ? new TrayStatus.Streaming(_live.Count, Total)
-        : new TrayStatus.Error($"{string.Join(", ", _dropped)} stopped — recording {_live.Count}/{Total} devices");
+        ? _attached
+            ? new TrayStatus.Attached(_live.Count, Total)
+            : new TrayStatus.Streaming(_live.Count, Total)
+        // The verb follows the mode here too, not just in the healthy sentence: an attached
+        // tap is not recording a meeting of its own, it feeds whatever session the Recorder
+        // has open, and an operator told a failing one is "recording" would look for an End
+        // that is not offered.
+        : new TrayStatus.Error(
+            $"{string.Join(", ", _dropped)} stopped — "
+            + (_attached
+                ? $"feeding the current session from {_live.Count}/{Total} devices"
+                : $"recording {_live.Count}/{Total} devices"));
 }

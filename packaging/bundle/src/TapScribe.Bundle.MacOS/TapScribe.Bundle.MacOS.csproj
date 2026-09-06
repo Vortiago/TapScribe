@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The macOS half of the host role: the process-group reaper and the parent-death
+       watch it needs, behind IProcessReaper (Core) — the same split
+       TapScribe.Bundle.Windows keeps, and for the same reason.
+
+       net10.0, not net10.0-macos: DllImport into libc needs no macOS TFM and no Xcode
+       workload, so this project COMPILES on the Linux and Windows legs like its Windows
+       sibling does. Its behaviour is macOS-only and its tests say so. That matters more
+       here than it does on Windows: the shell that consumes it (net10.0-macos) can only
+       be built on a Mac, so without this split NOTHING about the reaper would compile
+       anywhere but one CI job. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TapScribe.Bundle.MacOS</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../TapScribe.Bundle.Core/TapScribe.Bundle.Core.csproj" />
+  </ItemGroup>
+
+</Project>
