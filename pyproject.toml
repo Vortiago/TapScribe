@@ -371,6 +371,15 @@ filterwarnings = [
     # StarletteDeprecationWarning, so naming the class aborts the whole run
     # wherever it is absent. Remove when starlette itself pins httpx2.
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:Warning",
+    # anyio 4.15 turned `anyio.abc.BlockingPortal` into a deprecating lazy alias
+    # for `anyio.from_thread.BlockingPortal`. starlette's testclient still names
+    # the old spelling at MODULE level, so under `error` every collection that
+    # imports fastapi.testclient aborts — 26 modules here, and nothing in this
+    # repo says `anyio.abc.BlockingPortal` itself. Matched by MESSAGE for the
+    # same reason as the starlette line above: the class is anyio's private
+    # deprecation warning, not a public symbol to import. Remove when starlette
+    # migrates to the `from_thread` spelling.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
     # (No torch.jit.load ignore needed: since #374 nothing in the core install
     #  imports torch at all — `speech_gate.load_silero_model` and
     #  `strip_silence._local_silero_model` both go through `tapscribe.vad`,
