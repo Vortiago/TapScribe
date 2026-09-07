@@ -22,6 +22,16 @@ namespace TapScribe.TrayBridge.Windows;
 /// On Save it returns the edited <see cref="BridgeSettings"/> via <see cref="Result"/>;
 /// the caller persists them. The device list is supplied by a delegate so the dialog
 /// doesn't own enumerator lifecycle and a Refresh can re-enumerate.
+///
+/// <para><b>Nothing here is positioned by hand.</b> Every control sits in a
+/// <see cref="TableLayoutPanel"/> row and is either <c>AutoSize</c> or docked, and the form
+/// declares <see cref="ContainerControl.AutoScaleMode"/> <c>Font</c> against the 96-DPI
+/// Segoe UI 9pt metrics the sizes here are written in — so the layout is a function of the
+/// text the operator actually sees. The earlier version placed every control at a literal
+/// pixel and gave each paragraph a literal height, which was correct only at 100% scale: on
+/// a 150% display the font came back 1.6x taller while the constants did not, so the
+/// descriptions were truncated to one line, captions sat on top of their inputs, "Test
+/// connection" lost half its caption, and Save/Cancel fell off the bottom edge.</para>
 /// </summary>
 internal sealed class SettingsForm : Form
 {
@@ -29,61 +39,61 @@ internal sealed class SettingsForm : Form
     // All the editing logic lives in this pure, unit-tested view-model; the form is a thin
     // two-way binding of controls onto it (seeded on build, synced back on Save).
     private readonly SettingsDraft _draft;
-    private readonly int _contentW;
-    private readonly int _contentH;
 
     // Connection tab.
-    private readonly TextBox _host = new();
-    private readonly NumericUpDown _port =
-        new() { Minimum = SettingsBounds.PortMin, Maximum = SettingsBounds.PortMax, Width = 90 };
+    private readonly TextBox _host = new() { Dock = DockStyle.Fill };
+    private readonly NumericUpDown _port = Spinner(SettingsBounds.PortMin, SettingsBounds.PortMax);
     private readonly CheckBox _tls = new() { Text = "Use TLS (wss://)", AutoSize = true };
-    // Concise on the dialog (an AutoSize checkbox doesn't wrap and the tab is ~436px
-    // wide); the full "accepts any cert / testing only" caveat lives in the README.
+    // The full "accepts any cert / testing only" caveat lives in the README.
     private readonly CheckBox _allowSelfSigned = new()
     {
         Text = "Allow self-signed certificate (insecure)",
         AutoSize = true,
+        // Indented under TLS to read as its sub-option; scaled with everything else.
+        Margin = new Padding(24, 3, 3, 3),
     };
-    private readonly TextBox _token = new() { UseSystemPasswordChar = true };
+    private readonly TextBox _token = new() { UseSystemPasswordChar = true, Dock = DockStyle.Fill };
     private readonly CheckBox _showToken = new() { Text = "Show token", AutoSize = true };
-    private readonly Button _testButton = new() { Text = "Test connection", Width = 120 };
-    private readonly Label _testStatus = new();
+    private readonly Button _testButton = TrayLayout.Action("Test connection");
+    private readonly Label _testStatus = TrayLayout.Wrapped();
 
     // Devices tab — the common case is two checkboxes; pinning specific devices lives
     // behind the Advanced expander. One Name per device: it labels the source on the
     // dashboard AND (made filename-safe by the Recorder) tags it in the recordings.
     private readonly CheckBox _micEnabled = new() { Text = "Capture my microphone", AutoSize = true };
-    private readonly TextBox _micName = new() { Width = 220 };
+    private readonly TextBox _micName = new() { Dock = DockStyle.Fill };
     private readonly CheckBox _systemEnabled =
         new() { Text = "Capture system audio (the other side of the meeting)", AutoSize = true };
-    private readonly TextBox _systemName = new() { Width = 220 };
-    private readonly LinkLabel _advancedToggle = new() { AutoSize = true };
-    private readonly Panel _advancedPanel = new() { Visible = false };
-    private readonly DataGridView _devices = new();
-    private readonly Label _deviceStatus = new() { AutoSize = true, ForeColor = Color.Firebrick };
+    private readonly TextBox _systemName = new() { Dock = DockStyle.Fill };
+    private readonly LinkLabel _advancedToggle = new() { AutoSize = true, Margin = new Padding(3, 10, 3, 6) };
+    private readonly TableLayoutPanel _advancedPanel = new() { Visible = false, ColumnCount = 1 };
+    // Dock.Top over a height set in FitMeasuredSizes, not Dock.Fill in a stretching row: the
+    // row it would stretch in is the one that takes what the others left, which at a large
+    // text scale is nothing — and a Percent row cannot honour a child's MinimumSize, so the
+    // grid would have overlapped the button under it rather than being given room.
+    private readonly DataGridView _devices = new() { Dock = DockStyle.Top };
+    private readonly Label _deviceStatus = TrayLayout.Wrapped();
 
     // Per-device sensitivity lives on the Devices tab — one slider per device — because a
     // mic and a system loopback want opposite sensitivity (ADR-0007). Hangover / pre-roll
     // are shared across devices and stay on the Level-gate tab.
-    private readonly TrackBar _micSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
+    private readonly TrackBar _micSensitivity = Slider();
     private readonly Label _micSensitivityValue = new() { AutoSize = true };
-    private readonly TrackBar _systemSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
+    private readonly TrackBar _systemSensitivity = Slider();
     private readonly Label _systemSensitivityValue = new() { AutoSize = true };
 
     // Live per-device input-level meters (#152): a bar under each sensitivity slider, fed on a
     // UI-thread timer so the operator tunes against the level they see. Display only, never on
     // the tap/gate pipeline.
-    private readonly LevelMeterBar _micMeter = new();
-    private readonly LevelMeterBar _systemMeter = new();
+    private readonly LevelMeterBar _micMeter = Meter();
+    private readonly LevelMeterBar _systemMeter = Meter();
     private readonly System.Windows.Forms.Timer _meterTimer = new() { Interval = 50 };
     private readonly MeterProbe _micProbe;
     private readonly MeterProbe _systemProbe;
 
     // Level-gate tab — the shared knobs.
-    private readonly NumericUpDown _hangover =
-        new() { Minimum = 0, Maximum = SettingsBounds.HangoverMaxMs, Increment = 50, Width = 90 };
-    private readonly NumericUpDown _preRoll =
-        new() { Minimum = 0, Maximum = SettingsBounds.PreRollMaxMs, Increment = 50, Width = 90 };
+    private readonly NumericUpDown _hangover = Spinner(0, SettingsBounds.HangoverMaxMs, 50);
+    private readonly NumericUpDown _preRoll = Spinner(0, SettingsBounds.PreRollMaxMs, 50);
 
     // Meeting tab — what End meeting does. On: run the recorder's strip/transcribe/summarize
     // pipeline and show the summary. Off: just save the session + recordings for the dashboard.
@@ -102,6 +112,7 @@ internal sealed class SettingsForm : Form
     {
         _listDevices = listDevices;
         _draft = SettingsDraft.Seed(current);
+        _deviceStatus.ForeColor = Color.Firebrick;
         // CaptureDevice.DefaultFor, not a comparison written here: the meter must sample the
         // endpoint the gate it is tuning will tap, and re-deriving that rule is how they drift.
         _micProbe = new MeterProbe(
@@ -110,40 +121,52 @@ internal sealed class SettingsForm : Form
             openEnumerator, devices => CaptureDevice.DefaultFor(devices, DeviceFlow.Render));
         Result = current;
 
+        SuspendLayout(); // required by UseFontScaling below, which says why
+
         Text = "TapScribe — Settings";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterScreen;
         MaximizeBox = false;
         MinimizeBox = false;
-        // Taller than before: the Devices tab now carries a per-device sensitivity slider
-        // AND a live level meter under each device, so the simple pair + the Advanced pin
-        // grid both need room.
-        ClientSize = new Size(470, 610);
+        TrayLayout.UseFontScaling(this);
+        // Logical (96-DPI) units, scaled by the line above, and sized to the tallest tab
+        // (Devices, with two meters and a status line) so the dialog opens unscrolled —
+        // EveryTabFitsTheDialogItOpensAt fails if a new row outgrows it.
+        ClientSize = new Size(560, 660);
+        // Sizable rather than FixedDialog: every tab body scrolls, so nothing can become
+        // unreachable, and an operator at a text scale nobody anticipated can widen the
+        // dialog instead of losing the pin grid.
+        FormBorderStyle = FormBorderStyle.Sizable;
 
-        var tabs = new TabControl
-        {
-            Location = new Point(8, 8),
-            Size = new Size(ClientSize.Width - 16, ClientSize.Height - 56),
-        };
-        // A TabPage doesn't get its real size until it's added to the TabControl and
-        // laid out, so the Build*Tab methods can't trust page.Width/Height. Derive the
-        // content area from the (known) TabControl size: minus the side borders and the
-        // top tab strip. The dialog is FixedDialog, so these stay correct.
-        _contentW = tabs.Width - 8;
-        _contentH = tabs.Height - 28;
+        var tabs = new TabControl { Dock = DockStyle.Fill };
         tabs.TabPages.Add(BuildConnectionTab());
         tabs.TabPages.Add(BuildDevicesTab());
         tabs.TabPages.Add(BuildLevelGateTab());
         tabs.TabPages.Add(BuildMeetingTab());
-        Controls.Add(tabs);
 
-        var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Width = 80 };
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 80 };
-        save.Location = new Point(ClientSize.Width - 2 * 80 - 20, ClientSize.Height - 38);
-        cancel.Location = new Point(ClientSize.Width - 80 - 12, ClientSize.Height - 38);
+        Button save = TrayLayout.Action("Save");
+        save.DialogResult = DialogResult.OK;
         save.Click += (_, _) => Result = Collect();
-        Controls.Add(save);
-        Controls.Add(cancel);
+        Button cancel = TrayLayout.Action("Cancel");
+        cancel.DialogResult = DialogResult.Cancel;
+        // RightToLeft flow, so Cancel is added first to land rightmost. The row AutoSizes,
+        // which is what keeps both buttons on screen whatever the caption or the scale.
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        buttons.Controls.Add(cancel);
+        buttons.Controls.Add(save);
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(8) };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        Stack(root, tabs, fill: true);
+        Stack(root, buttons);
+        Controls.Add(root);
+
         AcceptButton = save;
         CancelButton = cancel;
 
@@ -152,49 +175,164 @@ internal sealed class SettingsForm : Form
         // capture thread) and stops cleanly on close.
         Load += (_, _) => StartMeters();
         FormClosing += (_, _) => StopMeters();
+        Load += (_, _) => FitToDesktop();
+        FontChanged += (_, _) => FitMeasuredSizes();
+
+        ResumeLayout(performLayout: true); // performs the auto-scale over the finished tree
+        FitMeasuredSizes();                // measured against the font that scale settled on
     }
+
+    // ---- Layout vocabulary -----------------------------------------------------------
+    //
+    // Four shapes here, three more in TrayLayout (which the meeting window shares).
+    // They exist so that no tab reaches for a coordinate: a row is added, and its height
+    // is whatever the text in it needs.
+
+    /// <summary>A tab body: one full-width column of rows, which scrolls if the content
+    /// outgrows the page. That scroll is the backstop that makes every size in this file
+    /// safe to be wrong.</summary>
+    private static TableLayoutPanel Page()
+    {
+        var page = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            AutoScroll = true,
+            Padding = new Padding(10),
+        };
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        return page;
+    }
+
+    /// <summary>A caption/input grid: captions size to the longest one, inputs take the
+    /// rest. GrowAndShrink because the default GrowOnly floors a fresh panel at its 200x100
+    /// design size, which would leave a hole under every short grid.</summary>
+    private static TableLayoutPanel Fields()
+    {
+        var grid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        return grid;
+    }
+
+    private static TrackBar Slider() =>
+        new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Dock = DockStyle.Top };
+
+    /// <summary>
+    /// A numeric spinner. Its width is set in <see cref="FitMeasuredSizes"/> rather than
+    /// here, because a field initializer sees the default font, not the scaled one the
+    /// operator reads.
+    /// </summary>
+    private static NumericUpDown Spinner(decimal min, decimal max, decimal step = 1) =>
+        new() { Minimum = min, Maximum = max, Increment = step, Anchor = AnchorStyles.Left };
+
+    /// <summary>
+    /// The two sizes WinForms cannot derive on its own, measured once the auto-scale has
+    /// settled the font — which is why this runs after ResumeLayout, and again on every font
+    /// change. Everything else in the dialog sizes itself.
+    /// </summary>
+    private void FitMeasuredSizes()
+    {
+        // NumericUpDown is one of the few controls that ignores AutoSize, so someone has to
+        // set its width — and a literal is how the port box came to render "800" for 8001 on
+        // a scaled display. The spin buttons are as wide as a scrollbar's arrows, the one
+        // platform metric that tracks them.
+        foreach (NumericUpDown box in new[] { _port, _hangover, _preRoll })
+        {
+            box.Width = TextRenderer.MeasureText($"{box.Maximum}", box.Font).Width
+                + SystemInformation.VerticalScrollBarWidth
+                + box.Padding.Horizontal;
+        }
+
+        // The pin grid's height, which nothing else can answer: docked to the top of an
+        // AutoSize row, this is what the row becomes, and the page scrolls to reach it. A
+        // header plus four rows — enough to read as a list, with the grid's own scrollbar for
+        // the rest, rather than the one-pixel grid a stretching row gave it at 150%.
+        _devices.Height = _devices.ColumnHeadersHeight + (4 * _devices.RowTemplate.Height);
+    }
+
+    // Dock.Top over a docked height: a plain Control reports its own size as its preferred
+    // one, so the row takes this height and the bar spans the column.
+    private static LevelMeterBar Meter() => new() { Dock = DockStyle.Top, Height = 16 };
+
+    /// <summary>
+    /// One caption/input row in a <see cref="Fields"/> grid. A blank caption keeps the input
+    /// in the second column, under the one above it.
+    /// </summary>
+    /// <param name="anchor">Where the caption sits in its cell. Left (centred vertically)
+    /// reads best beside a one-line input; a tall input — the sensitivity slider, whose row
+    /// is three times a caption's height because of its tick marks — wants Top, or the
+    /// caption drifts down until it looks like it labels the row beneath.</param>
+    private static void Field(
+        TableLayoutPanel grid, string caption, Control input, AnchorStyles anchor = AnchorStyles.Left)
+    {
+        int row = grid.RowCount++;
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = anchor }, 0, row);
+        grid.Controls.Add(input, 1, row);
+    }
+
+    /// <summary>One full-width row in a <see cref="Fields"/> grid — a checkbox, which has no
+    /// caption of its own.</summary>
+    private static void Span(TableLayoutPanel grid, Control control)
+    {
+        int row = grid.RowCount++;
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.Controls.Add(control, 0, row);
+        grid.SetColumnSpan(control, 2);
+    }
+
+    /// <summary>Append one row to a single-column panel, sized to its content — or, with
+    /// <paramref name="fill"/>, given every pixel the rest of the rows did not take.</summary>
+    private static void Stack(TableLayoutPanel panel, Control control, bool fill = false)
+    {
+        int row = panel.RowCount++;
+        panel.RowStyles.Add(fill ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.AutoSize));
+        panel.Controls.Add(control, 0, row);
+    }
+
+    // ---- Tabs ------------------------------------------------------------------------
 
     private TabPage BuildConnectionTab()
     {
         var page = new TabPage("Connection");
-        const int labelX = 12;
-        const int inputX = 110;
-        const int inputWidth = 286;
-        int y = 12;
+        TableLayoutPanel body = Page();
 
-        AddRow(page, "Recorder host", _host, ref y, inputWidth);
+        TableLayoutPanel fields = Fields();
+        Field(fields, "Recorder host", _host);
         _host.Text = _draft.Host;
-        AddRow(page, "Port", _port, ref y, inputWidth);
+        Field(fields, "Port", _port);
         _port.Value = Math.Clamp(_draft.Port, SettingsBounds.PortMin, SettingsBounds.PortMax);
-        AddCheck(page, _tls, _draft.Tls, ref y, inputX);
-        // Indented under TLS to read as its sub-option. Only meaningful over wss://, so it
-        // is greyed out unless TLS is on and forced off when TLS is turned off — the same
-        // Tls && AllowSelfSignedCert scoping the connection sites enforce, surfaced in the UI.
-        AddCheck(page, _allowSelfSigned, _draft.Tls && _draft.AllowSelfSignedCert, ref y, inputX + 12);
+        Span(fields, _tls);
+        _tls.Checked = _draft.Tls;
+        // Only meaningful over wss://, so it is greyed out unless TLS is on and forced off
+        // when TLS is turned off — the same Tls && AllowSelfSignedCert scoping the connection
+        // sites enforce, surfaced in the UI.
+        Span(fields, _allowSelfSigned);
+        _allowSelfSigned.Checked = _draft.Tls && _draft.AllowSelfSignedCert;
         _tls.CheckedChanged += (_, _) => SyncSelfSignedEnabled();
         SyncSelfSignedEnabled();
-        AddRow(page, "Tap token", _token, ref y, inputWidth);
+        Field(fields, "Tap token", _token);
         _token.Text = _draft.Token;
-        AddCheck(page, _showToken, isChecked: false, ref y, inputX);
+        Span(fields, _showToken);
         _showToken.CheckedChanged += (_, _) => _token.UseSystemPasswordChar = !_showToken.Checked;
-
-        page.Controls.Add(new Label
-        {
-            Text = "Leave the token empty for a Recorder started with --no-auth.",
-            Location = new Point(labelX, y + 2),
-            AutoSize = true,
-            ForeColor = SystemColors.GrayText,
-        });
-
-        _testStatus.Location = new Point(labelX, y + 26);
-        _testStatus.Size = new Size(_contentW - 24, 48);
-        page.Controls.Add(_testStatus);
 
         // Fire-and-forget (not async void): an unexpected fault can't crash the dialog.
         // ConnectionTester returns failures as a result, not exceptions.
-        _testButton.Location = new Point(labelX, _contentH - 44);
         _testButton.Click += (_, _) => _ = TestConnectionAsync();
-        page.Controls.Add(_testButton);
+
+        Stack(body, fields);
+        Stack(body, TrayLayout.Paragraph("Leave the token empty for a Recorder started with --no-auth."));
+        Stack(body, _testButton);
+        Stack(body, _testStatus);
+
+        page.Controls.Add(body);
         return page;
 
         // "Allow self-signed" only applies over TLS: disable it without TLS and force it
@@ -205,29 +343,12 @@ internal sealed class SettingsForm : Form
             if (!_tls.Checked)
                 _allowSelfSigned.Checked = false;
         }
-
-        static void AddRow(TabPage host, string label, Control input, ref int rowY, int width)
-        {
-            host.Controls.Add(new Label { Text = label, Location = new Point(12, rowY + 3), AutoSize = true });
-            input.Location = new Point(110, rowY);
-            if (input is TextBox)
-                input.Width = width;
-            host.Controls.Add(input);
-            rowY += 30;
-        }
-
-        static void AddCheck(TabPage host, CheckBox check, bool isChecked, ref int rowY, int x)
-        {
-            check.Checked = isChecked;
-            check.Location = new Point(x, rowY + 2);
-            host.Controls.Add(check);
-            rowY += 28;
-        }
     }
 
     private TabPage BuildDevicesTab()
     {
         var page = new TabPage("Devices");
+        TableLayoutPanel body = Page();
 
         // The common case: two checkboxes, each with an identity/name. "Follow default"
         // (these) tracks whatever the current default device is at Start; pinning a
@@ -240,69 +361,43 @@ internal sealed class SettingsForm : Form
         _systemName.Text = _draft.SystemName;
         _systemSensitivity.Value = Math.Clamp(_draft.SystemSensitivity, 0, 100);
 
-        page.Controls.Add(new Label
-        {
-            Text = "Name labels each source on the dashboard and tags it in the recording "
-                 + "filenames (made filename-safe automatically). Give the two different "
-                 + "names. Sensitivity is per device — open the loopback more than the mic.",
-            Location = new Point(12, 8),
-            Size = new Size(_contentW - 24, 44),
-            ForeColor = SystemColors.GrayText,
-        });
-
-        _micEnabled.Location = new Point(12, 56);
-        page.Controls.Add(_micEnabled);
-        AddNameRow(page, _micName, 82);
-        AddSensitivityRow(_micSensitivity, _micSensitivityValue, _micMeter, 108);
-
-        _systemEnabled.Location = new Point(12, 198);
-        page.Controls.Add(_systemEnabled);
-        AddNameRow(page, _systemName, 224);
-        AddSensitivityRow(_systemSensitivity, _systemSensitivityValue, _systemMeter, 250);
-
-        _deviceStatus.Location = new Point(12, 342);
-        _deviceStatus.MaximumSize = new Size(_contentW - 24, 0);
-        page.Controls.Add(_deviceStatus);
+        Stack(body, TrayLayout.Paragraph(
+            "Name labels each source on the dashboard and tags it in the recording "
+            + "filenames (made filename-safe automatically). Give the two different "
+            + "names. Sensitivity is per device — open the loopback more than the mic."));
+        Stack(body, Device(_micEnabled, _micName, _micSensitivity, _micSensitivityValue, _micMeter));
+        Stack(body, Device(_systemEnabled, _systemName, _systemSensitivity, _systemSensitivityValue, _systemMeter));
+        Stack(body, _deviceStatus);
 
         SetAdvancedToggle(open: false);
-        _advancedToggle.Location = new Point(12, 364);
         _advancedToggle.LinkClicked += (_, _) =>
         {
             _advancedPanel.Visible = !_advancedPanel.Visible;
             SetAdvancedToggle(_advancedPanel.Visible);
         };
-        page.Controls.Add(_advancedToggle);
+        Stack(body, _advancedToggle);
 
-        int panelW = _contentW - 24;
-        int panelH = _contentH - 400;
-        _advancedPanel.Location = new Point(12, 390);
-        _advancedPanel.Size = new Size(panelW, panelH);
-        _advancedPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-
-        _devices.Location = new Point(0, 0);
-        _devices.Size = new Size(panelW, panelH - 32);
-        _devices.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         _devices.AllowUserToAddRows = false;
         _devices.AllowUserToDeleteRows = false;
         _devices.RowHeadersVisible = false;
         _devices.SelectionMode = DataGridViewSelectionMode.CellSelect;
-        _devices.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-        _devices.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Tap", HeaderText = "Pin", Width = 36 });
+        // Fill, not literal widths: the grid divides whatever width the dialog has, so a
+        // long endpoint name stays readable at any scale instead of clipping at 210px.
+        _devices.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _devices.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Tap", HeaderText = "Pin", FillWeight = 12 });
         _devices.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "Device", HeaderText = "Device", Width = 210, ReadOnly = true,
+            Name = "Device", HeaderText = "Device", FillWeight = 53, ReadOnly = true,
         });
-        _devices.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Name", Width = 150 });
+        _devices.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Name", FillWeight = 35 });
         // A checkbox edit commits immediately, so Collect() sees it without a focus change.
         _devices.CurrentCellDirtyStateChanged += (_, _) =>
         {
             if (_devices.IsCurrentCellDirty)
                 _devices.CommitEdit(DataGridViewDataErrorContexts.Commit);
         };
-        _advancedPanel.Controls.Add(_devices);
 
-        var refresh = new Button { Text = "Refresh devices", Width = 120, Location = new Point(0, panelH - 28) };
-        refresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+        Button refresh = TrayLayout.Action("Refresh devices");
         // Re-enumerate the pin grid AND re-point the live meters at the now-current
         // follow-default endpoints (a just-plugged-in or newly-defaulted device).
         refresh.Click += (_, _) =>
@@ -310,8 +405,14 @@ internal sealed class SettingsForm : Form
             PopulateDevices();
             RestartMeters();
         };
-        _advancedPanel.Controls.Add(refresh);
-        page.Controls.Add(_advancedPanel);
+
+        _advancedPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _advancedPanel.AutoSize = true;
+        _advancedPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _advancedPanel.Dock = DockStyle.Top;
+        Stack(_advancedPanel, _devices);
+        Stack(_advancedPanel, refresh);
+        Stack(body, _advancedPanel);
 
         // Auto-open Advanced when a pinned device was saved, so it isn't hidden.
         if (_draft.HasSavedPins)
@@ -321,102 +422,95 @@ internal sealed class SettingsForm : Form
         }
 
         PopulateDevices();
+        page.Controls.Add(body);
         return page;
 
         void SetAdvancedToggle(bool open) =>
             _advancedToggle.Text = (open ? "▾" : "▸") + " Advanced — pin specific devices…";
+    }
 
-        static void AddNameRow(TabPage host, TextBox name, int rowY)
+    /// <summary>
+    /// One device's block: enable, name, sensitivity slider, the slider's live
+    /// RMS-threshold readout, and the level meter beneath it. Both devices are built from
+    /// here, so the mic and the loopback cannot drift apart.
+    ///
+    /// The meter rides directly under the readout on the same RMS scale as the threshold it
+    /// marks: the slider sets the marker (the level the input must clear to open the gate),
+    /// and the UI timer pushes the live level into the bar.
+    /// </summary>
+    private static TableLayoutPanel Device(
+        CheckBox enabled, TextBox name, TrackBar slider, Label readout, LevelMeterBar meter)
+    {
+        TableLayoutPanel block = Fields();
+        block.Margin = new Padding(3, 3, 3, 12);
+        Span(block, enabled);
+        Field(block, "Name", name);
+        Field(block, "Sensitivity", slider, AnchorStyles.Left | AnchorStyles.Top);
+        Field(block, "", readout);
+        Field(block, "", meter);
+
+        meter.Threshold = GateTuning.SliderToThreshold(slider.Value);
+        slider.ValueChanged += (_, _) =>
         {
-            host.Controls.Add(new Label { Text = "Name", Location = new Point(32, rowY + 3), AutoSize = true });
-            name.Location = new Point(80, rowY);
-            host.Controls.Add(name);
-        }
-
-        // One device's sensitivity slider, its live RMS-threshold readout, and the live
-        // level meter beneath. The slider's value is seeded from the draft above before this
-        // wires the live label and the meter's marker.
-        void AddSensitivityRow(TrackBar slider, Label valueLabel, LevelMeterBar meter, int rowY)
-        {
-            page.Controls.Add(new Label { Text = "Sensitivity", Location = new Point(32, rowY + 12), AutoSize = true });
-            slider.Location = new Point(110, rowY);
-            page.Controls.Add(slider);
-            valueLabel.Location = new Point(112, rowY + 42);
-            page.Controls.Add(valueLabel);
-
-            // The meter rides directly under the readout on the same RMS scale as the
-            // threshold it marks: the slider sets the marker (the level the input must clear
-            // to open the gate), and the UI timer pushes the live level into the bar.
-            meter.Location = new Point(112, rowY + 64);
-            meter.Size = new Size(_contentW - 124, 16);
+            UpdateSensitivityLabel(slider, readout);
             meter.Threshold = GateTuning.SliderToThreshold(slider.Value);
-            page.Controls.Add(meter);
-
-            slider.ValueChanged += (_, _) =>
-            {
-                UpdateSensitivityLabel(slider, valueLabel);
-                meter.Threshold = GateTuning.SliderToThreshold(slider.Value);
-            };
-            UpdateSensitivityLabel(slider, valueLabel);
-        }
+        };
+        UpdateSensitivityLabel(slider, readout);
+        return block;
     }
 
     private TabPage BuildLevelGateTab()
     {
         var page = new TabPage("Level gate");
-        int y = 16;
+        TableLayoutPanel body = Page();
 
-        page.Controls.Add(new Label
-        {
-            Text = "The bridge opens a recording when the input level crosses the threshold "
-                 + "and closes it after the hangover. Sensitivity is set per device on the "
-                 + "Devices tab; hangover and pre-roll below apply to every device.",
-            Location = new Point(12, y),
-            Size = new Size(_contentW - 24, 44),
-            ForeColor = SystemColors.GrayText,
-        });
-        y += 54;
+        Stack(body, TrayLayout.Paragraph(
+            "The bridge opens a recording when the input level crosses the threshold "
+            + "and closes it after the hangover. Sensitivity is set per device on the "
+            + "Devices tab; hangover and pre-roll below apply to every device."));
 
-        page.Controls.Add(new Label { Text = "Hangover (ms)", Location = new Point(12, y + 3), AutoSize = true });
-        _hangover.Location = new Point(110, y);
+        TableLayoutPanel fields = Fields();
+        Field(fields, "Hangover (ms)", _hangover);
         _hangover.Value = Math.Clamp(_draft.HangoverMs, 0, SettingsBounds.HangoverMaxMs);
-        page.Controls.Add(_hangover);
-        y += 32;
-
-        page.Controls.Add(new Label { Text = "Pre-roll (ms)", Location = new Point(12, y + 3), AutoSize = true });
-        _preRoll.Location = new Point(110, y);
+        Field(fields, "Pre-roll (ms)", _preRoll);
         _preRoll.Value = Math.Clamp(_draft.PreRollMs, 0, SettingsBounds.PreRollMaxMs);
-        page.Controls.Add(_preRoll);
+        Stack(body, fields);
 
+        page.Controls.Add(body);
         return page;
     }
 
     private TabPage BuildMeetingTab()
     {
         var page = new TabPage("Meeting");
-        int y = 16;
+        TableLayoutPanel body = Page();
 
         _processOnEnd.Checked = _draft.ProcessOnEnd;
-        _processOnEnd.Location = new Point(12, y);
-        page.Controls.Add(_processOnEnd);
-        y += 30;
+        Stack(body, _processOnEnd);
+        Stack(body, TrayLayout.Paragraph(
+            "When on, End meeting runs the recorder's strip -> transcribe -> summarize "
+            + "pipeline and pops up the finished summary. When off, End meeting only saves "
+            + "the session and its recordings on the recorder — open them on the dashboard "
+            + "to transcribe or summarize whenever you want."));
 
-        page.Controls.Add(new Label
-        {
-            Text = "When on, End meeting runs the recorder's strip -> transcribe -> summarize "
-                 + "pipeline and pops up the finished summary. When off, End meeting only saves "
-                 + "the session and its recordings on the recorder — open them on the dashboard "
-                 + "to transcribe or summarize whenever you want.",
-            Location = new Point(12, y),
-            Size = new Size(_contentW - 24, 72),
-            ForeColor = SystemColors.GrayText,
-        });
-
+        page.Controls.Add(body);
         return page;
+    }
+
+    // Never larger than the desktop it opens on, and never shrinkable below that. The
+    // scaled ClientSize is a guess at how much room the content wants, and a guess that is
+    // too big is how Save ends up under the taskbar.
+    private void FitToDesktop()
+    {
+        Rectangle work = Screen.FromControl(this).WorkingArea;
+        Size = new Size(Math.Min(Width, work.Width), Math.Min(Height, work.Height));
+        MinimumSize = Size;
+        CenterToScreen();
     }
 
     private static void UpdateSensitivityLabel(TrackBar slider, Label valueLabel) =>
         valueLabel.Text = SettingsDraft.SensitivityLabel(slider.Value);
+
 
     private void PopulateDevices()
     {

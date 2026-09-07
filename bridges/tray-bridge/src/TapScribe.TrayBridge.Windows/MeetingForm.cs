@@ -42,25 +42,26 @@ internal sealed class MeetingForm : Form, IMeetingWindow
     private string _rawBody = "";
     private bool _renderedAsMarkdown;
 
-    private readonly Label _caption = new()
-    {
-        Dock = DockStyle.Top,
-        AutoSize = false,
-        Height = 26,
-        Padding = new Padding(2, 4, 2, 4),
-    };
+    // A wrapping label, not a 26px one: the caption carries the summarizer's model id
+    // ("Meeting summary · mlx-community/Qwen2.5-7B-Instruct-4bit"), so its height is a
+    // function of the text and the window width rather than a number written here. The
+    // literal 26 sliced "Loading…" in half on a 150% display.
+    private readonly Label _caption = TrayLayout.Wrapped();
 
-    private readonly Button _copy = new() { Text = "Copy", Width = 90, Height = 28 };
+    private readonly Button _copy = TrayLayout.Action("Copy");
 
     public MeetingForm()
     {
-        Width = 540;
-        Height = 440;
+        SuspendLayout(); // required by UseFontScaling below, which says why
+        TrayLayout.UseFontScaling(this);
+        // Logical (96-DPI) units, scaled by the line above.
+        ClientSize = new System.Drawing.Size(540, 440);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
 
         _copy.Click += (_, _) => Copy(_rawBody);
-        var close = new Button { Text = "Close", Width = 90, Height = 28, DialogResult = DialogResult.OK };
+        Button close = TrayLayout.Action("Close");
+        close.DialogResult = DialogResult.OK;
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
@@ -95,6 +96,8 @@ internal sealed class MeetingForm : Form, IMeetingWindow
         };
 
         Apply(MeetingFormView.For(null)); // start in the Loading state
+
+        ResumeLayout(performLayout: true); // performs the auto-scale over the finished tree
     }
 
     // Implemented explicitly: Form already has a (long-deprecated) Closed event of its own, and
