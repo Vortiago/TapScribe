@@ -42,6 +42,41 @@ public readonly record struct ConnectionTestOutcome(string Text, bool Ok);
 /// </summary>
 public static class ConnectionTester
 {
+    /// <summary>
+    /// Whether SOMETHING is serving a Recorder's port — a synchronous <c>GET /health</c> with
+    /// a short deadline, answering false for every way of not being there.
+    ///
+    /// The discriminator a Bundle's host role needs when the Recorder it just spawned exits
+    /// immediately: "someone else's Recorder holds this port" versus "this install is
+    /// broken" (ADR-0022). Here rather than in each tray shell, where it had been written
+    /// twice character-for-character, and here rather than in Bundle.Core, which must not
+    /// reference Bridge.Core — a Bundle is not a Bridge. Beside <see cref="TestAsync"/>
+    /// because both wrap the same call for the same question, and the filter below is
+    /// deliberately the one that method's callers already keep.
+    ///
+    /// Loopback and no token by design: a Bundle IS the Recorder on its own machine, and
+    /// <c>/health</c> takes no credential.
+    /// </summary>
+    /// <param name="http">The caller's client, so no handler is churned per probe.</param>
+    public static bool AnswersOnLoopback(int port, HttpClient http, TimeSpan timeout)
+    {
+        try
+        {
+            using var control = new ControlClient("127.0.0.1", port, tls: false, token: "", http);
+            using var deadline = new CancellationTokenSource(timeout);
+            control.CheckHealthAsync(deadline.Token).GetAwaiter().GetResult();
+            return true;
+        }
+        catch (Exception error) when (
+            error is HttpRequestException or TaskCanceledException or OperationCanceledException
+                or SocketException or InvalidOperationException)
+        {
+            // Nothing listening, or it did not answer in time. Either way: not somebody
+            // else's healthy Recorder.
+            return false;
+        }
+    }
+
     /// <summary>Run the probe under the shared timeout and describe every outcome, a throw
     /// included. Both dialogs run this fire-and-forget from a click, where an escaping exception
     /// is swallowed by the scheduler and strands the status line on "Testing...".</summary>
@@ -62,6 +97,23 @@ public static class ConnectionTester
             // malformed entry throwing below it. What is lost is the stack.
             return new ConnectionTestOutcome($"Test failed: {ex.Message}", Ok: false);
         }
+    }
+
+    /// <summary>
+    /// The probe over an operator's settings, shaped as
+    /// <see cref="BridgeDependencies.CheckConnection"/>: what both shells pass as their
+    /// production pre-flight for Connect (ADR-0025). Named here rather than written as a
+    /// lambda at each wiring site, because the two would be character-for-character the same
+    /// and would drift apart the first time one of them learned something.
+    ///
+    /// Connect has no mint to round-trip the Recorder, so without this an unreachable
+    /// Recorder or a refused token stays silent until the first person speaks.
+    /// </summary>
+    public static Task<ConnectionTestResult> CheckSettingsAsync(
+        BridgeSettings settings, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return TestAsync(settings.ToConnectionOptions(), http: null, cancellationToken);
     }
 
     public static async Task<ConnectionTestResult> TestAsync(

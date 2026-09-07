@@ -111,6 +111,38 @@ AUTH_PASSWORD_FILE: Path = BASE_DIR / ".auth-password"
 INSTALL_WARNINGS_FILE: Path = BASE_DIR / ".tapscribe-install-warnings.json"
 AUTH_ENABLED: bool = True
 
+# What the Recorder is actually bound to, stamped once by `__main__.main()` from
+# the parsed CLI args. Both exist because the dashboard SESSION COOKIE needs them
+# and nothing else could answer:
+#   - the cookie's NAME carries the port, because cookies are scoped by host but
+#     NOT by port, so a checkout on 8001 and a second Recorder on 8002 would
+#     otherwise clobber each other's session. `request.url.port` would also
+#     answer, but it comes from the Host header; the bound port is the honest
+#     source.
+#   - `Secure` may only be set when the connection actually is TLS, and `--tls`
+#     otherwise resolves to a local in `main()` that reaches nothing importable.
+PORT: int = 8001
+TLS_ENABLED: bool = False
+
+
+def session_cookie_name() -> str:
+    """The dashboard session cookie's name, which carries the port.
+
+    Here rather than beside the route that sets it, for two reasons. It is read on
+    the hottest path in the app — `auth.basic_auth_middleware`, crossed by the
+    dashboard's 500 ms poll — and core reaching into `routes/` for it meant a
+    deferred import re-run on every request. And this module is the leaf both
+    sides already import, so one owner costs no new dependency edge: a middleware
+    that spelled the name differently from the route would silently stop accepting
+    the sessions that route mints, which reads exactly like "the login link is
+    broken".
+
+    A function, not a constant: `PORT` is stamped by `__main__.main()` after this
+    module is imported.
+    """
+    return f"tapscribe_session_{PORT}"
+
+
 # Bearer token bridges send on the /tap WebSocket (carried via
 # Sec-WebSocket-Protocol). Distinct from the dashboard password so the
 # operator can hand a tap-token to browser extensions without exposing
@@ -127,10 +159,15 @@ TLS_KEY_FILE: Path = BASE_DIR / ".tapscribe-key.pem"
 # credential. The Bridge's /api/tap/* control plane is NOT listed here —
 # it is the TAP-BEARER scheme (TAP_PREFIX below), enforced by the auth
 # middleware, not exempt from auth.
+# `GET /login` is here because it AUTHENTICATES BY SPENDING its token: the
+# credential is in the URL, so demanding a second one first would defeat the
+# link (ADR-0023). Exact (method, path), like the health probes — a query-param
+# carve-out on `/` would muddy the one predicate ADR-0008 exists to protect.
 AUTH_EXEMPT_ROUTES = frozenset(
     {
         ("GET", "/health"),
         ("GET", "/healthz"),
+        ("GET", "/login"),
     }
 )
 

@@ -21,6 +21,14 @@
     <TargetFramework>net10.0-macos</TargetFramework>
     <RootNamespace>TapScribe.TrayBridge.MacOS</RootNamespace>
 
+    <!-- Names the BUNDLE (TapScribe.app) and the executable inside it, and is why this
+         diverges from the project name at all. One tray per OS (ADR-0022) means the
+         bridge-only zip and the Bundle's .pkg install the same app, so a Bundle upgrades a
+         bridge-only install in place instead of landing beside it. The bundle IDENTIFIER
+         stays net.havso.tapscribe.traybridge for the same reason: macOS treats it, not the
+         path, as the app's identity. -->
+    <AssemblyName>TapScribe</AssemblyName>
+
     <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
 
@@ -43,6 +51,11 @@
   <ItemGroup>
     <ProjectReference Include="..\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
     <ProjectReference Include="..\TapScribe.Bridge.MacOS\TapScribe.Bridge.MacOS.csproj" />
+    <!-- The host role's rules (ADR-0022/0024), reached across the two trees exactly as the
+         Windows shell reaches them. Bundle.Core is net10.0 and holds no platform calls, so
+         this adds nothing to the bundle but the decisions. -->
+    <ProjectReference Include="..\..\..\..\packaging\bundle\src\TapScribe.Bundle.Core\TapScribe.Bundle.Core.csproj" />
+    <ProjectReference Include="..\..\..\..\packaging\bundle\src\TapScribe.Bundle.MacOS\TapScribe.Bundle.MacOS.csproj" />
   </ItemGroup>
 
   <!-- Program is internal (it is the app's own entry point, not an API), and its launch

@@ -84,19 +84,25 @@ class RunningRecorder:
         return self.server.ws_base_url
 
 
-@pytest.fixture
-def running_recorder(
+def _serve_recorder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_wlk: FakeWlkThread,
+    *,
+    auth: bool,
 ) -> Iterator[RunningRecorder]:
     """Build a Recorder under tmp_path, attach it to the global FastAPI
-    `app`, and serve it via real uvicorn on a free port. Auth off so
-    bridges don't have to juggle subprotocols (auth has its own tests).
-    LiveChannel is marked running via a fake proc so TapFanOut opens a
-    relay, but AUTO_START_LIVE is off so the lifespan doesn't try to
-    spawn the real whisperlivekit-server."""
-    monkeypatch.setattr(_config, "AUTH_ENABLED", False)
+    `app`, and serve it via real uvicorn on a free port. LiveChannel is
+    marked running via a fake proc so TapFanOut opens a relay, but
+    AUTO_START_LIVE is off so the lifespan doesn't try to spawn the real
+    whisperlivekit-server.
+
+    `auth` is the one axis the two fixtures below differ on, and it is a
+    parameter rather than a copy of this body: the dashboard suite runs auth
+    OFF (bridges then need no subprotocol juggling, and auth has its own
+    tests), while the login-link test needs it ON or it would assert nothing
+    at all."""
+    monkeypatch.setattr(_config, "AUTH_ENABLED", auth)
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     # Repoints CONFIG_DIR AND every per-file constant under it — the
@@ -120,3 +126,26 @@ def running_recorder(
         app.dependency_overrides.clear()
         if hasattr(app.state, "recorder"):
             del app.state.recorder
+
+
+@pytest.fixture
+def running_recorder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_wlk: FakeWlkThread,
+) -> Iterator[RunningRecorder]:
+    """The default: auth OFF. What every dashboard-UI test uses."""
+    yield from _serve_recorder(tmp_path, monkeypatch, fake_wlk, auth=False)
+
+
+@pytest.fixture
+def running_recorder_auth_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_wlk: FakeWlkThread,
+) -> Iterator[RunningRecorder]:
+    """The same Recorder with the auth gate LIVE — for the login link, whose
+    whole claim is about what the browser is and is not asked for (ADR-0023).
+    Against the auth-off fixture that test would pass without the feature
+    existing."""
+    yield from _serve_recorder(tmp_path, monkeypatch, fake_wlk, auth=True)

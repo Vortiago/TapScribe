@@ -170,12 +170,5 @@ internal sealed class MeetingWindow : IMeetingWindow, IDisposable
         _copy.Enabled = view.CanCopy;
     }
 
-    private static void Copy(string text)
-    {
-        if (string.IsNullOrEmpty(text))
-            return; // nothing to copy, and clearing the pasteboard for it would be a theft
-        NSPasteboard pasteboard = NSPasteboard.GeneralPasteboard;
-        pasteboard.ClearContents();
-        pasteboard.SetStringForType(text, NSPasteboardType.String.GetConstant()!);
-    }
+    private static void Copy(string text) => Pasteboard.Put(text);
 }

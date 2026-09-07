@@ -50,6 +50,75 @@ public class StatusViewTests
     }
 
     [Fact]
+    public void For_AnAttachedTapMissingADevice_BadgesTheCount_AndWarns()
+    {
+        // Attached reuses Streaming's never-heard rule deliberately (ADR-0025 §1.5), and this
+        // is the case the rule exists for: the room mic IS the attached tap's usual shape, so
+        // a dismissed grant here is likelier than in a meeting, not rarer. Losing the degraded
+        // icon would leave an operator watching a healthy-looking glyph over a silent room.
+        StatusView view = StatusView.For(new TrayStatus.Attached(Connected: 1, Total: 2));
+
+        Assert.Equal("1/2", view.Badge);
+        Assert.Equal(TrayIcon.Degraded, view.Icon);
+    }
+
+    [Fact]
+    public void For_AnAttachedTapThatIsHealthy_UsesStreamingIcon_AndBadgesNothing()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Attached(Connected: 2, Total: 2));
+
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+        Assert.Equal("", view.Badge);
+        Assert.Contains("2/2", view.Header, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void For_AnAttachedTapWhereNobodyHasSpokenYet_BadgesNothing()
+    {
+        // The same 0-of-N grace Streaming gets, for the same reason: a tap opens on the level
+        // gate, so every attach begins at zero and a badge there cries wolf every time.
+        StatusView view = StatusView.For(new TrayStatus.Attached(Connected: 0, Total: 2));
+
+        Assert.Equal("", view.Badge);
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+    }
+
+    [Fact]
+    public void For_Attached_SaysFeeding_NotRecording()
+    {
+        // The sentence is the point of the case existing at all: an attached tap has no meeting
+        // of its own and offers no End, so an operator who read "Streaming" here would hunt the
+        // menu for a command that is not there.
+        StatusView view = StatusView.For(new TrayStatus.Attached(Connected: 1, Total: 1));
+
+        Assert.Contains("Connected to live", view.Header, StringComparison.Ordinal);
+        Assert.DoesNotContain("Streaming", view.Header, StringComparison.Ordinal);
+        Assert.DoesNotContain("recording", view.Tooltip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void For_Connecting_UsesIdleIcon()
+    {
+        // Idle rather than Streaming: nothing is being captured yet, and a streaming glyph
+        // during the pre-flight would claim audio is landing when the Recorder may yet refuse.
+        StatusView view = StatusView.For(new TrayStatus.Connecting());
+
+        Assert.Equal(TrayIcon.Idle, view.Icon);
+        Assert.False(string.IsNullOrWhiteSpace(view.Header));
+    }
+
+    [Fact]
+    public void For_Disconnecting_ShowsAnActiveIcon_WhileTapsDrain()
+    {
+        // Active for the same reason Ending is: the taps are still draining the last utterance,
+        // so audio is still moving and an idle glyph would invite a quit that truncates it.
+        StatusView view = StatusView.For(new TrayStatus.Disconnecting());
+
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+        Assert.DoesNotContain("meeting", view.Header, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void For_Idle_UsesIdleIcon()
     {
         StatusView view = StatusView.For(new TrayStatus.Idle());

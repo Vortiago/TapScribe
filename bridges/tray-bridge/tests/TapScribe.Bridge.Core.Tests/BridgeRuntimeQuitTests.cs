@@ -15,6 +15,30 @@ namespace TapScribe.Bridge.Core.Tests;
 public class BridgeRuntimeQuitTests
 {
     [Fact]
+    public async Task QuitAsync_MidAttachedTap_ClosesEveryPipelineBeforeReleasingTheShell()
+    {
+        // The attached twin of the meeting case below. An attached tap holds the same
+        // orchestrator over the same devices, so a teardown that only knows about meetings
+        // leaves a room mic streaming into the Recorder with no tray left to stop it.
+        using var harness = new RuntimeHarness();
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        FakeAudioCapture system = harness.AddDevice("system", DeviceFlow.Render);
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Connect();
+        await RuntimeHarness.ConnectSettledAsync(runtime);
+        Assert.True(harness.View.CanDisconnect, "nothing was attached, so this proves nothing");
+
+        await runtime.QuitAsync();
+
+        Assert.True(mic.Disposed);
+        Assert.True(system.Disposed);
+        Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded at quit");
+        Assert.True(harness.View.ShutdownCalled, "the shell was never told teardown had finished");
+        Assert.True(harness.View.CapturesReleasedBeforeShutdown);
+    }
+
+    [Fact]
     public async Task QuitAsync_MidMeeting_ClosesEveryPipelineBeforeReleasingTheShell()
     {
         using var harness = new RuntimeHarness();

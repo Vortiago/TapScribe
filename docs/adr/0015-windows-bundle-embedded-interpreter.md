@@ -11,6 +11,12 @@ the built `tapscribe` wheel, and a tray **Launcher**. It is deliberately *not*
 a PyInstaller/Nuitka-frozen `.exe`, because two load-bearing facts about the
 Recorder require a real interpreter:
 
+> **Superseded in part by ADR-0022.** The dedicated Launcher executable is
+> gone; the tray Bridge carries the host role when a payload sits beside it,
+> and it is what "the tray" means everywhere below. Nothing else in this
+> decision changed — the payload, the reasons a freeze does not work, and the
+> bring-up split are all as written.
+
 1. **`/setup` runs pip at runtime.** Model backends are not baked in; the
    operator picks families in the browser and the picker shells pip via
    `sys.executable`. Under a freeze, `sys.executable` *is* the frozen exe —
@@ -67,11 +73,11 @@ uninstalling the program cannot delete someone's meeting recordings.
 
 - **Bring-up logic lives in `tapscribe/preflight.py`** — the repair probes
   and the Windows CUDA torch swap — run by `start.sh`/`start.ps1` and by the
-  Launcher as `python -m tapscribe.preflight`, so a check added later cannot
+  tray as `python -m tapscribe.preflight`, so a check added later cannot
   drift between a PowerShell copy and a C# copy. `PYTHONUNBUFFERED=1`
   deliberately did NOT move: it must be set in the recorder's own
   environment, which a separate preflight process cannot do — `start.ps1`
-  sets it, and the Launcher sets it on the child.
+  sets it, and the tray sets it on the child.
 - **The saved model selection (`.tapscribe-install.json`) follows
   `BASE_DIR`** (passed to the picker as `--state-file`), not the package —
   beside a wheel-installed package that would be `site-packages`, and a
@@ -86,13 +92,18 @@ uninstalling the program cannot delete someone's meeting recordings.
   you need a Bundle to have a dashboard. It rides ADR-0012's release
   mechanism: CI-built, attached to the tagged release under the stable
   unversioned filename `TapScribe-Setup-win-x64.exe`.
-- **Two tray icons on a machine running both.** The tray Launcher and the
+- ~~**Two tray icons on a machine running both.** The tray Launcher and the
   tray Bridge stay separate, independently installable executables: a
   Recorder can run on another machine (hence `--lan`/`--tls`), and the
   SpatialChat extension is a Bridge with no tray app at all, so fusing them
   would be correct for one topology and wrong for two. If the same-laptop
   case comes to dominate, the additive fix is a "local Recorder" section in
-  the tray Bridge, not a merge.
+  the tray Bridge, not a merge.~~ **Reversed by ADR-0022.** The same-laptop
+  case did come to dominate, and the fix landed as that section: there is now
+  ONE tray per OS, which carries the host role when a host payload sits beside
+  it on disk. The topologies this paragraph protected are unaffected — a
+  bridge-only install has no payload and shows no such section, and the
+  SpatialChat extension still has no tray at all.
 - **Unsigned for now.** SmartScreen will warn. Signing is chicken-and-egg —
   SignPath Foundation's OSS programme requires a released artifact first —
   so the first Bundle ships unsigned and the application follows it.

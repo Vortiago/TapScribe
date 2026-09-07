@@ -23,7 +23,7 @@
 
 import { tpl, pick, renderList } from "../../templates.js";
 import { header, strong, inline, wireRecPill, paintRecPill } from "../shell.js";
-import { mutateButton, putJson } from "../../api.js";
+import { mutateButton, putJson, errText } from "../../api.js";
 import * as activeTaps from "../../components/active-taps.js";
 import * as liveChannel from "../../components/live-channel.js";
 import { setText } from "../ui.js";
@@ -113,7 +113,7 @@ export function build(ctx) {
           if (seg) paintMode(seg, was);
           throw e;
         }),
-      { afterMutate, failMessage: (e) => `Tap mode change failed: ${e}` },
+      { afterMutate, failMessage: (e) => `Tap mode change failed: ${errText(e)}` },
     );
   });
   wireRecPill(recPill, () => latest, { afterMutate });

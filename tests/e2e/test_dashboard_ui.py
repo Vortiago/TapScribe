@@ -57,6 +57,8 @@ import pytest
 from tapscribe import batch_diarize as _batch_diarize
 from tapscribe import transcribers as _transcribers
 from tapscribe import voices
+from tapscribe.app import app as _app
+from tapscribe.login_links import LoginLinks
 from tapscribe.recorder import JobState
 from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_ROSTER_JSON
 from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
@@ -8001,5 +8003,285 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
                 timeout=10000,
             )
             await _shot(page, "voices-05-people.png")
+        finally:
+            await browser.close()
+
+
+async def test_login_link_signs_the_browser_in_without_an_auth_dialog(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """ADR-0023, in a real browser and against a LIVE auth gate.
+
+    The claim is about what the browser is never asked for: the operator clicks
+    Open dashboard in the tray, lands signed in, and the native Basic dialog —
+    which no page can dismiss and no test can click — never appears. The context
+    carries no `http_credentials` on purpose: with them this would pass whether
+    or not the cookie worked.
+    """
+    base = running_recorder_auth_on.base_url
+    password = running_recorder_auth_on.recorder.auth.value
+
+    # What the tray does: read .auth-password off disk, ask for a link.
+    async with httpx.AsyncClient() as client:
+        # Unauthenticated, the dashboard is shut.
+        assert (await client.get(base + "/")).status_code == 401
+        minted = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert minted.status_code == 200, minted.text
+        link = minted.json()["path"]
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # Any 401 reaching the page would mean the cookie was not accepted —
+            # and in a real browser it is what pops the dialog.
+            unauthorized: list[str] = []
+            page.on(
+                "response",
+                lambda r: unauthorized.append(f"{r.status} {r.url}") if r.status == 401 else None,
+            )
+
+            await page.goto(base + link, wait_until="domcontentloaded")
+
+            # The 303 landed on the dashboard itself, and the token is gone from
+            # the address bar (and so from history and the next Referer).
+            assert page.url.rstrip("/") == base.rstrip("/"), page.url
+            assert "k=" not in page.url
+
+            # It is the real dashboard, and the cookie authenticates every
+            # subsequent request rather than just the landing: the poll's own
+            # endpoint keeps answering 200.
+            await page.wait_for_selector("#tapsRailBody", timeout=10000)
+            state = await page.evaluate(
+                "async (u) => (await fetch(u, {credentials: 'include'})).status",
+                base + "/api/state",
+            )
+            assert state == 200, state
+            assert unauthorized == [], unauthorized
+
+            # Re-opening the same link straight away lands on the dashboard
+            # again rather than on a dead-link page: the grace window, which is
+            # what makes the tray's own launch survive a link scanner, a URL
+            # preview or a double-click spending the token first. (That the link
+            # DOES die afterwards is the store's own cover, where the clock is
+            # injected and nothing has to wait ten seconds.)
+            again = await context.new_page()
+            await again.goto(base + link, wait_until="domcontentloaded")
+            assert again.url.rstrip("/") == base.rstrip("/"), again.url
+            assert unauthorized == [], unauthorized
+
+            # A link that is genuinely no good — yesterday's, pasted out of a
+            # chat — is a PAGE, never a 401. This is the assertion the route
+            # test cannot make: a 401 on a navigation is what pops the native
+            # dialog, and only a real browser proves none was asked for.
+            dead = await context.new_page()
+            response = await dead.goto(base + "/login?k=not-a-real-token", wait_until="domcontentloaded")
+            assert response is not None and response.status == 200, response
+            assert "This link is used up" in await dead.inner_text("body")
+            assert unauthorized == [], unauthorized
+        finally:
+            await browser.close()
+
+
+async def test_a_link_signed_in_dashboard_can_still_write(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """The other half of ADR-0023, and the half a green suite would not notice:
+    after the link signs the browser in, the dashboard must still be able to
+    SAVE.
+
+    ADR-0023 adds an Origin check to the BASIC scheme on state-changing methods,
+    because `SameSite=Strict` scopes the cookie by SITE and a site ignores ports
+    — a hostile page on another loopback port is same-site to this dashboard.
+    Every write the dashboard makes therefore now runs through a comparison of
+    the browser's `Origin` against the Recorder's own `base_url`, and nothing
+    else exercises the PASSING side of it honestly: the middleware's own tests
+    hand-write `Origin: http://testserver` (no port at all, so the two port
+    halves cannot disagree), and every OTHER dashboard-UI test runs the auth-off
+    fixture, where the middleware returns before it ever looks. Get that
+    comparison wrong and the Recorder 403s every save in the product while the
+    suite stays green.
+
+    So: sign in the way the tray does, then drive one real save through the UI —
+    the Sessions view's inline rename, a debounced PUT — and require both the
+    badge and the stored value.
+    """
+    rec = running_recorder_auth_on.recorder
+    base = running_recorder_auth_on.base_url
+    password = rec.auth.value
+
+    sid = "2025-05-01T10-00-00Z"
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    synth_speech_like_wav(d / f"{sid}_Dana_dana_0000dddd.wav", seconds=0.4, freq_hz=210.0)
+
+    async with httpx.AsyncClient() as client:
+        minted = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert minted.status_code == 200, minted.text
+        link = minted.json()["path"]
+
+    row = f'#viewRoot .sessrow[data-sid="{sid}"]'
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            # No http_credentials, again: the cookie has to be the only credential
+            # in play, or the write would pass on a header instead.
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # A refused write is a 403 from the Origin check; a refused session is
+            # a 401. Neither shows in the UI beyond a status badge, so collect them
+            # and name them in the failure.
+            refused: list[str] = []
+            page.on(
+                "response",
+                lambda r: (
+                    refused.append(f"{r.status} {r.request.method} {r.url}")
+                    if r.status in (401, 403)
+                    else None
+                ),
+            )
+
+            await page.goto(base + link, wait_until="domcontentloaded")
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            await page.locator(row).wait_for(state="visible", timeout=10000)
+
+            await page.locator(f'{row} [data-slot="rename"]').fill("Quarterly Planning")
+            try:
+                await page.wait_for_function(
+                    f"""() => {{
+                        const el = document.querySelector('{row} [data-slot="renameStatus"]');
+                        return !!el && el.textContent === 'saved';
+                    }}""",
+                    timeout=8000,
+                )
+            except Exception as timeout:
+                # A refused write never reaches the badge, so the bare timeout would
+                # name the symptom and hide the cause. Say which request was refused.
+                raise AssertionError(f"the save never landed; refused: {refused}") from timeout
+            assert refused == [], refused
+
+            # The badge is optimistic on its own — the Recorder is what has to have
+            # taken the write.
+            async with httpx.AsyncClient(base_url=base, auth=("admin", password)) as client:
+                meta = (await client.get(f"/api/session-meta/{sid}")).json()
+            assert meta.get("label") == "Quarterly Planning", meta
+        finally:
+            await browser.close()
+
+
+async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """The half of ADR-0023 that only a browser can show: what a signed-in tab
+    does once its session stops existing.
+
+    The store lives in the Recorder's memory, so every restart signs open tabs
+    out — including the tray's own Stop Recorder / Start Recorder, which this
+    release adds and which an operator will use casually. `auth.py` suppresses
+    the `WWW-Authenticate` on that 401 deliberately (a challenge on the 500 ms
+    poll would pop the native Basic dialog, the one prompt the feature exists to
+    remove) and its comment hands the other half to the page: "the dashboard's
+    own fetch sees the 401 and can say so quietly."
+
+    Without that half the tab polls a 401 forever behind a frozen page and says
+    nothing — stale sessions, no captions, no error — which reads as a hung
+    dashboard, and the reload it provokes IS a navigation, which IS challenged.
+    So the silent version does not merely omit a cue: it walks the operator into
+    the dialog.
+    """
+    base = running_recorder_auth_on.base_url
+    password = running_recorder_auth_on.recorder.auth.value
+
+    async def mint() -> str:
+        async with httpx.AsyncClient() as client:
+            answer = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert answer.status_code == 200, answer.text
+        return str(answer.json()["path"])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            # No http_credentials: with them the browser would re-authenticate on
+            # the 401 by itself and there would be no signed-out state to observe.
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            traffic: list[str] = []
+            page.on("response", lambda r: traffic.append(f"{r.status} {r.url}"))
+            modules = lambda: len([line for line in traffic if "/web/js/" in line])  # noqa: E731
+
+            await page.goto(base + await mint(), wait_until="domcontentloaded")
+            await page.wait_for_selector("#tapsRailBody", timeout=10000)
+
+            # Let the module graph finish arriving before killing the session. The
+            # dashboard imports views and components lazily, so invalidating mid-boot
+            # fails those dynamic imports rather than the poll — a different (and
+            # much louder) failure than the one under test, and not one an operator
+            # meets, their tab having been open for minutes. Quiescence is measured
+            # on MODULE fetches specifically: /api/state never goes quiet, that being
+            # the point of it.
+            settled, stable = -1, 0
+            for _ in range(40):
+                # THREE consecutive stable readings, not one: a single 0.5 s gap
+                # mid-boot is a pause, not an end, and on a loaded runner declaring
+                # it settled lands a late import 401 after the store is gone — which
+                # is a flake, and a flake is a bug to fix at the source.
+                stable = stable + 1 if modules() == settled else 0
+                if stable == 3:
+                    break
+                settled = modules()
+                await asyncio.sleep(0.5)
+            else:
+                raise AssertionError(f"the dashboard never finished importing: {traffic[-5:]}")
+
+            # Signed in and polling: #errbar is for real trouble, so it must be
+            # empty here or its appearance later would say nothing.
+            errbar = page.locator("#errbar")
+            assert await errbar.is_hidden(), await errbar.inner_text()
+
+            # What a Recorder restart does to a session, without restarting the
+            # server the browser is attached to: the store is replaced, so every
+            # cookie it issued is now unknown. Same observable state, and the page
+            # keeps its connection, so the POLL's own answer is what is under test
+            # rather than a dropped socket.
+            _app.state.login_links = LoginLinks()
+
+            # The cue arrives on a poll pass, not on a click.
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const el = document.querySelector('#errbar');
+                        return !!el && !el.hidden && el.textContent.includes('Signed out');
+                    }""",
+                    timeout=15000,
+                )
+            except Exception as never:
+                recent = [line for line in traffic[-25:] if "/api/" in line]
+                raise AssertionError(f"the poll went quiet instead of saying so; recent: {recent}") from never
+
+            said = await errbar.inner_text()
+            # BOTH ways back in, because there are two installs: a Bundle has a tray
+            # to mint a fresh link, and a checkout has only the password.
+            assert "tray" in said, said
+            assert "password" in said, said
+
+            # And it clears itself. A fresh link opened elsewhere sets a new cookie
+            # for this origin, so the stale tab recovers on its next pass instead of
+            # wearing a sign-out notice over a working dashboard.
+            second = await context.new_page()
+            await second.goto(base + await mint(), wait_until="domcontentloaded")
+            await second.close()
+
+            await page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('#errbar');
+                    return !!el && el.hidden;
+                }""",
+                timeout=15000,
+            )
         finally:
             await browser.close()

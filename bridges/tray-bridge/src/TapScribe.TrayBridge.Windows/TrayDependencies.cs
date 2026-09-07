@@ -29,6 +29,7 @@ internal sealed record TrayDependencies(
         new BridgeDependencies(
             static () => new WasapiDeviceEnumerator(),
             MintDetachedSessionAsync,
+            ConnectionTester.CheckSettingsAsync,
             TrayStores.Settings,
             TrayStores.MeetingState,
             TrayStores.MeetingHistory),

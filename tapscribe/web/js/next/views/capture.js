@@ -17,7 +17,7 @@
 // stream survives scroll across ticks.
 
 import { tpl, pick } from "../../templates.js";
-import { putJson, del } from "../../api.js";
+import { putJson, del, errText } from "../../api.js";
 import { wireSave } from "../../save-status.js";
 import { header, strong, inline, wireRecPill, paintRecPill, sessionLabel } from "../shell.js";
 import { setDimmable } from "../ui.js";
@@ -94,7 +94,7 @@ export function build(ctx) {
   liveClear.addEventListener("click", async () => {
     liveClear.disabled = true;
     try { await del("/api/live-transcript"); }
-    catch (e) { alert(`Clear captions failed: ${e}`); }
+    catch (e) { alert(`Clear captions failed: ${errText(e)}`); }
     finally { liveClear.disabled = false; liveFeed.invalidate(); afterMutate(); }
   });
 

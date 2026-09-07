@@ -142,15 +142,19 @@ public sealed record ResolveResult(
     SelectionVerdict Verdict)
 {
     /// <summary>
-    /// Build the per-device <see cref="TapConnectionOptions"/> for a meeting: each
+    /// Build the per-device <see cref="TapConnectionOptions"/> for one set of taps: each
     /// resolved device taps under its own <c>Identity</c>/<c>Name</c> while sharing the
     /// connection coordinates from <paramref name="baseOptions"/>
-    /// (host/port/tls/allow-self-signed/token) and routing into the one detached
-    /// <paramref name="session"/> — so the meeting is
-    /// isolated from anything else on the Recorder (per-bridge Sessions, ADR-0005).
+    /// (host/port/tls/allow-self-signed/token).
+    ///
+    /// <paramref name="session"/> is which session they route into, and it carries the
+    /// meeting/attached distinction whole: a detached id isolates a bracketed meeting from
+    /// anything else on the Recorder (per-bridge Sessions, ADR-0005), and <c>null</c> is an
+    /// attached tap, which <see cref="TapConnectionOptions.BuildTapUri"/> spells by omitting
+    /// the query parameter so the Recorder routes it to its current session (ADR-0025).
     /// </summary>
     public IReadOnlyList<TapConnectionOptions> ToTapOptions(
-        string session, TapConnectionOptions baseOptions)
+        string? session, TapConnectionOptions baseOptions)
     {
         ArgumentNullException.ThrowIfNull(baseOptions);
         return Resolved

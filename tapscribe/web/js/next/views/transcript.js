@@ -570,7 +570,7 @@ export function build(ctx) {
     diarizing = true;
     mutateButton(dzBtn, () => postJson(`/api/sessions/${encodeURIComponent(sid)}/diarize`, {}), {
       afterMutate: () => { diarizing = false; afterMutate(); },
-      failMessage: (e) => `Diarize failed: ${e}`,
+      failMessage: (e) => `Diarize failed: ${errText(e)}`,
     });
   });
 

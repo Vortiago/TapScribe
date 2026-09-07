@@ -245,7 +245,7 @@
 `tapscribe/install_picker.py` resolves *model* extras (`whisper-cpu`,
 `parakeet-mlx`, …). Two runtime dependencies fall outside that matrix
 and are wired into `tapscribe/preflight.py` instead, which
-`start.sh` / `start.ps1` and the Bundle's Launcher all run after the
+`start.sh` / `start.ps1` and the Bundle's tray all run after the
 picker:
 
 - **`onnxruntime`** — the per-tap TapScribe gate (`gate_kind="tapscribe"`,
@@ -346,7 +346,7 @@ If a new runtime dep with the same shape (system binary, or optional
 Python package gated by a lazy import) lands, add it as a `Step` in
 `tapscribe/preflight.py`'s `plan_steps` — NOT inline in `start.sh` /
 `start.ps1`. Operators still hit it once on bring-up instead of
-mid-request, but the Windows Bundle's Launcher has no `start.ps1` to
+mid-request, but the Windows Bundle's tray has no `start.ps1` to
 inherit it from and runs `python -m tapscribe.preflight` instead
 (ADR-0015), so a shell-inlined probe silently never runs there.
 `plan_steps` is pure and its probes are injected, so a new step is
@@ -406,7 +406,7 @@ Common trip-wires and how to avoid them:
   `tapscribe.install_target.pip_install_argv` (every pip invocation —
   checkout / Bundle wheel / pinned PyPI, ADR-0015),
   `tapscribe.preflight.plan_steps` (bring-up steps), and
-  `RecorderCommand` (the Bundle Launcher's children). Each value is
+  `RecorderCommand` (the Bundle tray's children). Each value is
   `str()`-converted at the call site.
 - **Never widen `query-filters` in the CodeQL config to silence a new
   finding.** Every exclude has a written justification block; the bar

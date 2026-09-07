@@ -15,8 +15,7 @@ internal sealed class FakeTrayView : ITrayView
     private readonly object _lock = new();
     private readonly List<(string Title, string Message, NoticeKind Kind)> _notices = [];
     private StatusView? _status;
-    private bool _canStart = true;
-    private bool _canEnd;
+    private TrayCommands _commands = TrayCommands.Idle;
 
     /// <summary>The status the tray is currently showing, or null before the first render.</summary>
     public StatusView? LastStatus
@@ -30,15 +29,19 @@ internal sealed class FakeTrayView : ITrayView
         get { lock (_lock) return [.. _notices]; }
     }
 
-    public bool CanStart
+    /// <summary>Which commands the menu is offering.</summary>
+    public TrayCommands Commands
     {
-        get { lock (_lock) return _canStart; }
+        get { lock (_lock) return _commands; }
     }
 
-    public bool CanEnd
-    {
-        get { lock (_lock) return _canEnd; }
-    }
+    public bool CanStart => Commands.CanStart;
+
+    public bool CanEnd => Commands.CanEnd;
+
+    public bool CanConnect => Commands.CanConnect;
+
+    public bool CanDisconnect => Commands.CanDisconnect;
 
     public void ShowStatus(StatusView status)
     {
@@ -65,14 +68,11 @@ internal sealed class FakeTrayView : ITrayView
         lock (_lock) _cleared++;
     }
 
-    public void SetMenuState(bool canStart, bool canEnd)
+    public void SetCommands(TrayCommands commands)
     {
-        lock (_lock)
-        {
-            _canStart = canStart;
-            _canEnd = canEnd;
-        }
+        lock (_lock) _commands = commands;
     }
+
 
     /// <summary>Every meeting window opened, in order. A window per call is the contract, so
     /// the count is how a test says "the summary opened once" or "re-opening a past meeting
@@ -238,6 +238,8 @@ internal sealed class RuntimeHarness : IDisposable
 {
     private readonly TaskCompletionSource<string> _mint = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _mintReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<ConnectionTestResult> _preflight = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _preflightReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly string _directory =
         Path.Join(Path.GetTempPath(), "tapscribe-runtime-" + Guid.NewGuid().ToString("N"));
 
@@ -270,6 +272,29 @@ internal sealed class RuntimeHarness : IDisposable
     public Exception? MintError { get; init; }
 
     public void CompleteMint(string sessionId = SessionId) => _mint.TrySetResult(sessionId);
+
+    /// <summary>Completes once the runtime has run the attached tap's pre-flight and is
+    /// waiting. The Connect-side twin of <see cref="MintReached"/>.</summary>
+    public Task PreflightReached => _preflightReached.Task;
+
+    /// <summary>Whether the pre-flight answers immediately (the default) or parks until
+    /// <see cref="CompletePreflight"/>: the seam that holds a Connect in flight.</summary>
+    public bool HoldPreflight { get; init; }
+
+    /// <summary>What the pre-flight answers with. Default is reachable and accepted; a test
+    /// models an unreachable Recorder or a refused token by handing back a non-Ok result,
+    /// which is how the real <see cref="ConnectionTester"/> reports both — it returns them
+    /// rather than throwing, so <see cref="PreflightError"/> is a different thing.</summary>
+    public ConnectionTestResult PreflightResult { get; init; } =
+        new(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: true, TokenError: null);
+
+    /// <summary>When set, the pre-flight throws it instead of answering: the transport
+    /// failures <see cref="ConnectionTester.TestAsync"/> does not catch, plus the timeout.
+    /// </summary>
+    public Exception? PreflightError { get; init; }
+
+    public void CompletePreflight(ConnectionTestResult? result = null) =>
+        _preflight.TrySetResult(result ?? PreflightResult);
 
     /// <summary>
     /// Mint through a real <see cref="ControlClient"/> at the settings' port, instead of handing
@@ -374,6 +399,15 @@ internal sealed class RuntimeHarness : IDisposable
         Devices = [],
     };
 
+    /// <summary>Settings whose End drains and closes the taps but fires no pipeline, so a
+    /// lifecycle test runs with no Recorder in the picture at all.</summary>
+    public static BridgeSettings NoProcessOnEnd()
+    {
+        BridgeSettings settings = DefaultSettings();
+        settings.ProcessOnEnd = false;
+        return settings;
+    }
+
     /// <summary>Register a device the enumerator will report and hand out a capture for.
     /// <paramref name="capture"/> is for a test that needs a scripted one (a start that throws,
     /// a detach that throws) rather than the plain one built here.</summary>
@@ -414,6 +448,15 @@ internal sealed class RuntimeHarness : IDisposable
                 return SessionId;
             return await _mint.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         },
+        async (_, cancellationToken) =>
+        {
+            _preflightReached.TrySetResult();
+            if (PreflightError is not null)
+                throw PreflightError;
+            if (!HoldPreflight)
+                return PreflightResult;
+            return await _preflight.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        },
         SettingsStore,
         StateStore,
         HistoryStore);
@@ -451,6 +494,25 @@ internal sealed class RuntimeHarness : IDisposable
         Task? start = runtime.StartTask;
         Assert.NotNull(start);
         await start.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    /// <summary>Await the in-flight Connect, on the same terms as
+    /// <see cref="StartSettledAsync"/>.</summary>
+    public static async Task ConnectSettledAsync(BridgeRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        Task? connect = runtime.ConnectTask;
+        Assert.NotNull(connect);
+        await connect.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    /// <summary>Await the in-flight Disconnect, on the same terms.</summary>
+    public static async Task DisconnectSettledAsync(BridgeRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        Task? disconnect = runtime.DisconnectTask;
+        Assert.NotNull(disconnect);
+        await disconnect.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
     }
 
     /// <summary>Await the in-flight End (or Resume) flow, on the same terms.</summary>

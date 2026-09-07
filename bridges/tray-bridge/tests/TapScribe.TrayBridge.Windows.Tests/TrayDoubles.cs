@@ -128,6 +128,8 @@ internal sealed class TrayHarness : IDisposable
         new BridgeDependencies(
             static () => new NoDevices(),
             static (_, _) => Task.FromResult("2026-08-10T09-00-00"),
+            static (_, _) => Task.FromResult(
+                new ConnectionTestResult(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: true, TokenError: null)),
             SettingsStore,
             StateStore,
             HistoryStore),

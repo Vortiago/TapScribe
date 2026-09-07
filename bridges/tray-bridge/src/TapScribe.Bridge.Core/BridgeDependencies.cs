@@ -18,12 +18,18 @@ namespace TapScribe.Bridge.Core;
 /// <param name="MintDetachedSession">Mints the detached session a meeting taps into, doubling
 /// as the connection pre-flight: it throws when the Recorder is unreachable or refuses the
 /// token, before any device is opened.</param>
+/// <param name="CheckConnection">The pre-flight an ATTACHED tap needs (ADR-0025), which has no
+/// mint to get one free. Its own member rather than a fallback inside the runtime, for the
+/// same reason the mint is one: a test fakes an unreachable Recorder or a refused token
+/// without a socket. Production is
+/// <see cref="ConnectionTester.CheckSettingsAsync"/>.</param>
 /// <param name="SettingsStore">Persists the operator's settings on Save.</param>
 /// <param name="StateStore">The restart-resume state for an in-flight pipeline.</param>
 /// <param name="HistoryStore">The Past-meetings history (#168).</param>
 public sealed record BridgeDependencies(
     Func<IAudioDeviceEnumerator> OpenEnumerator,
     Func<BridgeSettings, CancellationToken, Task<string>> MintDetachedSession,
+    Func<BridgeSettings, CancellationToken, Task<ConnectionTestResult>> CheckConnection,
     BridgeSettingsStore SettingsStore,
     MeetingStateStore StateStore,
     MeetingHistoryStore HistoryStore);
