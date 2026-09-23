@@ -32,7 +32,7 @@ import tapscribe.strip_meta as strip_meta
 import tapscribe.voices as voices
 
 from . import config, tap_registry
-from .roster import read_roster
+from .roster import load_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
     FILENAME_ROSTER_JSON,
@@ -43,7 +43,7 @@ from .session_paths import (
     resolve_wav,
     stripped_dir,
 )
-from .sessions import read_session_meta, write_session_meta
+from .sessions import load_session_meta, read_session_meta, write_session_meta
 from .tap_mode import TAP_MODE_MULTI
 
 # Re-exported from tap_registry (the canonical home, #405). These names must
@@ -323,6 +323,15 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     if collisions:
         raise AbsorbCollision(f"filename collision(s) between sessions: {', '.join(collisions[:5])}")
 
+    # Fold inputs are read strictly BEFORE any destructive step: a file absorb
+    # cannot read stops the whole operation, not just its leg (#446). Nothing
+    # between here and the fold below writes meta or roster, so the happy path
+    # reads the same bytes the in-place reads used to.
+    tgt_meta = load_session_meta(target)
+    src_meta = load_session_meta(source)
+    src_roster = load_roster(source_dir)
+    tgt_roster = load_roster(target_dir) if src_roster else {}
+
     moved_wavs: list[str] = []
     moved_stripped: list[str] = []
 
@@ -367,8 +376,6 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
 
     # Merge speaker aliases. Target wins on conflict; source fills in keys
     # the target doesn't already have. Target's label is preserved as-is.
-    tgt_meta = read_session_meta(target)
-    src_meta = read_session_meta(source)
     src_aliases = src_meta.get("aliases") or {}
     tgt_aliases = dict(tgt_meta.get("aliases") or {})
     aliases_added: list[str] = []
@@ -414,10 +421,8 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     # the scalar fields — EXCEPT `wavs`, which unions: the source's WAVs now
     # physically live in the target, so the target's entry has to account for
     # them.
-    src_roster = read_roster(source_dir)
     roster_merged = 0
     if src_roster:
-        tgt_roster = read_roster(target_dir)
         for identity, src_entry in src_roster.items():
             tgt_entry = tgt_roster.get(identity)
             if tgt_entry is None:

@@ -25,6 +25,7 @@ import json
 import os
 import os.path
 import re
+import stat
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -148,17 +149,28 @@ def _coerce_session_meta(raw: Any) -> dict[str, Any]:
 
 def _read_roster_cached(sd: Path) -> dict[str, dict[str, Any]]:
     """session-roster.json through the stat-sig cache, coerced via the shared
-    `roster.coerce_roster` so the cached poll path and the uncached `read_roster`
+    `roster.coerce_roster` so the cached poll path and the uncached `load_roster`
     write path produce the identical shape. {} on None/non-dict."""
     return coerce_roster(_read_session_json_cached(sd / FILENAME_ROSTER_JSON))
+
+
+def load_session_meta(session: str) -> dict[str, Any]:
+    """The per-session meta, read STRICTLY for merge-on-write callers: a failed
+    read RAISES rather than reading as `{}`, so a write never starts from empty
+    over a file it merely could not see (#446). Missing or torn → `{}`."""
+    return _coerce_session_meta(_read_json_strict(session_meta_path(session)))
 
 
 def read_session_meta(session: str) -> dict[str, Any]:
     """Return the per-session metadata dict: operator-editable display
     label, speaker aliases, and per-session batch prompt/hotwords
     overrides. Missing or unreadable → {} (caller can treat as no
-    overrides). Non-string fields are dropped silently."""
-    return _coerce_session_meta(_read_json_or_none(session_meta_path(session)))
+    overrides). Non-string fields are dropped silently. Merge-on-write
+    callers use `load_session_meta`, which raises on a failed read."""
+    try:
+        return load_session_meta(session)
+    except OSError:
+        return {}
 
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
@@ -173,9 +185,11 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
 
     Atomic via `atomic_write_text` so a crashed write never leaves a
     torn JSON file (which `_read_json_or_none` would silently swallow,
-    losing the operator's label + aliases + overrides all at once)."""
+    losing the operator's label + aliases + overrides all at once). The base
+    read is strict (`load_session_meta`), so a failed read RAISES instead of
+    merging onto `{}` and overwriting the fields it could not see (#446)."""
     session_dir = create_session_dir(session)
-    existing = read_session_meta(session)
+    existing = load_session_meta(session)
     allowed = {"aliases", "languages", "voices", *_META_STRING_FIELDS}
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
@@ -401,36 +415,52 @@ def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def _read_json_or_none(path: Path) -> Any:
-    """Parse `path` as JSON. Returns None when the file is missing,
-    unparseable, or sits outside RECORDINGS_DIR — `gather_sessions`
-    tolerates per-WAV transcripts going stale without breaking the
-    dashboard listing.
+def _read_json_strict(path: Path) -> Any:
+    """Parse `path` as JSON, separating "nothing here" from "I could not read
+    it": missing or torn (not valid JSON) → None, but every OTHER `OSError`
+    (EACCES, EIO, EMFILE) RAISES, so a read-modify-write cannot merge onto `{}`
+    over a file it merely failed to see (#446). A path outside RECORDINGS_DIR →
+    None.
 
-    The containment check is defense-in-depth: every caller already
-    passes a path derived from a validated session, but this second
-    layer makes the safety property local and visible to static
-    analysis, so a future refactor that bypasses the route-level
-    validation can't silently leak the function as an arbitrary
-    file-reader."""
-    # Inline the realpath + startswith sanitiser (canonical CodeQL
-    # `py/path-injection` form) so taint analysis sees the check at the
-    # point of file access. Use the realpath string `real` directly in
-    # subsequent os.path.* and open() calls — CodeQL flows the sanitiser
-    # property through the `real` variable but not through a re-wrapped Path.
+    The containment check is inlined at the point of file access (the canonical
+    CodeQL `py/path-injection` form): the realpath string `real` flows straight
+    into `os.stat` and `open`, so taint analysis sees the guard there. Every
+    caller already passes a `session_paths`-resolved dir, so it is defense-in-
+    depth, but keeping it local means a refactor that bypasses route-level
+    validation can't silently leak this as an arbitrary file-reader."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         real = os.path.realpath(path)
-    except (OSError, ValueError):
+    except ValueError:
+        # An embedded NUL makes the path malformed, not unreadable.
         return None
     if real != root and not real.startswith(root + os.sep):
         return None
-    if not os.path.isfile(real):
+    try:
+        st = os.stat(real)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        # A directory or FIFO is not a JSON file; answer "nothing here" as the
+        # old `isfile` fast path did, so a FIFO can never block the poll.
         return None
     try:
         with open(real, encoding="utf-8") as fh:
             return json.load(fh)
-    except (OSError, ValueError):
+    except ValueError:
+        return None
+
+
+def _read_json_or_none(path: Path) -> Any:
+    """`_read_json_strict` made lenient: any `OSError` → None. This is the
+    primitive the poll funnel (`_read_session_json_cached`) and
+    `repoint_voice_person`'s walk call use — a bad file must degrade to None,
+    never crash a tick. Returns None when the file is missing, unparseable, or
+    sits outside RECORDINGS_DIR. The containment guard lives at the strict sink
+    above."""
+    try:
+        return _read_json_strict(path)
+    except OSError:
         return None
 
 
