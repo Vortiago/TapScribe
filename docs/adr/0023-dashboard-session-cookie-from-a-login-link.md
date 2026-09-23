@@ -25,7 +25,7 @@ The cookie comes from a [login link](../../CONTEXT.md#login-link):
    which can log it, where `.auth-password` sits in one file behind file
    permissions. The tray opens the browser immediately, so mint-to-spend is
    sub-second and 60 s costs nothing.
-3. `GET /login?k=<token>` spends it, sets the cookie, and 302s to `/` so the
+3. `GET /login?k=<token>` spends it, sets the cookie, and 303s to `/` so the
    token leaves the address bar. Exact `(method, path)` in
    `AUTH_EXEMPT_ROUTES` — it authenticates by spending the token. A spent or
    expired token renders a short HTML page ("this link is used up — get a fresh
@@ -49,10 +49,19 @@ The cookie comes from a [login link](../../CONTEXT.md#login-link):
 the tray is the only mint site, so there is one TTL and no link an operator can
 reach long after it was made.
 
-`basic_auth_middleware` omits `WWW-Authenticate` on a 401 when the request
-carried a session cookie. Otherwise a Recorder restart turns the dashboard's
-500 ms `/api/state` poll into a native Basic dialog, which is exactly the
-prompt the login link removes.
+`basic_auth_middleware` leaves `WWW-Authenticate` off a 401 for a request that
+is not a top-level navigation and either carried a session cookie or is marked
+by the browser as its own background fetch (`Sec-Fetch-Mode` other than
+`navigate`). A navigation is still challenged, and has a dead cookie cleared so
+the Basic credentials it prompts for are the ones used; so is a client that
+sends neither (curl). Otherwise a Recorder restart turns the dashboard's 500 ms
+`/api/state` poll into a native Basic dialog, which is exactly the prompt the
+login link removes — and keying the exemption on the cookie alone is not
+enough: once a challenged navigation in another tab has cleared the dead
+cookie, the open tab's poll carries none, and every one of its 401s would
+re-pop the dialog after every Cancel. Where the browser sends no Fetch Metadata
+at all (a plain-http LAN origin), a navigation is recognised by its
+`Accept: text/html`.
 
 ## Why not default a co-located Recorder to `--no-auth`
 
@@ -91,7 +100,11 @@ SameSite scoping ignores ports, so a hostile page on another localhost port can
 still fire credentialed simple-POSTs (writes execute; the response stays
 unreadable). Cached Basic credentials have the same exposure today, so the
 cookie is no worse — but state-changing routes get an `Origin` check, which is
-the cheap answer to both.
+the cheap answer to both. An `Origin: null` passes it only beside
+`Sec-Fetch-Site: same-origin`: under the `no-referrer` policy `app.py` serves,
+a browser sends `null` for the dashboard's OWN no-cors writes (a form post, a
+beacon in Gecko and WebKit), while a hostile page on another port that sends
+`null` is `same-site` at best, and `Sec-Fetch-Site` is a header no page can set.
 
 `SameSite=Strict` over `Lax` is deliberate: it costs a cookie on
 web-page-initiated navigation to the dashboard (a link in a wiki or a chat app

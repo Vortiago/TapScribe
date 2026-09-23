@@ -233,14 +233,28 @@ export const sessionFiles = createResource(
 export const WAVE_PEAK_BINS = 800;
 
 /**
+ * `remember-error` for every failure except a 401. A 401 is the tab being signed
+ * out — the session cookie died with the Recorder (ADR-0023) — which says nothing
+ * about the file, so it is paced like `retry-next-poll` instead: silent (the
+ * signed-out cue already says why), and asked again once the tab is signed back
+ * in. Remembered, it pinned "401 Authentication required" on a WAV the operator
+ * picked during the spell for as long as the tab stayed open.
+ * @param {unknown} err
+ * @returns {"retry-next-poll" | "remember-error"}
+ */
+const rememberUnlessSignedOut = (err) =>
+  err instanceof HttpError && err.status === 401 ? "retry-next-poll" : "remember-error";
+
+/**
  * Server-computed waveform peaks for one WAV, cached per (session, name,
  * source, sig) — sig is the WAV's byte size. Resolves the fixed-size downsample.
  *
  * `remember-error`, and NO hold: an unreadable WAV has no peaks, so re-asking
  * every poll tick for as long as the operator sits on the stage answers nothing —
  * the canvas shows the reason instead, until the byte size (a new key) changes.
- * Peaks belong to one (WAV, size); an older version of them would be the wrong
- * picture, not a stale one.
+ * Except a 401, which is about the tab rather than the file (see
+ * `rememberUnlessSignedOut`). Peaks belong to one (WAV, size); an older version
+ * of them would be the wrong picture, not a stale one.
  */
 export const wavePeaks = createResource(
   (
@@ -257,7 +271,7 @@ export const wavePeaks = createResource(
       fetch(url, { cache: "no-store" }).then(_unwrap)
     );
   },
-  { onFailure: "remember-error" },
+  { onFailure: rememberUnlessSignedOut },
 );
 
 /**
@@ -265,9 +279,9 @@ export const wavePeaks = createResource(
  * name, sig) — callers pass the session's stripped_at stamp as sig so a
  * re-strip busts the key. Resolves null when the wav has no committed cut.
  *
- * `remember-error` for the same reason as the peaks beside it (the sidecar either
- * parses or it doesn't), and no hold: a cut belongs to one `stripped_at`, so a
- * previous strip's spans would overlay the wrong picture.
+ * `remember-error` (401 aside) for the same reason as the peaks beside it (the
+ * sidecar either parses or it doesn't), and no hold: a cut belongs to one
+ * `stripped_at`, so a previous strip's spans would overlay the wrong picture.
  */
 export const wavStripMeta = createResource(
   (/** @type {string} */ session, /** @type {string} */ name, /** @type {string} */ sig) =>
@@ -276,7 +290,7 @@ export const wavStripMeta = createResource(
     /** @type {Promise<import('./types.js').WavStripMeta | null>} */ (
       getJson(`/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`)
     ),
-  { onFailure: "remember-error" },
+  { onFailure: rememberUnlessSignedOut },
 );
 
 /**

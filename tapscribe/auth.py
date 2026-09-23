@@ -56,8 +56,40 @@ def _is_cross_origin(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
         return False
+    if origin == "null":
+        # The app serves `Referrer-Policy: no-referrer`, under which a browser
+        # serialises a same-origin write that is NOT in cors mode as `Origin: null`
+        # (the Fetch spec's "append a request Origin header"): the dashboard's own
+        # client-error beacon in Gecko and WebKit, a native <form method=post> in
+        # every engine. An opaque cross-site initiator (a sandboxed frame, a data:
+        # page) also says `null`, so the browser's own `Sec-Fetch-Site` — a header a
+        # page cannot set — is what tells the two apart.
+        return request.headers.get("sec-fetch-site") != "same-origin"
     base = urlsplit(str(request.base_url))
     return origin != f"{base.scheme}://{base.netloc}"
+
+
+def _is_navigation(request: Request) -> bool:
+    """Whether the browser will RENDER this answer as a page.
+
+    `Sec-Fetch-Dest` when the browser sent Fetch Metadata. It sends none to an
+    origin that is not potentially trustworthy — plain http to a LAN address, the
+    `--host 0.0.0.0` topology — nor do older engines, so there a top-level
+    navigation is recognised by asking for HTML, which `fetch()` and subresources
+    never do.
+    """
+    dest = request.headers.get("sec-fetch-dest")
+    if dest is not None:
+        return dest == "document"
+    return "text/html" in (request.headers.get("accept") or "")
+
+
+def _is_background_fetch(request: Request) -> bool:
+    """Whether a browser sent this on the page's behalf rather than to render it:
+    Fetch Metadata present, and not a navigation. The dashboard's poll, its lazy
+    bodies and its module imports all answer to this."""
+    mode = request.headers.get("sec-fetch-mode")
+    return mode is not None and mode != "navigate"
 
 
 def utf8_compare_digest(a: str, b: str) -> bool:
@@ -199,8 +231,13 @@ async def basic_auth_middleware(request: Request, call_next):
     # issued it. So a navigating request is challenged, and its dead cookie is
     # cleared on the way out so it stops being replayed at every later request
     # (including at a DIFFERENT Recorder on another port, which never issued it).
-    navigating = request.headers.get("sec-fetch-dest") == "document"
-    quiet = cookie is not None and not navigating
+    #
+    # And a browser's BACKGROUND request is never challenged, cookie or not. A
+    # navigation elsewhere clears the dead cookie (below), after which a still-open
+    # tab's poll carries none — and a challenged fetch pops the native dialog on
+    # that tab, every poll, after every Cancel. The dialog belongs to a navigation.
+    navigating = _is_navigation(request)
+    quiet = not navigating and (cookie is not None or _is_background_fetch(request))
     realm_header = {} if quiet else {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
     clear_cookie = cookie is not None and navigating
 

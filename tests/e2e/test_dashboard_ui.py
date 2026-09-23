@@ -8036,9 +8036,11 @@ async def test_login_link_signs_the_browser_in_without_an_auth_dialog(
             page = await context.new_page()
 
             # Any 401 reaching the page would mean the cookie was not accepted —
-            # and in a real browser it is what pops the dialog.
+            # and in a real browser it is what pops the dialog. On the CONTEXT, not
+            # the page: the grace-window re-spend and the dead link below open tabs
+            # of their own, and a page-scoped collector would never see them.
             unauthorized: list[str] = []
-            page.on(
+            context.on(
                 "response",
                 lambda r: unauthorized.append(f"{r.status} {r.url}") if r.status == 401 else None,
             )
@@ -8146,7 +8148,12 @@ async def test_a_link_signed_in_dashboard_can_still_write(
             )
 
             await page.goto(base + link, wait_until="domcontentloaded")
-            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            # Not `goto(base + "/#sessions")`: the link already landed on `/`, so that
+            # is a same-document fragment change, and the hash is read ONCE at boot
+            # (no hashchange listener — see `_goto_stage`). It only worked when it
+            # beat boot's top-level await. `gotoView` is exposed once boot is done.
+            await page.wait_for_function("() => typeof window.gotoView === 'function'", timeout=10000)
+            await page.evaluate("() => window.gotoView('sessions')")
             await page.locator(row).wait_for(state="visible", timeout=10000)
 
             await page.locator(f'{row} [data-slot="rename"]').fill("Quarterly Planning")
@@ -8283,5 +8290,117 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
                 }""",
                 timeout=15000,
             )
+        finally:
+            await browser.close()
+
+
+async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
+    running_recorder_auth_on: RunningRecorder,
+) -> None:
+    """The rest of a signed-out spell, beyond the cue.
+
+    Two things the cue alone does not cover. (1) A NAVIGATION in another tab is
+    challenged and has its dead cookie cleared, after which this tab's poll carries
+    no cookie at all; its 401 must still come without `WWW-Authenticate`, or the
+    browser pops the native Basic dialog on this tab every poll, after every
+    Cancel. (2) Recovery is more than clearing the cue: a body fetched DURING the
+    spell failed with that 401. Under `remember-error` (a WAV's peaks) it was kept
+    as if it were a property of the file, so the waveform said "401 Authentication
+    required" long after a fresh link signed the tab back in; and a retry is only
+    ever collected by a render, which the idle 304 polls after recovery skip. So:
+    the 401 is not the WAV's error, and the WAV is drawn once the tab is back —
+    without the operator touching anything, and without rebuilding the view.
+    """
+    rec = running_recorder_auth_on.recorder
+    base = running_recorder_auth_on.base_url
+    password = rec.auth.value
+
+    sid = "2025-06-01T10-00-00Z"
+    first, second = f"{sid}_Ana_ana_0000aaaa.wav", f"{sid}_Bo_bo_0000bbbb.wav"
+    _seed_wav_session(rec, sid, names=[first, second], seconds=0.4)
+
+    async def mint() -> str:
+        async with httpx.AsyncClient() as client:
+            answer = await client.post(base + "/api/login-link", auth=("admin", password))
+        assert answer.status_code == 200, answer.text
+        return str(answer.json()["path"])
+
+    wave_msg = '#viewRoot [data-slot="msg"]'
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            await page.goto(base + await mint(), wait_until="domcontentloaded")
+            await _focus_session_view(page, sid, "recordings")
+            await page.locator(f'#viewRoot [data-wav="{second}"]').wait_for(state="visible", timeout=15000)
+
+            # What a Recorder restart does to a session (see the test above).
+            _app.state.login_links = LoginLinks()
+            await page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('#errbar');
+                    return !!el && !el.hidden && el.textContent.includes('Signed out');
+                }""",
+                timeout=15000,
+            )
+
+            # Mid-spell, the operator picks the other WAV: its peaks are a NEW key,
+            # fetched now, and refused — which is the TAB's failure, not the file's,
+            # so the canvas waits rather than wearing it.
+            async with page.expect_response(
+                lambda r: "/peaks" in r.url and second in r.url, timeout=10000
+            ) as refused:
+                await page.locator(f'#viewRoot [data-wav="{second}"] [data-wav-select]').click()
+            assert (await refused.value).status == 401
+            await page.wait_for_function(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    return !!el && !el.hidden && el.textContent.includes('loading');
+                }""",
+                arg=wave_msg,
+                timeout=10000,
+            )
+            # A stamp on the view, to prove recovery RENDERS it rather than rebuilding
+            # it (a rebuild would tear down whatever the operator had in hand).
+            await page.evaluate(
+                "() => { document.querySelector('#viewRoot').firstElementChild.dataset.stamp = 'kept'; }"
+            )
+
+            # (1) A navigation elsewhere clears the dead cookie...
+            other = await context.new_page()
+            await other.goto(base + "/", wait_until="domcontentloaded")
+            await other.close()
+            left = [c["name"] for c in await context.cookies() if c["name"].startswith("tapscribe_session_")]
+            assert left == [], left
+
+            # ...and this tab's next polls, cookie-less now, are still not challenged.
+            for _ in range(2):
+                polled = await page.wait_for_event(
+                    "response", lambda r: r.url.endswith("/api/state"), timeout=10000
+                )
+                assert polled.status == 401, polled.status
+                assert "www-authenticate" not in polled.headers, polled.headers
+
+            # (2) A fresh link signs the tab back in; the cue clears, and the WAV
+            # picked during the spell is asked again and drawn.
+            fresh = await context.new_page()
+            await fresh.goto(base + await mint(), wait_until="domcontentloaded")
+            await fresh.close()
+            await page.wait_for_function(
+                "() => { const el = document.querySelector('#errbar'); return !!el && el.hidden; }",
+                timeout=15000,
+            )
+            await page.wait_for_function(
+                "(sel) => { const el = document.querySelector(sel); return !!el && el.hidden; }",
+                arg=wave_msg,
+                timeout=15000,
+            )
+            stamp = await page.evaluate(
+                "() => document.querySelector('#viewRoot').firstElementChild.dataset.stamp || null"
+            )
+            assert stamp == "kept", "recovery rebuilt the view instead of rendering it"
         finally:
             await browser.close()

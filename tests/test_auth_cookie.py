@@ -95,6 +95,48 @@ def test_a_navigation_with_a_dead_cookie_is_still_challenged(auth_on: TestClient
     assert cookie_name() in navigation.headers.get("set-cookie", "")
 
 
+def test_a_browser_background_request_is_never_challenged_even_without_a_cookie(auth_on: TestClient) -> None:
+    """A navigation in ANOTHER tab clears the dead cookie, so a still-open tab's
+    poll stops carrying one. Challenging that fetch pops the native dialog on the
+    open tab, and the poll re-asks every 500 ms — after every Cancel. Fetch Metadata
+    marks the request as the page's own, not one the browser will render."""
+    background = auth_on.get("/api/whatever", headers={"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"})
+
+    assert background.status_code == 401
+    assert "WWW-Authenticate" not in background.headers
+
+
+def test_a_navigation_without_fetch_metadata_is_still_recognised(auth_on: TestClient) -> None:
+    """Browsers send no Fetch Metadata to an origin that is not potentially
+    trustworthy (plain http to a LAN address), nor do older engines — there a
+    reload asks for HTML, and must still be challenged and have its dead cookie
+    cleared rather than render raw JSON forever."""
+    auth_on.cookies.set(cookie_name(), "stale")
+
+    navigation = auth_on.get("/api/whatever", headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
+
+    assert navigation.status_code == 401
+    assert "WWW-Authenticate" in navigation.headers
+    assert cookie_name() in navigation.headers.get("set-cookie", "")
+
+
+def test_a_same_origin_write_with_a_null_origin_passes(auth_on: TestClient) -> None:
+    """Under the app's `Referrer-Policy: no-referrer`, a same-origin write that is
+    not in cors mode carries `Origin: null` — the dashboard's own client-error
+    beacon in Firefox and Safari. `Sec-Fetch-Site`, which a page cannot set, is
+    what separates it from an opaque cross-site initiator saying the same."""
+    same = auth_on.post(
+        "/api/whatever",
+        auth=(_config.AUTH_USER, BASIC_PASS),
+        headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert same.status_code == 200
+
+    for opaque in ({"Origin": "null", "Sec-Fetch-Site": "cross-site"}, {"Origin": "null"}):
+        refused = auth_on.post("/api/whatever", auth=(_config.AUTH_USER, BASIC_PASS), headers=opaque)
+        assert refused.status_code == 403, opaque
+
+
 def test_a_cross_origin_write_is_refused_on_the_basic_scheme(auth_on: TestClient) -> None:
     """SameSite=Strict stops a cross-SITE page attaching the cookie, but site
     scoping ignores PORTS: a hostile page on another localhost port is same-site

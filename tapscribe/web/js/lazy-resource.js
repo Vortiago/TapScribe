@@ -96,6 +96,9 @@ function createLastGoodHold() {
   };
 }
 
+/** How a resource treats a rejected load — see `createResource`.
+ * @typedef {"retry-next-poll" | "remember-error"} FailurePolicy */
+
 /**
  * What one `resolve` call tells its caller.
  * @template T
@@ -116,8 +119,8 @@ function createLastGoodHold() {
  *               flight behind it. A caller whose render gate is keyed on the
  *               SIGNATURE must include this, or the swap from provisional to
  *               fresh content carries no signature change and is skipped.
- * - `error`   — the rejection from the last failed fetch, under the
- *               `remember-error` policy only; `null` otherwise.
+ * - `error`   — the rejection from the last failed fetch, when the
+ *               `remember-error` policy governs it; `null` otherwise.
  */
 
 /**
@@ -175,6 +178,13 @@ function _started(load, args) {
  *   property of the file (an unreadable WAV has no peaks, and asking again every
  *   500 ms for as long as the operator sits on the stage answers nothing).
  *
+ * The policy may also be a FUNCTION of the rejection, answering one of the two,
+ * for a resource where some failures are about the body and some are not: a
+ * signed-out 401 (the session cookie died with the Recorder, ADR-0023) says
+ * nothing about a WAV, and remembering it pinned "401 Authentication required"
+ * on the canvas for the rest of the tab — after the operator had signed back in.
+ * Still one decision per resource, declared where the resource is.
+ *
  * `holdKeyOf` turns on **stale-while-revalidate**: it names the thing the body
  * belongs to (the session), as opposed to `keyOf`, which names one VERSION of it
  * (session + signature). While a newer signature refetches, a resolve returns the
@@ -195,13 +205,15 @@ function _started(load, args) {
  * @param {(...args: A) => string} keyOf
  * @param {(...args: A) => Promise<T>} load
  * @param {{
- *   onFailure?: "retry-next-poll" | "remember-error",
+ *   onFailure?: FailurePolicy | ((err: unknown) => FailurePolicy),
  *   holdKeyOf?: (...args: A) => string,
  *   knownValue?: (...args: A) => T | undefined,
  * }} [policy]
  */
 export function createResource(keyOf, load, policy = {}) {
   const { onFailure = "retry-next-poll", holdKeyOf, knownValue } = policy;
+  /** The policy that governs ONE rejection. @param {unknown} err @returns {FailurePolicy} */
+  const policyFor = (err) => (typeof onFailure === "function" ? onFailure(err) : onFailure);
   /** @type {LastGoodHold<T>} */
   const lastGood = createLastGoodHold();
   /** Resource-wide fire counter — see `Entry.order`. Orders the responses for one
@@ -338,17 +350,17 @@ export function createResource(keyOf, load, policy = {}) {
       holdMaybe(args, entry.value, entry.order);
       return { value: entry.value ?? null, loading: false, stale: false, error: null };
     }
-    if (onFailure === "remember-error") {
-      // The failure stands until the signature changes: report it, fetch nothing.
-      const remembered = w.failed.get(key);
-      if (remembered !== undefined) {
+    const failure = w.failed.get(key);
+    if (failure !== undefined) {
+      if (policyFor(failure) === "remember-error") {
+        // The failure stands until the signature changes: report it, fetch nothing.
         const held = stale(...args);
-        return { value: held, loading: false, stale: held !== null, error: remembered };
+        return { value: held, loading: false, stale: held !== null, error: failure };
       }
-    } else if (w.failed.delete(key)) {
       // Check-AND-consume: a key whose last load failed skips this one resolve,
       // and the next one — the next poll tick — retries. A key change (a new
       // signature) is a different key and fetches at once.
+      w.failed.delete(key);
       return _pending(stale(...args));
     }
     const already = waiting.get(key);
@@ -367,7 +379,7 @@ export function createResource(keyOf, load, policy = {}) {
       const done = (/** @type {unknown} */ err) => {
         const landed = waiting.get(key) || new Set();
         waiting.delete(key);
-        const notify = err === undefined || onFailure === "remember-error";
+        const notify = err === undefined || policyFor(err) === "remember-error";
         for (const each of landed) {
           if (err !== undefined) { each.failed.set(key, err); _capCache(each.failed); }
           if (notify) {

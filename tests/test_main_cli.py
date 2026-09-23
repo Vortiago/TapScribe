@@ -102,8 +102,16 @@ def _restore_app_recorder(monkeypatch: pytest.MonkeyPatch):
 
 
 def _run_main(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    from tapscribe import config
     from tapscribe.__main__ import main
 
+    # `main()` stamps the bound port and the TLS flag straight onto `config` (the
+    # dashboard session cookie's name and `Secure` flag read them). Registered with
+    # monkeypatch first, so each is restored after the test: otherwise a `--tls` run
+    # leaks TLS_ENABLED=True into whatever runs next, and the login route then sets a
+    # Secure cookie that an http test client never sends back.
+    for name in ("PORT", "TLS_ENABLED"):
+        monkeypatch.setattr(config, name, getattr(config, name))
     monkeypatch.setattr(sys, "argv", ["python -m tapscribe", *argv])
     main()
 

@@ -138,7 +138,10 @@ def test_non_ascii_credentials_compare_without_crashing():
     here goes through `auth.utf8_compare_digest`, so a non-ASCII value answers
     False instead of raising `TypeError` out of `hmac.compare_digest`."""
     links, _ = store()
-    links.mint()
+    # A session has to EXIST for `validate` to compare against anything: with none
+    # issued it answers False from an empty scan and never reaches compare_digest,
+    # so the #194 regression this pins would pass unnoticed.
+    assert links.spend(links.mint())
 
     assert links.spend("kaffekopp-æøå") is None
     assert not links.validate("kaffekopp-æøå")

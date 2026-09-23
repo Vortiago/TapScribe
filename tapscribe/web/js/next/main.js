@@ -15,7 +15,7 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson, errText, HttpError } from "../api.js";
-import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
+import { loadTemplates, mount, pick, consumeDeferredRender, deferIfSelectionInside, interactionHeld, markDeferredRender, wireErrorBar } from "../templates.js";
 import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView, VIEWS, viewKey, isSessionKeyedCacheKey } from "./shell.js";
@@ -546,8 +546,12 @@ function renderAll(j) {
  * there would leave raw JSON and no way forward).
  */
 const SIGNED_OUT_CUE =
-  "Signed out — the Recorder restarted, and dashboard sessions do not survive it. " +
+  "Signed out — restarting the Recorder signs open dashboard tabs out. " +
   "Open the dashboard from the tray again, or reload this page and sign in with the password.";
+
+/** Whether the last poll answered 401 — so the next answered one knows it is a
+ * RECOVERY and renders what the spell left owed (see tick). */
+let signedOut = false;
 
 /**
  * Show or clear the signed-out cue.
@@ -581,10 +585,15 @@ function showSignedOut(on) {
   // flag version then both fails to restore the cue and refuses to clear the
   // message that displaced it.
   const ours = bar.textContent === SIGNED_OUT_CUE;
-  if (on && !ours) {
+  if (on === ours) return;
+  // An in-place per-tick write, so it holds while the operator is selecting in the
+  // bar (CLAUDE.md, ADR-0004) — copying the error it shows, or this cue. Every tick
+  // calls this again, so the held write lands on the first pass after the release.
+  if (deferIfSelectionInside(bar)) return;
+  if (on) {
     bar.textContent = SIGNED_OUT_CUE;
     bar.hidden = false;
-  } else if (!on && ours) {
+  } else {
     bar.textContent = "";
     bar.hidden = true;
   }
@@ -601,6 +610,23 @@ async function tick() {
     // Cleared on any answered poll, so a fresh link opened in another tab (which
     // sets a new cookie for this origin) recovers this tab on its next pass.
     showSignedOut(false);
+    // Back from a signed-out spell, and the cue is only half of recovering: a body
+    // a view asked for during the spell failed with that 401 and is owed a retry
+    // (api.js paces a 401 like `retry-next-poll` — skip one resolve, fetch on the
+    // next), and a retry is collected by a RENDER, which an idle 304 poll skips.
+    // So the recovering pass renders whatever the poll says, marks the tick-retry
+    // for the second pass the pacing needs, and reports a change so that pass
+    // comes at the fast cadence rather than after the spell's backoff.
+    const recovered = signedOut;
+    signedOut = false;
+    // The catalogs are fetched once, at boot; a tab first shown after a restart
+    // asked while signed out. Their reload rebuilds the views, which is boot's own
+    // move but would tear a focused control out from under the operator mid-session
+    // (ADR-0004), so it waits for a pass with nothing held.
+    if (catalogsOwed && !interactionHeld()) {
+      catalogsOwed = false;
+      loadModelCatalogs();
+    }
     // fetchState() reuses the SAME object on a 304 (api.js). When the poll
     // is a genuine no-op, skip the whole renderAll pass — the spine's
     // O(sessions) signature, the active view's own signature, and the
@@ -614,14 +640,21 @@ async function tick() {
     const unchanged = j === lastJson;
     lastJson = j;
     const wasDeferred = consumeDeferredRender();
-    const signal = { changed: !unchanged, active: stateHasActivity(j) };
-    if (unchanged && !wasDeferred) return signal;
+    const signal = { changed: !unchanged || recovered, active: stateHasActivity(j) };
+    if (unchanged && !wasDeferred && !recovered) return signal;
+    if (recovered) markDeferredRender();
     renderAll(j);
     return signal;
   } catch (e) {
     if (e instanceof HttpError && e.status === 401) {
+      signedOut = true;
       showSignedOut(true);
-      return null;
+      // A signal, not the null a transient failure returns: signed-out lasts until
+      // the operator acts, so an unattended tab backs off like any idle one (ADR-0013)
+      // instead of polling a 401 twice a second forever. Interaction still wakes it,
+      // and the visibility handler polls at once when they come back from the tab
+      // where they opened a fresh link.
+      return { changed: false, active: false };
     }
     const spineEl = $("spine");
     if (!spineEl.querySelector(".spine__head")) {
@@ -683,13 +716,22 @@ await Promise.all([
   warmEmptyState(),
 ]);
 
+/** Whether a catalog fetch was answered 401: the tab was signed out when it
+ * asked. The catalogs are fetched once, so without this a tab first shown after a
+ * Recorder restart offers empty engine and language pickers for its lifetime.
+ * Only a 401 — the one failure signing back in cures — so a catalog route that is
+ * failing on its own is not re-asked, with a view rebuild each time, forever. */
+let catalogsOwed = false;
+
 async function loadModelCatalogs() {
   try {
-    const [batchRes, liveRes, langRes] = await Promise.all([
+    const responses = await Promise.all([
       fetch("/api/models?context=batch", { cache: "no-store" }),
       fetch("/api/models?context=live", { cache: "no-store" }),
       fetch("/api/languages", { cache: "no-store" }),
     ]);
+    const [batchRes, liveRes, langRes] = responses;
+    catalogsOwed = responses.some((r) => r.status === 401);
     if (batchRes.ok) modelCatalog = await batchRes.json();
     if (liveRes.ok) liveModelCatalog = await liveRes.json();
     if (langRes.ok) languageCatalog = await langRes.json();
