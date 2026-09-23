@@ -164,8 +164,10 @@ public sealed class BridgeRuntime
             // filter (that method's own finally says so): an IOException out of
             // EndMeetingAsync — the exact shape DisconnectAsync catches around the same call —
             // used to skip this notice entirely, which is the one case it was written for.
-            // The exception still propagates; this only makes the cue unconditional.
-            if (tookOver && !started)
+            // The exception still propagates; this only makes the cue unconditional — except
+            // on the way out: a takeover that ended because the operator quit has nothing to
+            // tell them, and "Use Connect to live" would be advice for a tray that is exiting.
+            if (tookOver && !started && !Quitting())
                 _dispatcher.Post(() => _view.ShowNotice(
                     "The attached tap stopped too",
                     "Its taps were drained for the takeover, so nothing is streaming now. "
@@ -208,15 +210,14 @@ public sealed class BridgeRuntime
         bool handled = false;
         try
         {
-            if (before is not null)
-                await before().ConfigureAwait(false);
-
             OpenedTaps? opened =
-                await OpenTapsAsync(settings, failureTitle, preflight).ConfigureAwait(false);
+                await OpenTapsAsync(settings, failureTitle, before, preflight).ConfigureAwait(false);
             if (opened is null)
             {
                 handled = true;
-                return false; // the selection cannot open any tap, and OpenTapsAsync said so
+                // The selection cannot open any tap and OpenTapsAsync said so — or a Quit
+                // claimed the view while `before` ran, and teardown owns it from here.
+                return false;
             }
 
             // Ownership of the whole set transfers AT THE CALL: StartAll releases everything
@@ -334,7 +335,8 @@ public sealed class BridgeRuntime
     /// phase after it. Between the two there is no moment at which a capture or an enumerator
     /// belongs to the caller, so that method has nothing to hold, nothing to clear and no
     /// release of its own to get right. Null means the selection cannot open any tap and the
-    /// operator has already been told; a throw is the caller's to classify.
+    /// operator has already been told, or that a Quit claimed the view while
+    /// <paramref name="before"/> ran; a throw is the caller's to classify.
     /// </summary>
     /// <param name="failureTitle">The notice heading for a selection that cannot open —
     /// "Could not start meeting" or "Could not connect". The BODY is the verdict's own text,
@@ -343,8 +345,13 @@ public sealed class BridgeRuntime
     /// opened, answering the session the taps route into or <c>null</c> for the current one. It
     /// THROWS on failure — the mint's own documented contract — so a null answer is
     /// unambiguously "no session named" rather than "something went wrong".</param>
+    /// <param name="before">What the mode must do once the selection is known to resolve and
+    /// before anything reaches the Recorder or a device — Start's takeover drain — or null.</param>
     private async Task<OpenedTaps?> OpenTapsAsync(
-        BridgeSettings settings, string failureTitle, Func<CancellationToken, Task<string?>> preflight)
+        BridgeSettings settings,
+        string failureTitle,
+        Func<Task>? before,
+        Func<CancellationToken, Task<string?>> preflight)
     {
         IAudioDeviceEnumerator enumerator = _deps.OpenEnumerator();
         // The set is filled in place: TryAddSpec appends to this same list, so the release below
@@ -367,8 +374,46 @@ public sealed class BridgeRuntime
                 settings.EffectiveDevices, enumerator.List(), baseOptions.Identity);
             if (resolution.Verdict != SelectionVerdict.Ok)
             {
-                FailToIdle(failureTitle, DescribeVerdict(resolution.Verdict));
+                string why = DescribeVerdict(resolution.Verdict);
+                bool attachedLive;
+                lock (_gate)
+                    attachedLive = _attached is not null;
+                if (attachedLive)
+                    // A takeover refused BEFORE its drain: the attached tap is still feeding
+                    // the current session, so the menu goes back to ITS commands (Disconnect,
+                    // or Start once the selection is fixed) rather than to an idle one with no
+                    // way left to disconnect what is still streaming. The header says why; the
+                    // tap's next Utterance puts its own status back.
+                    _dispatcher.Post(() =>
+                    {
+                        ShowAttached();
+                        ApplyStatus(new TrayStatus.Error(why));
+                        _view.ShowNotice(failureTitle, why, NoticeKind.Warning);
+                    });
+                else
+                    FailToIdle(failureTitle, why);
                 return null;
+            }
+
+            // 1b) What this mode must do first: Start's takeover drains the attached taps.
+            //     AFTER the verdict, which is pure: a Start the selection alone rules out
+            //     must not end a working attached tap on the way to saying so — the drain is
+            //     not undoable. BEFORE the pre-flight and any device open, which is the
+            //     takeover's own order (drain, mint, start).
+            if (before is not null)
+            {
+                await before().ConfigureAwait(false);
+
+                // A Quit that landed during that drain. The drain was the part worth
+                // finishing — the attached taps' last Utterance is flushed — but minting a
+                // session nobody will record into, and opening devices only to close them at
+                // publish, is work for a shell that is going away. Null, like the verdict's
+                // hard stop, so the caller neither fails to idle nor publishes.
+                lock (_gate)
+                {
+                    if (_quitting)
+                        return null;
+                }
             }
 
             // 2) The Recorder round-trip, before any device is opened: an unreachable Recorder
@@ -542,10 +587,11 @@ public sealed class BridgeRuntime
             // The drain barrier, the same one End goes through: without it the last Utterance's
             // WAV is truncated and the Recorder strips and transcribes a cut-off file.
             await attached.Orchestrator.EndMeetingAsync().ConfigureAwait(false);
-            _dispatcher.Post(() => _view.ShowNotice(
-                "Disconnected",
-                "The recording is saved in the session it was streaming into.",
-                NoticeKind.Information));
+            if (!Quitting())
+                _dispatcher.Post(() => _view.ShowNotice(
+                    "Disconnected",
+                    "The recording is saved in the session it was streaming into.",
+                    NoticeKind.Information));
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or ExternalException)
         {
@@ -554,13 +600,28 @@ public sealed class BridgeRuntime
             // about a WAV the Recorder is on its way to stripping and transcribing. Said here
             // rather than left to the fire-and-forget task, which nobody observes: teardown
             // only ever reaches it through Task.WhenAny, which never rethrows.
-            _dispatcher.Post(() => _view.ShowNotice("Disconnected with errors", ex.Message, NoticeKind.Warning));
+            if (!Quitting())
+                _dispatcher.Post(() => _view.ShowNotice("Disconnected with errors", ex.Message, NoticeKind.Warning));
         }
         finally
         {
-            // The taps are gone on every path, so the menu goes back to idle on every path.
-            _dispatcher.Post(ResetIdle);
+            // The taps are gone on every path, so the menu goes back to idle on every path —
+            // unless a Quit claimed the view while the drain ran. QuitAsync waits on this
+            // drain with every command already off, and flipping them back to idle on the
+            // way out would undo its ShowBusy, the same rule RunTapsAsync's abandoned
+            // publish keeps.
+            if (!Quitting())
+                _dispatcher.Post(ResetIdle);
         }
+    }
+
+    /// <summary>Whether <see cref="QuitAsync"/> has begun. From then on teardown owns the
+    /// view, and a flow finishing in the background must not re-enable commands or post
+    /// notices into a tray that is going away.</summary>
+    private bool Quitting()
+    {
+        lock (_gate)
+            return _quitting;
     }
 
     /// <summary>One mode's devices, open and not yet streaming: the

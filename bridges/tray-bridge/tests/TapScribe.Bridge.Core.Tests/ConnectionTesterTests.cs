@@ -85,6 +85,25 @@ public class ConnectionTesterTests
         Assert.False(result.Ok);
     }
 
+    [Fact]
+    public async Task Test_ServerAcceptsThenClosesNormally_WhileRecordingIsPaused_ReportsTheTokenAccepted()
+    {
+        // routes/tap.py accepts the upgrade and then closes 1000 while recording is paused
+        // on the dashboard: the TAP is refused, the token is not. Read as a rejection, it
+        // sent the operator to re-enter a token that was fine, and Connect to live — which
+        // gates on this probe — refused to connect while a meeting's Start went ahead.
+        await using FakeRecorder server = await FakeRecorder.StartAsync(pausedClose: true);
+        using var http = new HttpClient();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var options = new TapConnectionOptions { Host = "127.0.0.1", Port = server.Port, Token = "tok" };
+
+        ConnectionTestResult result = await ConnectionTester.TestAsync(options, http, cts.Token);
+
+        Assert.True(result.Reachable);
+        Assert.True(result.TokenAccepted);
+        Assert.True(result.Ok);
+    }
+
     /// <summary>In-process Recorder stub: GET /health (status configurable) and a /tap WS that accepts or rejects.</summary>
     private sealed class FakeRecorder : IAsyncDisposable
     {
@@ -98,7 +117,8 @@ public class ConnectionTesterTests
             Port = port;
         }
 
-        public static async Task<FakeRecorder> StartAsync(int healthStatus = 200, bool rejectTap = false, bool acceptThenClose = false)
+        public static async Task<FakeRecorder> StartAsync(
+            int healthStatus = 200, bool rejectTap = false, bool acceptThenClose = false, bool pausedClose = false)
         {
             WebApplicationBuilder builder = WebApplication.CreateBuilder();
             builder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -135,6 +155,14 @@ public class ConnectionTesterTests
                     // Accept the upgrade, then immediately reject with 4401 — the
                     // "harder" rejection shape the probe must also detect.
                     await ws.CloseAsync((WebSocketCloseStatus)4401, "rejected after accept", CancellationToken.None);
+                    return;
+                }
+
+                if (pausedClose)
+                {
+                    // What routes/tap.py does while recording is paused on the dashboard:
+                    // accept the (authenticated) upgrade, then close NORMALLY.
+                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "recording paused by operator", CancellationToken.None);
                     return;
                 }
 

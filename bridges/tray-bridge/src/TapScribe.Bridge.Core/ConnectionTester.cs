@@ -156,10 +156,18 @@ public static class ConnectionTester
             // ConnectAsync threw above). Guard the other shape too: a server that
             // accepts then immediately closes must not read as "accepted". A close
             // within the window => rejected; silence => accepted.
+            //
+            // Except a NORMAL close. That is the Recorder refusing the TAP, not the
+            // token: it accepts the upgrade and then closes 1000 while recording is
+            // paused on the dashboard (routes/tap.py), which a bad token never gets
+            // far enough to see. Read as a rejection, it sent an operator whose token
+            // was fine to re-enter it — and, since Connect to live gates on this probe,
+            // refused to connect at all while a meeting's Start went ahead.
             bool closedByServer = await tap
                 .WaitForServerCloseAsync(TimeSpan.FromMilliseconds(400), cancellationToken)
                 .ConfigureAwait(false);
-            return closedByServer
+            bool tokenRefused = closedByServer && tap.CloseStatus != WebSocketCloseStatus.NormalClosure;
+            return tokenRefused
                 ? new ConnectionTestResult(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: false, TokenError: "the Recorder closed the tap immediately (token rejected)")
                 : new ConnectionTestResult(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: true, TokenError: null);
         }

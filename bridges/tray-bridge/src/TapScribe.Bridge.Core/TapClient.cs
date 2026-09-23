@@ -24,6 +24,11 @@ public sealed class TapClient : ITapConnection
 
     public WebSocketState State => _ws.State;
 
+    /// <summary>How the peer closed the socket, once it has; null while it is open. What
+    /// tells the probe a refused TOKEN (a 44xx close) from a refused TAP (the Recorder's
+    /// normal close while recording is paused) — see <see cref="ConnectionTester"/>.</summary>
+    public WebSocketCloseStatus? CloseStatus => _ws.CloseStatus;
+
     /// <summary>
     /// Open the WebSocket. Offers `tapscribe.v1.tap.&lt;token&gt;` when a token is
     /// configured; under --no-auth no subprotocol is offered. Throws
