@@ -24,7 +24,12 @@ def test_recorder_server_retries_past_a_port_taken_on_ipv6() -> None:
     server = RecorderServer(FastAPI())
     taken = server.port
 
-    blocker = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    # A kernel built without IPv6 refuses the socket itself (EAFNOSUPPORT), before
+    # the bind below gets a chance to — the same "can't reproduce here" case.
+    try:
+        blocker = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        pytest.skip("no IPv6 support on this host to reproduce the collision")
     try:
         try:
             blocker.bind(("::1", taken))
