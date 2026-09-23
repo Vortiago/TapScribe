@@ -128,7 +128,7 @@ def _coerce_voices(value: Any) -> dict[str, dict[str, str]]:
 def _coerce_session_meta(raw: Any) -> dict[str, Any]:
     """Coerce a raw session-meta dict into the standard shape: string-field
     projection, alias coercion, language normalisation. Shared by
-    `read_session_meta` (the uncached write-path caller) and the cached
+    `load_session_meta` (the strict write-path caller) and the cached
     path in `_describe_session` so both produce the identical result."""
     if not isinstance(raw, dict):
         return {}
