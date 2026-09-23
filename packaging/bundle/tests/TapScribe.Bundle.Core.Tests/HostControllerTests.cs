@@ -117,6 +117,28 @@ public class HostControllerTests
     }
 
     [Fact]
+    public void OnlyThisTraysOwnRunningRecorderIsTradedThePasswordForALoginLink()
+    {
+        // The mint POSTs this install's password to whatever answers the port. Unmanaged means
+        // that is not this tray's Recorder — another user's, a start.sh, anything at all — and
+        // while it is still coming up, or stopped, nothing on the port is known to be ours.
+        var world = new World { Host = { Manages = true } };
+        world.Controller.Start();
+        Assert.False(world.Controller.MayMintLoginLink, "minted while the Recorder was still coming up");
+
+        world.Controller.Report(RecorderState.Running, "up");
+        Assert.True(world.Controller.MayMintLoginLink);
+
+        world.Controller.Report(RecorderState.Stopped, "down");
+        Assert.False(world.Controller.MayMintLoginLink);
+
+        var elsewhere = new World { Host = { Manages = false } };
+        elsewhere.Controller.Start();
+        elsewhere.Controller.Report(RecorderState.Unmanaged, "already running from somewhere else");
+        Assert.False(elsewhere.Controller.MayMintLoginLink, "the password was offered to a Recorder that is not ours");
+    }
+
+    [Fact]
     public void EveryRenderArrivesThroughTheShellsMarshaller()
     {
         // State arrives on the supervisor's background thread and IHostView promises the

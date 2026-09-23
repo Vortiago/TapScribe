@@ -144,6 +144,29 @@ public class RuntimeCopyTests
     }
 
     [Fact]
+    public void ALaunchThatFindsItsRuntimeCurrent_StillRemovesWhatAnEarlierTidyUpLeft()
+    {
+        // "The next launch tries again" has to hold for the ORDINARY launch, which finds its
+        // own runtime intact and copies nothing. Otherwise an upgrade whose delete of the old
+        // runtime failed, or a copy of another version that died part-way, stays under the
+        // hidden data root for good.
+        using var world = new Fake();
+        BundleLayout layout = world.MacOS("1.4.0");
+        RuntimeCopy.Ensure(layout, world.Log);
+        string stale = Path.Join(layout.RuntimeRoot, "1.3.0");
+        string partial = Path.Join(layout.RuntimeRoot, "1.2.0" + RuntimeCopy.PartialSuffix);
+        Directory.CreateDirectory(stale);
+        Directory.CreateDirectory(partial);
+
+        RuntimeCopyResult result = RuntimeCopy.Ensure(layout, world.Log);
+
+        Assert.Equal(RuntimeCopyOutcome.Current, result.Outcome);
+        Assert.False(Directory.Exists(stale), "a superseded runtime outlived a launch that was current");
+        Assert.False(Directory.Exists(partial), "another version's partial copy was never removed");
+        Assert.True(File.Exists(layout.Python));
+    }
+
+    [Fact]
     public void APartialIsNeverCountedAsTheSupersededRuntime()
     {
         // Otherwise an interrupted upgrade reports the PARTIAL's name as the version the

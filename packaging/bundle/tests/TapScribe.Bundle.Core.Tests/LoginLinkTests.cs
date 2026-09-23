@@ -88,6 +88,24 @@ public class LoginLinkTests
         Assert.Equal("http://localhost:8001/", Url(recorder));
     }
 
+    [Theory]
+    [InlineData("@evil.example/")]
+    [InlineData("//evil.example/")]
+    [InlineData("evil")]
+    public void AnAnswerThatIsNotAPathOnThisOriginIsNotPastedOntoTheUrl(string path)
+    {
+        // Concatenated as it came, "@evil.example/" turns "localhost:8001" into the userinfo
+        // of another host: an open redirect out of the operator's own tray, for any listener
+        // that merely answered the port.
+        var recorder = new StubRecorder(HttpStatusCode.OK, $$"""{"path": "{{path}}"}""");
+        var log = new List<string>();
+
+        string url = Url(recorder, log: log.Add);
+
+        Assert.Equal("http://localhost:8001/", url);
+        Assert.Single(log);
+    }
+
     private static string Url(StubRecorder recorder, string password = "pw", Action<string>? log = null)
     {
         using var http = new HttpClient(recorder);

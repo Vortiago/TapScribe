@@ -141,14 +141,19 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _statusItem.Menu = _menu;
         ShowStatus(StatusView.For(new TrayStatus.Idle()));
 
+        // The host role FIRST. Its boot — possibly a 300 MB runtime copy (ADR-0024), then
+        // preflight and the Recorder — runs off the main thread and renders through the
+        // dispatcher, which always queues, so nothing it shows can overtake the Bridge's tap
+        // state below. Started after the Bridge half instead, it waited on the settings load,
+        // which is a Keychain read on this thread: after every update that read BLOCKS on a
+        // password prompt (an ad-hoc signature is a new identity to the Keychain, README), so
+        // the co-located Recorder did not even start until the operator answered a dialog
+        // about the Bridge's tap token.
+        _host?.Startup();
+
         var runtime = new BridgeRuntime(this, _dispatcher, _deps, _deps.SettingsStore.Load());
         _runtime = runtime;
         runtime.Startup(); // resume a pipeline a previous session left running
-
-        // After the Bridge half, deliberately: the tap state is what the operator watches, and
-        // the host role's first act may be a 300 MB runtime copy (ADR-0024). Its own Startup
-        // does that off the main thread, so this returns to the run loop either way.
-        _host?.Startup();
     }
 
     // ---- ITrayView ----------------------------------------------------------------------

@@ -128,7 +128,18 @@ public static class LoginLink
             // The Recorder answers a PATH, not an absolute URL: it cannot know the host and
             // port this tray reaches it on, and behind a proxy it would guess wrong.
             string? path = body.RootElement.GetProperty("path").GetString();
-            return string.IsNullOrEmpty(path) ? root + "/" : root + path;
+            if (string.IsNullOrEmpty(path))
+                return root + "/";
+            // A path on THIS origin, or nothing. Concatenated onto `root`, anything else
+            // re-points the URL — "@evil.example/" makes "localhost:8001" the userinfo of
+            // another host — which is an open redirect out of the operator's own tray for
+            // any listener that merely answered the port.
+            if (!path.StartsWith('/') || path.StartsWith("//", StringComparison.Ordinal))
+            {
+                log("login link: the answer was not a dashboard path — opening the dashboard signed out.");
+                return root + "/";
+            }
+            return root + path;
         }
         // InvalidOperationException and IOException are the shapes a 200 with the WRONG BODY
         // takes: `GetProperty` on a non-object root, `GetString()` on a non-string value, a

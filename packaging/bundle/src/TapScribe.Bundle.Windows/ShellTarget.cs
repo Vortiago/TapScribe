@@ -61,9 +61,14 @@ public static class ShellTarget
         // Mutable buffer: CreateProcess may write to lpCommandLine.
         var commandLine = new StringBuilder(CommandLineFor(target));
         var startup = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
+        // The forwarder by its full path, never by search. Without an application name,
+        // CreateProcess looks in the tray's own folder and its current directory BEFORE
+        // System32, and a per-user install's folder is the operator's to write to: a
+        // rundll32.exe planted there would be handed the live login link.
+        string forwarder = Path.Combine(Environment.SystemDirectory, "rundll32.exe");
 
         if (!CreateProcessW(
-                null, commandLine, IntPtr.Zero, IntPtr.Zero, false,
+                forwarder, commandLine, IntPtr.Zero, IntPtr.Zero, false,
                 CreateBreakawayFromJob | CreateNoWindow,
                 IntPtr.Zero, null, ref startup, out ProcessInformation info))
         {

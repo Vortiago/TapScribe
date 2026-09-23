@@ -85,7 +85,16 @@ public static class RuntimeCopy
 
         bool present = Directory.Exists(layout.RuntimeDirectory);
         if (present && IsIntact(layout))
+        {
+            // Current — but the tidy-up of an earlier launch may not have finished. The
+            // superseded runtime's delete can fail (caught below) or be cut short by a Quit
+            // or a crash, and a copy of another version can die part-way; each holds hundreds
+            // of megabytes to gigabytes under a data root Finder hides. Retried on every
+            // launch, since a launch that finds its own runtime intact is the ordinary one,
+            // and the only one most operators will ever have again after an upgrade.
+            RemoveLeftovers(layout, OtherVersions(layout), log);
             return new RuntimeCopyResult(RuntimeCopyOutcome.Current);
+        }
 
         // Runtimes for OTHER versions, kept until the new one is complete so a failed
         // upgrade leaves the operator with the Recorder they had. Read ONCE: the list is
@@ -120,7 +129,32 @@ public static class RuntimeCopy
 
         // Only now — the new runtime is complete, so the old ones have stopped being the
         // fallback they were being kept as.
-        foreach (string old in superseded)
+        RemoveLeftovers(layout, superseded, log);
+
+        return new RuntimeCopyResult(outcome, superseded.FirstOrDefault());
+    }
+
+    /// <summary>
+    /// Delete the superseded runtimes and every partial copy left under the runtime root.
+    /// Called once the runtime for THIS version is complete — after a copy, and on every
+    /// launch that finds it already intact, which is what makes "the next launch tries
+    /// again" true for a delete that failed or was interrupted.
+    ///
+    /// Partials of any version count: <see cref="OtherVersions"/> leaves them out on purpose
+    /// (a partial must never be reported as the version the operator came from), so without
+    /// this a crash marker from an earlier release's first launch would outlive every later
+    /// one. By the time this runs, this version's own partial has been renamed into place.
+    /// </summary>
+    private static void RemoveLeftovers(BundleLayout layout, IEnumerable<string> superseded, Action<string> log)
+    {
+        string[] partials = Directory.Exists(layout.RuntimeRoot)
+            ? [.. Directory.GetDirectories(layout.RuntimeRoot)
+                .Select(Path.GetFileName)
+                .OfType<string>()
+                .Where(name => name.EndsWith(PartialSuffix, StringComparison.Ordinal))]
+            : [];
+
+        foreach (string old in superseded.Concat(partials).ToList())
         {
             log($"runtime: removing the superseded {old}.");
             try
@@ -129,16 +163,14 @@ public static class RuntimeCopy
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
-                // Tidy-up, not the boot. The new runtime is complete and about to be used;
-                // letting a locked or unreadable file in the OLD one propagate would turn a
-                // successful upgrade into "TapScribe could not start", which is strictly
-                // worse than one stale folder under the data root. The next launch tries
-                // again, because a runtime for another version is still superseded.
+                // Tidy-up, not the boot. The runtime for this version is complete and about
+                // to be used; letting a locked or unreadable file in an OLD one propagate
+                // would turn a working launch into "TapScribe could not start", which is
+                // strictly worse than one stale folder under the data root. The next launch
+                // tries again.
                 log($"runtime: could not remove the superseded {old} ({error.Message}) — carrying on.");
             }
         }
-
-        return new RuntimeCopyResult(outcome, superseded.FirstOrDefault());
     }
 
     /// <summary>

@@ -1,8 +1,9 @@
-"""The three things the Bundle's C# tray says about the Recorder it boots.
+"""The things the Bundle's C# tray says about the Recorder it boots.
 
-`BundleDefaults.RecorderPort`, `BundleDefaults.DashboardUser` and the `"path"` key
-`LoginLink` reads out of `POST /api/login-link` are the Recorder's own values,
-re-typed on the other side of a language boundary. CLAUDE.md's rule for that shape
+`BundleDefaults.RecorderPort`, `BundleDefaults.DashboardUser`, the route and verb
+`LoginLink` mints at, the `"path"` key it reads out of the answer, and the name of
+the password file it reads are the Recorder's own values, re-typed on the other
+side of a language boundary. CLAUDE.md's rule for that shape
 is a mechanical lock-step check — `tools/stamp_tap_wire.py` plus
 `tests/test_tap_wire_contract.py` for the `/tap` wire — and these three had none.
 
@@ -20,8 +21,9 @@ of the answer; the expensive half is a C#-`SignedInUrl`-against-live-Python E2E,
 which needs a Recorder and a `dotnet` leg in the same job.
 
 A stamper is deliberately NOT the answer here. The `/tap` wire has four languages
-and a dozen constants restated in prose; this is three values in one direction, and
-a check that fails loudly costs a fraction of a generator nobody would run.
+and a dozen constants restated in prose; this is a handful of values in one
+direction, and a check that fails loudly costs a fraction of a generator nobody
+would run.
 """
 
 from __future__ import annotations
@@ -29,12 +31,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from route_inventory import registered_routes  # type: ignore[import-not-found]
+
 from tapscribe import config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_CORE = REPO_ROOT / "packaging" / "bundle" / "src" / "TapScribe.Bundle.Core"
 DEFAULTS = BUNDLE_CORE / "RecorderCommand.cs"
 LOGIN_LINK = BUNDLE_CORE / "LoginLink.cs"
+LAYOUT = BUNDLE_CORE / "BundleLayout.cs"
 
 
 def _const(source: Path, declaration: str) -> str:
@@ -74,4 +79,33 @@ def test_the_tray_reads_the_key_the_mint_route_writes() -> None:
     assert read.group(1) == written.group(1), (
         f"the mint writes {written.group(1)!r} and the tray reads {read.group(1)!r}; "
         "LoginLink treats the miss as 'could not mint' and opens the dashboard signed out"
+    )
+
+
+def test_the_tray_mints_at_a_route_the_recorder_serves() -> None:
+    # The same silent failure as a drifted username: a mint at a path or verb the Recorder
+    # does not serve answers 404/405, which LoginLink treats as "could not mint".
+    from tapscribe.app import app
+
+    minted = re.search(
+        r'new HttpRequestMessage\(HttpMethod\.(\w+),\s*new Uri\(root \+ "([^"]+)"\)\)',
+        LOGIN_LINK.read_text(encoding="utf-8"),
+    )
+    assert minted, "LoginLink.cs no longer builds its mint request in the shape this test reads"
+    verb, path = minted.group(1).upper(), minted.group(2)
+
+    served = {(method, row.path) for row in registered_routes(app) for method in row.methods}
+    assert (verb, path) in served, (
+        f"the tray mints with {verb} {path}, which the Recorder does not serve; every "
+        "Open dashboard would fall back to the signed-out page with nothing in any log "
+        "but a status code"
+    )
+
+
+def test_the_tray_reads_the_password_file_the_recorder_writes() -> None:
+    # A Bundle's Recorder runs with BASE_DIR = the tray's data directory, so the file name
+    # is the whole of the contract. Drift here is a password lookup that reports "missing"
+    # forever, and both Open dashboard and Copy password quietly degrade.
+    assert _const(LAYOUT, "string PasswordFileName") == f'"{config.AUTH_PASSWORD_FILE.name}"', (
+        "BundleLayout.PasswordFileName and config.AUTH_PASSWORD_FILE have drifted"
     )

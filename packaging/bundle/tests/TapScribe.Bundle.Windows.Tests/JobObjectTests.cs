@@ -15,13 +15,34 @@ namespace TapScribe.Bundle.Windows.Tests;
 /// </summary>
 public class JobObjectTests
 {
+    /// <summary>
+    /// Every job these tests create, rooted for the life of the test run — the lifetime the
+    /// tray gives its own, which it keeps in a field for as long as it runs.
+    ///
+    /// Never disposed, and never left to a local either: releasing a KILL_ON_JOB_CLOSE job
+    /// this process is a member of terminates the test run, and an unreachable job gets
+    /// released by the GC — a SafeHandle's finalizer closes the handle, and it is the last
+    /// one. Each TryCreate also nests this process in one more job, so every one of them is
+    /// such a job, and the run would end wherever the collector happened to run.
+    /// </summary>
+    private static readonly List<JobObject> Rooted = [];
+
+    private static JobObject? Create()
+    {
+        JobObject? created = JobObject.TryCreate(_ => { });
+        if (created is not null)
+        {
+            lock (Rooted)
+                Rooted.Add(created);
+        }
+        return created;
+    }
+
     [RequiresWindows("create a Win32 job object")]
     public void TryCreate_PutsThisProcessInTheJob_SoChildrenJoinByInheritance()
     {
-        // Not disposed: releasing a KILL_ON_JOB_CLOSE job this process is a member of
-        // terminates the test run from inside Dispose. The handle goes when the process
-        // does, which is the same lifetime the tray gives it.
-        JobObject? job = JobObject.TryCreate(_ => { });
+        // Rooted, not disposed — see Rooted.
+        JobObject? job = Create();
 
         Assert.NotNull(job);
         Assert.True(
@@ -35,7 +56,7 @@ public class JobObjectTests
     {
         // The supervisor is written against IProcessReaper and never against this type;
         // this is what says the Windows half actually satisfies it.
-        JobObject? job = JobObject.TryCreate(_ => { });
+        JobObject? job = Create();
 
         Assert.IsAssignableFrom<IProcessReaper>(job);
     }
@@ -48,7 +69,7 @@ public class JobObjectTests
         // kernel rejects outright is the one refusal that needs no process to be in a
         // particular state — every OTHER way to be refused depends on Windows version or
         // on someone else's job, which is what made the first version of this test wrong.
-        JobObject? job = JobObject.TryCreate(_ => { });
+        JobObject? job = Create();
         Assert.NotNull(job);
 
         using var refused = new NoSuchProcess();
@@ -65,7 +86,7 @@ public class JobObjectTests
         // SUCCEEDS. Nothing depends on that — self-enrolment is preferred for the
         // grandchild race, not to avoid a refusal — but a reader who assumes the old
         // behaviour writes `Adopt`'s fallback around a failure that never comes.
-        JobObject? job = JobObject.TryCreate(_ => { });
+        JobObject? job = Create();
         Assert.NotNull(job);
 
         using var self = new CurrentProcess();

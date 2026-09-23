@@ -133,6 +133,27 @@ public sealed class HostController : IDisposable
         return controller;
     }
 
+    /// <summary>
+    /// Whether "Open dashboard" may trade this install's password for a login link: only
+    /// while the Recorder on the port is the one this tray started, and up. In every other
+    /// state whatever answers the port — another user's Recorder, a <c>start.sh</c>, anything
+    /// at all — is not known to be this install's, and a mint is a POST of this install's
+    /// password to it (<see cref="LoginLink"/>: "the password sent somewhere it does not
+    /// belong"). The shell opens the plain dashboard instead.
+    /// </summary>
+    public bool MayMintLoginLink
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_state != RecorderState.Running)
+                    return false;
+            }
+            return _supervisor.Manages;
+        }
+    }
+
     /// <summary>Boot the Recorder and render the section for the first time.</summary>
     public void Start()
     {

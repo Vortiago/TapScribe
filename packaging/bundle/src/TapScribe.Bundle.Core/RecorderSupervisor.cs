@@ -36,6 +36,11 @@ public enum RecorderState
 /// </summary>
 public sealed class RecorderSupervisor : IRecorderHost
 {
+    /// <summary>How long an exited Recorder's output pumps get to reach EOF before the
+    /// handle is closed under them. EOF follows the exit within milliseconds unless a
+    /// descendant inherited the pipe; see <see cref="OnRecorderExited"/>.</summary>
+    private static readonly TimeSpan ExitDrainBound = TimeSpan.FromSeconds(2);
+
     private readonly BundleLayout _layout;
     private readonly IProcessReaper? _reaper;
     private readonly Action<string> _log;
@@ -222,6 +227,12 @@ public sealed class RecorderSupervisor : IRecorderHost
                 return false;
             }
 
+            // Enrolled like the Recorder, and before the wait: preflight's pip install is the
+            // longest-lived child this tray has, and on the per-child fallback a tray that
+            // dies during it would otherwise leave the install running un-reaped — for a
+            // relaunched tray's preflight to pip into the same runtime beside it.
+            Enrol(process);
+
             try
             {
                 process.WaitForExit();
@@ -289,9 +300,11 @@ public sealed class RecorderSupervisor : IRecorderHost
                 if (!process.HasExited)
                     process.Kill();
             }
-            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or AggregateException)
             {
-                // Already gone, or exited between HasExited and Kill. Nothing to do.
+                // Already gone, or exited between HasExited and Kill — or, the
+                // AggregateException, part of the tree would not die (Kill is whole-tree and
+                // throws after trying the rest). Nothing more to do here either way.
                 _log($"start (quit raced the spawn): {error.Message}");
             }
             process.Dispose();
@@ -336,6 +349,25 @@ public sealed class RecorderSupervisor : IRecorderHost
             // Ownership ends here: whatever is on the port now, this tray no longer has a
             // handle to it, so Quit must not try to kill it.
             _recorder = null;
+        }
+
+        // Drain BEFORE disposing. Exited is raised when the process handle signals, not when
+        // its pipes reach EOF, and Dispose cancels the output pumps mid-read — so a crash's
+        // LAST lines, the ones "See the log" sends the operator to, were the ones lost. The
+        // unbounded WaitForExit is the overload that waits for the pumps; it runs aside and
+        // is bounded here, because a descendant that inherited the pipe would hold EOF open
+        // for as long as it lives, and the tail is worth less than the report below.
+        try
+        {
+            if (!Task.Run(() => process.WaitForExit()).Wait(ExitDrainBound))
+                _log("the recorder's last output did not drain in time; the log may be cut short.");
+        }
+        catch (AggregateException error)
+        {
+            // The wait itself failed, which leaves the tail lost exactly as it was before
+            // the drain. Caught because this runs on the Exited callback, where an escaping
+            // exception takes the tray down, and the report below matters more.
+            _log($"the recorder's last output could not be drained: {error.InnerException?.Message}");
         }
 
         // Read the code BEFORE disposing — ExitCode throws once the Process is closed. Stop()
@@ -397,7 +429,7 @@ public sealed class RecorderSupervisor : IRecorderHost
                 if (!preflight.HasExited)
                     preflight.Kill();
             }
-            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or AggregateException)
             {
                 _log($"stop (preflight): {error.Message}");
             }
@@ -417,11 +449,14 @@ public sealed class RecorderSupervisor : IRecorderHost
                 process.WaitForExit(5000);
             }
         }
-        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or AggregateException)
         {
-            // Already gone, or exited between HasExited and Kill. Nothing to do — and the
-            // reaper takes down anything still alive when we exit, which is exactly the
-            // leak this Stop() is trying to avoid.
+            // Already gone, or exited between HasExited and Kill, or (AggregateException) a
+            // descendant the whole-tree kill could not end. Nothing to do — and the reaper
+            // takes down anything still alive when we exit, which is exactly the leak this
+            // Stop() is trying to avoid. Escaping instead would abort Quit's teardown chain
+            // before the reaper is released, and wedge Stop Recorder with the menu still
+            // reading "running".
             _log($"stop: {error.Message}");
         }
     }

@@ -162,7 +162,12 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         string url = BundleDefaults.DashboardUrl;
         try
         {
-            url = LoginLink.DashboardUrlFor(_http, _layout, _log.Write);
+            // Only this tray's own, running Recorder is traded the password for a link: in any
+            // other state the listener on the port is not known to be this install's.
+            if (_controller.MayMintLoginLink)
+                url = LoginLink.DashboardUrlFor(_http, _layout, _log.Write);
+            else
+                _log.Write("login link: the Recorder on the port is not this tray's own — opening the dashboard signed out.");
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {

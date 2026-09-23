@@ -142,9 +142,11 @@ public class RecorderSupervisorTests
         inherited.Boot();
         Assert.Empty(((FakeReaper)inherited.Reaper!).Adopted);
 
+        // Both children: preflight's pip install can run for minutes, and a tray that dies
+        // during it must not leave it running.
         using var perChild = new Fake { Reaper = new FakeReaper { CoversChildrenByInheritance = false } };
         perChild.Boot();
-        Assert.Single(((FakeReaper)perChild.Reaper!).Adopted);
+        Assert.Equal(2, ((FakeReaper)perChild.Reaper!).Adopted.Count);
     }
 
     [Fact]
