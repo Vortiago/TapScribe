@@ -43,7 +43,7 @@ from .session_paths import (
     resolve_wav,
     stripped_dir,
 )
-from .sessions import load_session_meta, read_session_meta, write_session_meta
+from .sessions import load_session_meta, write_session_meta
 from .tap_mode import TAP_MODE_MULTI
 
 # Re-exported from tap_registry (the canonical home, #405). These names must
@@ -124,9 +124,12 @@ def session_is_empty(session_dir: Path) -> bool:
         return False
     if (session_dir / FILENAME_TRANSCRIPT_JSON).exists():
         return False
-    if read_session_meta(session_dir.name).get("label"):
+    try:
+        meta = load_session_meta(session_dir.name)
+    except OSError:
+        # A meta this cannot read may hold a label, and prune deletes on True.
         return False
-    return True
+    return not meta.get("label")
 
 
 def _iter_candidate_session_dirs(current_session: str) -> Iterator[Path]:
@@ -323,14 +326,17 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     if collisions:
         raise AbsorbCollision(f"filename collision(s) between sessions: {', '.join(collisions[:5])}")
 
-    # Fold inputs are read strictly BEFORE any destructive step: a file absorb
-    # cannot read stops the whole operation, not just its leg (#446). Nothing
-    # between here and the fold below writes meta or roster, so the happy path
-    # reads the same bytes the in-place reads used to.
+    # Every fold input is read strictly, and only here, before the first move:
+    # a file absorb cannot read stops it before anything moves, and no read
+    # after the moves can leave the merge half-applied (#446).
     tgt_meta = load_session_meta(target)
     src_meta = load_session_meta(source)
     src_roster = load_roster(source_dir)
-    tgt_roster = load_roster(target_dir) if src_roster else {}
+    tgt_roster = load_roster(target_dir)
+    src_voices = voices.load_voices(source_dir)
+    tgt_voices = voices.load_voices(target_dir)
+    src_strip_meta = strip_meta.load_strip_meta(src_stripped_dir)
+    tgt_strip_meta = strip_meta.load_strip_meta(tgt_stripped_dir)
 
     moved_wavs: list[str] = []
     moved_stripped: list[str] = []
@@ -358,9 +364,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         # clash; target wins anyway). Knobs/stripped_at keep the TARGET's
         # values when both sides have a meta — they describe the target's
         # own last run; a target without a meta adopts the source's wholesale.
-        src_strip_meta = strip_meta.read_strip_meta(src_stripped_dir)
         if src_strip_meta is not None:
-            tgt_strip_meta = strip_meta.read_strip_meta(tgt_stripped_dir)
             if tgt_strip_meta is not None:
                 tgt_strip_meta["files"] = {**src_strip_meta["files"], **tgt_strip_meta["files"]}
             strip_meta.write_strip_meta(tgt_stripped_dir, tgt_strip_meta or src_strip_meta)
@@ -368,8 +372,6 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     # Carry the source's Voices across, or the rmtree below destroys them while
     # the WAVs they describe live on in the target. An identity on both sides is
     # dropped from both: each session's Voice `A` is a different human (ADR-0021).
-    src_voices = voices.read_voices(source_dir)
-    tgt_voices = voices.read_voices(target_dir)
     voices_merged, collided = voices.fold_voices(tgt_voices, src_voices)
     if src_voices:
         voices.write_voices(target_dir, voices_merged)
@@ -406,6 +408,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
                 "aliases": tgt_aliases,
                 "voices": tgt_voice_map,
             },
+            base=tgt_meta,
         )
 
     # Carry the source's Roster into the target's. The Roster is the ONLY

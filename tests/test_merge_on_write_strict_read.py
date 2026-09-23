@@ -28,6 +28,7 @@ import errno
 import io
 import json
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -37,10 +38,16 @@ import pytest
 from fastapi.testclient import TestClient
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
-from tapscribe import roster, session_maintenance, voices
+from tapscribe import roster, session_maintenance, strip_meta, voices
 from tapscribe.app import app, get_recorder
-from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_ROSTER_JSON
-from tapscribe.sessions import read_session_meta, write_session_meta
+from tapscribe.session_paths import (
+    DIRNAME_STRIPPED,
+    FILENAME_META_JSON,
+    FILENAME_ROSTER_JSON,
+    FILENAME_STRIP_META_JSON,
+    FILENAME_VOICES_JSON,
+)
+from tapscribe.sessions import load_session_meta, read_session_meta, write_session_meta
 from tapscribe.tap_mode import TAP_MODE_MULTI
 
 # One of each read failure the lenient reads used to swallow. FileNotFoundError
@@ -59,17 +66,21 @@ T0 = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
 
 
 @contextmanager
-def failing_reads(target: Path, exc: OSError, times: int | None = None) -> Iterator[None]:
+def failing_reads(target: Path, exc: OSError, times: int | None = None, skip: int = 0) -> Iterator[None]:
     """Make every read-mode `open` of `target` raise `exc` (only the first
-    `times` of them, when given). Writes, and every other file, pass through."""
+    `times` of them, when given), after letting the first `skip` reads through.
+    Writes, and every other file, pass through."""
     real_open = builtins.open
     target_real = os.path.realpath(target)
     left = [times]
+    passed = [0]
 
     def fake_open(file, mode="r", *args, **kwargs):  # type: ignore[no-untyped-def]
         is_read = not any(flag in mode for flag in "wax+")
         is_target = isinstance(file, (str, bytes, os.PathLike)) and os.path.realpath(file) == target_real
-        if is_read and is_target and (left[0] is None or left[0] > 0):
+        if is_read and is_target and passed[0] < skip:
+            passed[0] += 1
+        elif is_read and is_target and (left[0] is None or left[0] > 0):
             if left[0] is not None:
                 left[0] -= 1
             raise exc
@@ -274,6 +285,18 @@ def test_mapping_a_voice_over_a_transiently_unreadable_meta_keeps_the_other_mapp
 # ---------------------------------------------------------------------------
 
 
+STRIP_META_FILE = f"{DIRNAME_STRIPPED}/{FILENAME_STRIP_META_JSON}"
+
+
+def _seed_side(session_dir: Path, *, identity: str, clip: str, original: str) -> None:
+    """One diarized Voice, and one committed-cut clip with its strip-meta."""
+    voices.record_voices(
+        session_dir, identity=identity, run_id="run-1", spans={"A": [(T0, T0 + timedelta(seconds=5))]}
+    )
+    stripped = seed_session(session_dir, DIRNAME_STRIPPED, [clip])
+    strip_meta.write_strip_meta(stripped, {"files": {original: {"spans": [{"name": clip}]}}})
+
+
 def _seed_absorb(rec_root: Path) -> tuple[Path, Path]:
     target = seed_session(rec_root, "tgt", [ALICE_WAV])
     source = seed_session(rec_root, "src", [BOB_WAV])
@@ -283,18 +306,23 @@ def _seed_absorb(rec_root: Path) -> tuple[Path, Path]:
     roster.record_occurrence(source, identity=BOB_IDENTITY, name="Bob Bergman", recorded=True, wav=BOB_WAV)
     write_session_meta("tgt", {"label": "Weekly sync", "aliases": {"Alice_Andersen": "Alice"}})
     write_session_meta("src", {"aliases": {"Bob_Bergman": "Bob"}})
+    _seed_side(target, identity=ALICE_IDENTITY, clip="alice-clip-0.wav", original=ALICE_WAV)
+    _seed_side(source, identity=BOB_IDENTITY, clip="bob-clip-0.wav", original=BOB_WAV)
     return target, source
 
 
 @pytest.mark.parametrize("exc", READ_FAILURES)
 @pytest.mark.parametrize("side", ["tgt", "src"])
-@pytest.mark.parametrize("filename", [FILENAME_ROSTER_JSON, FILENAME_META_JSON])
+@pytest.mark.parametrize(
+    "filename", [FILENAME_ROSTER_JSON, FILENAME_META_JSON, FILENAME_VOICES_JSON, STRIP_META_FILE]
+)
 def test_absorb_refuses_to_fold_a_file_it_could_not_read(
     rec_root: Path, exc: OSError, side: str, filename: str
 ) -> None:
-    """Absorb folds both sessions' roster and meta into the target and then
-    deletes the source folder. A read failure on either side must stop it
-    before the unread file is overwritten or the source is deleted."""
+    """Absorb folds both sessions' roster, meta, Voices and strip-meta into the
+    target and then deletes the source folder. A read failure on either side
+    must stop it before anything moves, the unread file is overwritten, or the
+    source is deleted."""
     target, source = _seed_absorb(rec_root)
     path = (target if side == "tgt" else source) / filename
     before = path.read_bytes()
@@ -303,4 +331,73 @@ def test_absorb_refuses_to_fold_a_file_it_could_not_read(
         session_maintenance.absorb_session("tgt", "src")
 
     assert source.is_dir(), "the source folder was deleted over a file absorb could not read"
+    assert (source / BOB_WAV).is_file(), "a WAV moved before absorb read every fold input"
+    assert not (target / BOB_WAV).exists(), "absorb was left half-applied"
     assert path.read_bytes() == before, f"the {side} {filename} was overwritten after a failed read"
+
+
+@pytest.mark.parametrize("exc", READ_FAILURES)
+def test_absorb_never_rereads_the_target_meta_after_its_moves(rec_root: Path, exc: OSError) -> None:
+    """Absorb reads the target meta once, before the WAV moves. A read that
+    would fail after that first one must not leave the merge half-applied: the
+    source's WAVs in the target and the source folder still on disk."""
+    target, source = _seed_absorb(rec_root)
+
+    with failing_reads(target / FILENAME_META_JSON, exc, skip=1):
+        session_maintenance.absorb_session("tgt", "src")
+
+    assert not source.exists()
+    assert (target / BOB_WAV).is_file()
+    assert read_session_meta("tgt")["aliases"] == {"Alice_Andersen": "Alice", "Bob_Bergman": "Bob"}
+
+
+# ---------------------------------------------------------------------------
+# The strict read's input taxonomy: what reads as "nothing here"
+# ---------------------------------------------------------------------------
+
+
+def test_a_file_removed_between_stat_and_open_reads_as_absent(rec_root: Path) -> None:
+    """The stat sees the file and the open does not: that is a concurrent
+    delete, so the file is absent, not unreadable."""
+    session_dir = _seed_roster(rec_root)
+    write_session_meta("s", {"label": "Weekly sync"})
+    gone = FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    with failing_reads(session_dir / FILENAME_META_JSON, gone):
+        assert load_session_meta("s") == {}
+    with failing_reads(session_dir / FILENAME_ROSTER_JSON, gone):
+        assert roster.load_roster(session_dir) == {}
+
+
+def test_a_directory_at_the_roster_path_reads_as_absent(rec_root: Path) -> None:
+    session_dir = seed_session(rec_root, "s", [])
+    (session_dir / FILENAME_ROSTER_JSON).mkdir()
+
+    assert roster.load_roster(session_dir) == {}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a POSIX FIFO")
+def test_a_fifo_at_the_roster_path_reads_as_absent_without_blocking(rec_root: Path) -> None:
+    session_dir = seed_session(rec_root, "s", [])
+    os.mkfifo(session_dir / FILENAME_ROSTER_JSON)
+    result: list[object] = []
+    reader = threading.Thread(target=lambda: result.append(roster.load_roster(session_dir)), daemon=True)
+
+    reader.start()
+    reader.join(timeout=5)
+
+    assert result == [{}], "the read blocked on the FIFO or did not read it as absent"
+
+
+# ---------------------------------------------------------------------------
+# session_is_empty: prune deletes what it calls empty
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("exc", READ_FAILURES)
+def test_a_session_whose_meta_cannot_be_read_is_not_empty(rec_root: Path, exc: OSError) -> None:
+    session_dir = seed_session(rec_root, "s", [])
+    write_session_meta("s", {"label": "Board meeting"})
+
+    with failing_reads(session_dir / FILENAME_META_JSON, exc):
+        assert session_maintenance.session_is_empty(session_dir) is False

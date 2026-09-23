@@ -6976,7 +6976,9 @@ async def test_transcript_single_wav_transcribe_marks_row_done(
             await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
 
             await page.locator(tx_tag).first.wait_for(state="visible", timeout=8000)
-            assert (await page.locator(tx_tag).first.inner_text()).strip() == "no tx"
+            # textContent, not innerText: `.wavrow` carries `content-visibility:
+            # auto`, and Chromium reports an empty innerText for a skipped subtree.
+            assert (await page.locator(tx_tag).first.text_content() or "").strip() == "no tx"
             # The default selection (files[0]) enables the single-transcribe button.
             await page.wait_for_function(
                 f"""() => {{ const b = document.querySelector('{tx_one}');

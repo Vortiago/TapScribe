@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .config_store import read_json_strict
 from .session_paths import FILENAME_VOICES_JSON
 from .text import atomic_write_text, parse_iso
 
@@ -120,15 +121,12 @@ def voices_sig(runs: Mapping[str, str]) -> str:
     return ";".join(f"{identity}:{run}" for identity, run in sorted(runs.items()))
 
 
-def _load(session_dir: Path) -> dict[str, dict[str, Any]]:
-    """The sidecar, parsed and coerced. Missing or torn → `{}` (nothing in a
-    torn file is recoverable); every OTHER `OSError` RAISES, so a caller can
-    tell "there are no Voices" from "I could not read them" — the distinction a
-    read-modify-write needs and a display read does not."""
-    try:
-        return coerce_voices(json.loads((session_dir / FILENAME_VOICES_JSON).read_text(encoding="utf-8")))
-    except (FileNotFoundError, ValueError):
-        return {}
+def load_voices(session_dir: Path) -> dict[str, dict[str, Any]]:
+    """The sidecar, parsed and coerced, for a read-modify-write. Missing or torn
+    → `{}`, because nothing in a torn file is recoverable. Every other `OSError`
+    raises, so a caller can tell "there are no Voices" from "I could not read
+    them" (#446)."""
+    return coerce_voices(read_json_strict(session_dir / FILENAME_VOICES_JSON))
 
 
 def read_voices(session_dir: Path) -> dict[str, dict[str, Any]]:
@@ -136,7 +134,7 @@ def read_voices(session_dir: Path) -> dict[str, dict[str, Any]]:
     session is the normal case, and the poll must not crash on a bad file. The
     sidecar is regenerable by re-running diarize."""
     try:
-        return _load(session_dir)
+        return load_voices(session_dir)
     except OSError:
         # A permission change or a concurrent delete mid-read. Degrade to "no
         # Voices", which leaves every segment on its plain identity key.
@@ -180,13 +178,13 @@ def record_voices(
     Scoped to one identity so a sibling's `run_id` — and every mapping made
     against it — survives.
 
-    Through `_load`, not `read_voices`: the reader degrades an unreadable file to
+    Through `load_voices`, not `read_voices`: the reader degrades an unreadable file to
     `{}`, which is right for display and destructive as the base of a whole-file
     write — a transient `OSError` (a Windows sharing violation against the poll's
     concurrent read) would delete every sibling identity's Voices. Letting it
     raise fails the diarize instead, which is re-runnable.
     """
-    current = _load(session_dir)
+    current = load_voices(session_dir)
     voices = {
         label: {"spans": [{"start": s.isoformat(), "end": e.isoformat()} for s, e in windows]}
         for label, windows in spans.items()

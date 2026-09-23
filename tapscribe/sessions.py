@@ -25,7 +25,6 @@ import json
 import os
 import os.path
 import re
-import stat
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,6 +35,7 @@ import tapscribe.voices as voices
 
 from . import config
 from .audio import wav_duration_s
+from .config_store import read_json_strict
 from .name_resolution import DEFAULT_KNOWN_NAMES_LIMIT, known_names_from, resolve_session_names
 from .people import PeopleRegistry
 from .roster import coerce_roster, read_roster
@@ -173,7 +173,7 @@ def read_session_meta(session: str) -> dict[str, Any]:
         return {}
 
 
-def write_session_meta(session: str, meta: dict[str, Any]) -> None:
+def write_session_meta(session: str, meta: dict[str, Any], *, base: dict[str, Any] | None = None) -> None:
     """Persist the per-session meta. Partial updates (e.g. only
     `{"prompt": "..."}`) preserve existing fields the caller didn't
     mention — otherwise editing one field would clear the others.
@@ -187,9 +187,13 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     torn JSON file (which `_read_json_or_none` would silently swallow,
     losing the operator's label + aliases + overrides all at once). The base
     read is strict (`load_session_meta`), so a failed read RAISES instead of
-    merging onto `{}` and overwriting the fields it could not see (#446)."""
+    merging onto `{}` and overwriting the fields it could not see (#446).
+
+    `base` is a meta the caller already read with `load_session_meta`. Absorb
+    passes it, so no read runs after its WAV moves and a read fault cannot
+    leave the merge half-applied."""
     session_dir = create_session_dir(session)
-    existing = load_session_meta(session)
+    existing = load_session_meta(session) if base is None else base
     allowed = {"aliases", "languages", "voices", *_META_STRING_FIELDS}
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
@@ -243,7 +247,9 @@ def repoint_voice_person(old_person_id: str, new_person_id: str) -> list[str]:
     for sd in sorted(config.RECORDINGS_DIR.glob("*")):
         if not sd.is_dir():
             continue
-        raw = _read_json_or_none(sd / FILENAME_META_JSON)
+        # Strict: a meta this cannot read may name the old id, and the caller
+        # deletes that Person next, so an unreadable meta aborts the merge.
+        raw = _read_json_strict(sd / FILENAME_META_JSON)
         mapping = _coerce_voices(raw.get("voices") if isinstance(raw, dict) else None)
         if not any(entry["person_id"] == old_person_id for entry in mapping.values()):
             continue
@@ -344,8 +350,8 @@ def read_session_transcript(session: str) -> dict[str, Any] | None:
     session has no merged transcript. Backs `GET /api/sessions/{session}/
     transcript`. `session` is validated against path traversal by
     `resolve_session_dir` (the canonical CodeQL realpath sanitiser); the file
-    is read through `_read_json_or_none`, which re-checks containment so static
-    analysis sees the guard at the point of file access."""
+    is read through `_read_json_or_none`, whose strict core re-checks containment
+    so static analysis sees the guard at the point of file access."""
     session_dir = resolve_session_dir(session)
     data = _read_json_or_none(session_dir / FILENAME_TRANSCRIPT_JSON)
     return data if isinstance(data, dict) else None
@@ -355,8 +361,8 @@ def read_session_summary(session: str) -> dict[str, Any] | None:
     """The FULL persisted session-summary.json for `session`, or None when the
     session has never been summarized. Backs `GET /api/sessions/{session}/
     summary`. Same path-safety shape as `read_session_transcript`:
-    `resolve_session_dir` validates traversal, `_read_json_or_none` re-checks
-    containment at the point of file access."""
+    `resolve_session_dir` validates traversal, and the strict core of
+    `_read_json_or_none` re-checks containment at the point of file access."""
     session_dir = resolve_session_dir(session)
     data = _read_json_or_none(session_dir / FILENAME_SUMMARY_JSON)
     return data if isinstance(data, dict) else None
@@ -417,17 +423,15 @@ def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
 
 def _read_json_strict(path: Path) -> Any:
     """Parse `path` as JSON, separating "nothing here" from "I could not read
-    it": missing or torn (not valid JSON) → None, but every OTHER `OSError`
-    (EACCES, EIO, EMFILE) RAISES, so a read-modify-write cannot merge onto `{}`
-    over a file it merely failed to see (#446). A path outside RECORDINGS_DIR →
-    None.
+    it". Missing, not a regular file, torn, or outside RECORDINGS_DIR → None.
+    Every other `OSError` (EACCES, EIO, EMFILE) raises (#446).
 
-    The containment check is inlined at the point of file access (the canonical
+    The containment check sits at the point of file access (the canonical
     CodeQL `py/path-injection` form): the realpath string `real` flows straight
-    into `os.stat` and `open`, so taint analysis sees the guard there. Every
-    caller already passes a `session_paths`-resolved dir, so it is defense-in-
-    depth, but keeping it local means a refactor that bypasses route-level
-    validation can't silently leak this as an arbitrary file-reader."""
+    into `read_json_strict`, so taint analysis sees the guard there. Every
+    caller already passes a `session_paths`-resolved dir, so it is defence in
+    depth, and keeping it local stops a refactor that bypasses route-level
+    validation from turning this into an arbitrary file reader."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         real = os.path.realpath(path)
@@ -436,28 +440,11 @@ def _read_json_strict(path: Path) -> Any:
         return None
     if real != root and not real.startswith(root + os.sep):
         return None
-    try:
-        st = os.stat(real)
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(st.st_mode):
-        # A directory or FIFO is not a JSON file; answer "nothing here" as the
-        # old `isfile` fast path did, so a FIFO can never block the poll.
-        return None
-    try:
-        with open(real, encoding="utf-8") as fh:
-            return json.load(fh)
-    except ValueError:
-        return None
+    return read_json_strict(real)
 
 
 def _read_json_or_none(path: Path) -> Any:
-    """`_read_json_strict` made lenient: any `OSError` → None. This is the
-    primitive the poll funnel (`_read_session_json_cached`) and
-    `repoint_voice_person`'s walk call use — a bad file must degrade to None,
-    never crash a tick. Returns None when the file is missing, unparseable, or
-    sits outside RECORDINGS_DIR. The containment guard lives at the strict sink
-    above."""
+    """`_read_json_strict` for the poll and display reads: any `OSError` → None."""
     try:
         return _read_json_strict(path)
     except OSError:

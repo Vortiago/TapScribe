@@ -166,8 +166,6 @@ async def api_session_voice_mapping(session: str, req: Request, recorder: Record
     else:
         person_id = ""
 
-    # The route's own read is the base of a whole-map write, so it must fail
-    # rather than start from `{}` (#446).
     mapping = dict(load_session_meta(session).get("voices") or {})
     if person_id:
         mapping[key] = {"person_id": person_id, "run_id": entry["run_id"]}

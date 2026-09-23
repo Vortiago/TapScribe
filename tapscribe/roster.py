@@ -36,6 +36,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .config_store import read_json_strict
 from .session_paths import FILENAME_ROSTER_JSON
 from .tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE, is_mode
 from .text import atomic_write_text, parse_wav_speaker_slug
@@ -139,15 +140,11 @@ def slug_owners(roster: Mapping[str, Any]) -> dict[str, set[str]]:
 
 
 def load_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
-    """The session's roster, parsed and coerced. Missing or torn → `{}`; every
-    OTHER `OSError` RAISES — the distinction a read-modify-write needs and a
-    display read does not (#446)."""
-    path = session_dir / FILENAME_ROSTER_JSON
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
-        return {}
-    return coerce_roster(data)
+    """The session's roster, parsed and coerced, for a read-modify-write. An
+    absent or torn file reads as `{}`, because the next occurrence rebuilds it.
+    Any other `OSError` raises, so the write never replaces a roster it could
+    not read (#446)."""
+    return coerce_roster(read_json_strict(session_dir / FILENAME_ROSTER_JSON))
 
 
 def read_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
