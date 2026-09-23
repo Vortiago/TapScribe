@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -320,6 +321,26 @@ def validate_config_text(content: str) -> str:
     if len(content) > MAX_CONFIG_TEXT_LEN:
         raise ValueError(f"config text exceeds {MAX_CONFIG_TEXT_LEN}-char cap (got {len(content)} chars)")
     return content
+
+
+def read_json_strict(path: str | os.PathLike[str]) -> Any:
+    """Parse `path` as JSON, or None when nothing readable is there: the file
+    is absent, is not a regular file, or is torn. Every other `OSError`
+    (EACCES, EIO, EMFILE) raises, so a read-modify-write can tell "nothing
+    here" from "I could not read it" (#446)."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        # A directory is not a JSON file, and opening a FIFO blocks the caller.
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        # Removed between the stat and the open, or torn: absent, not unreadable.
+        return None
 
 
 def atomic_write_text(path: Path, content: str) -> None:

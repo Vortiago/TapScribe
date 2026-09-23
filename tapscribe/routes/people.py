@@ -41,7 +41,7 @@ from ..recorder import Recorder
 from ..session_paths import resolve_session_dir
 from ..sessions import (
     gather_sessions,
-    read_session_meta,
+    load_session_meta,
     repoint_voice_person,
     write_session_meta,
 )
@@ -166,7 +166,7 @@ async def api_session_voice_mapping(session: str, req: Request, recorder: Record
     else:
         person_id = ""
 
-    mapping = dict(read_session_meta(session).get("voices") or {})
+    mapping = dict(load_session_meta(session).get("voices") or {})
     if person_id:
         mapping[key] = {"person_id": person_id, "run_id": entry["run_id"]}
     else:

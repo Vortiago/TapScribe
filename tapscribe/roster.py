@@ -36,6 +36,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .config_store import read_json_strict
 from .session_paths import FILENAME_ROSTER_JSON
 from .tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE, is_mode
 from .text import atomic_write_text, parse_wav_speaker_slug
@@ -107,8 +108,8 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
 def coerce_roster(raw: Any) -> dict[str, dict[str, Any]]:
     """Coerce a raw parsed roster mapping into `{full identity: entry}`, dropping
     non-str identities and non-dict entries (and per-field junk, via
-    `_coerce_entry`). Non-dict top level → `{}`. Shared by `read_roster` (the
-    uncached write-path reader) and the cached poll path
+    `_coerce_entry`). Non-dict top level → `{}`. Shared by `load_roster` (the
+    strict write-path reader) and the cached poll path
     (`sessions._read_roster_cached`) so both produce the identical shape."""
     if not isinstance(raw, dict):
         return {}
@@ -138,18 +139,22 @@ def slug_owners(roster: Mapping[str, Any]) -> dict[str, set[str]]:
     return owners
 
 
+def load_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
+    """The session's roster, parsed and coerced, for a read-modify-write. An
+    absent or torn file reads as `{}`, because the next occurrence rebuilds it.
+    Any other `OSError` raises, so the write never replaces a roster it could
+    not read (#446)."""
+    return coerce_roster(read_json_strict(session_dir / FILENAME_ROSTER_JSON))
+
+
 def read_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
-    """The session's roster as `{full identity: entry}`. Missing, torn, or
-    non-dict top level → `{}` so a single bad file never crashes the poll."""
-    path = session_dir / FILENAME_ROSTER_JSON
+    """Lenient display/poll reader: the session's roster as `{full identity:
+    entry}`, unreadable for ANY reason → `{}` so a bad file never crashes the
+    poll. Read-modify-write callers use `load_roster`."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # Missing file (OSError) or torn/garbage JSON (ValueError): the roster
-        # is best-effort durable state, recovered on the next occurrence — a
-        # read failure must degrade to "no roster", never propagate.
+        return load_roster(session_dir)
+    except OSError:
         return {}
-    return coerce_roster(data)
 
 
 def record_occurrence(
@@ -171,7 +176,7 @@ def record_occurrence(
     `sanitise_name` HERE — the one seam where it becomes durable state."""
     if not identity:
         return
-    roster = read_roster(session_dir)
+    roster = load_roster(session_dir)
     entry = roster.get(identity) or {
         "name": "",
         "source": "live",
