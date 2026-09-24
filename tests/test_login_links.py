@@ -7,7 +7,13 @@ sleeps.
 
 from __future__ import annotations
 
-from tapscribe.login_links import GRACE_S, TOKEN_TTL_S, LoginLinks
+from tapscribe.login_links import (
+    GRACE_S,
+    SESSION_IDLE_S,
+    SESSION_MAX_S,
+    TOKEN_TTL_S,
+    LoginLinks,
+)
 
 
 class Clock:
@@ -160,3 +166,67 @@ def test_expired_and_used_up_links_are_not_retained():
     links.mint()  # any touch sweeps
 
     assert len(links._links) == 1
+
+
+def test_a_session_nobody_uses_expires():
+    """The browser hands this cookie to every server on localhost, not just this
+    port's (ADR-0023). A copy taken there and put in a drawer must stop working."""
+    links, clock = store()
+    cookie = links.spend(links.mint())
+
+    clock.advance(SESSION_IDLE_S + 1)
+
+    assert not links.validate(cookie)
+
+
+def test_a_session_in_use_outlives_the_idle_limit():
+    """An open dashboard polls every 0.5-2 s, so a tab that is open must never be
+    signed out by the idle limit, however long it stays open."""
+    links, clock = store()
+    cookie = links.spend(links.mint())
+
+    for _ in range(4):
+        clock.advance(SESSION_IDLE_S - 1)
+        assert links.validate(cookie)
+
+
+def test_a_session_in_use_still_ends_at_the_hard_limit():
+    """The idle limit alone lets whoever holds a copy keep it alive forever by
+    using it. The hard limit is what bounds a copy that is kept warm."""
+    links, clock = store()
+    cookie = links.spend(links.mint())
+
+    elapsed = 0.0
+    while elapsed + SESSION_IDLE_S / 2 <= SESSION_MAX_S:
+        clock.advance(SESSION_IDLE_S / 2)
+        elapsed += SESSION_IDLE_S / 2
+        assert links.validate(cookie)
+
+    clock.advance(SESSION_IDLE_S / 2)
+
+    assert not links.validate(cookie)
+
+
+def test_an_expired_session_is_not_refreshed_back_to_life():
+    """A refused cookie must stay refused: marking it used on the failing check
+    would make the NEXT check succeed."""
+    links, clock = store()
+    cookie = links.spend(links.mint())
+    clock.advance(SESSION_IDLE_S + 1)
+
+    assert not links.validate(cookie)
+    assert not links.validate(cookie)
+
+
+def test_expired_sessions_are_not_retained():
+    """Retired as `validate` walks them, so a long-running Recorder does not keep
+    one entry per sign-in forever, and the hot path does not slow down with them."""
+    links, clock = store()
+    for _ in range(3):
+        links.spend(links.mint())
+    clock.advance(SESSION_IDLE_S + 1)
+    live = links.spend(links.mint())
+
+    assert links.validate(live)
+
+    assert len(links._sessions) == 1

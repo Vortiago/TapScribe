@@ -42,8 +42,10 @@ The cookie comes from a [login link](../../CONTEXT.md#login-link):
    lifetime (no `Max-Age`), and its NAME carries the port — cookies are scoped
    by host but not by port, so a checkout on 8001 and a second Recorder on 8002
    would otherwise clobber each other's session. Validated against an in-memory
-   set (constant-time compare, per `auth.py`'s convention), so a Recorder
-   restart logs the browser out — one click to get back in.
+   table (constant-time compare, per `auth.py`'s convention), so a Recorder
+   restart logs the browser out — one click to get back in. A session also ends
+   after 12 h with no request and 7 days after sign-in; see the port-scoping
+   paragraph below for why.
 
 `start.sh` / `start.ps1` keep printing the generated password and nothing else:
 the tray is the only mint site, so there is one TTL and no link an operator can
@@ -98,13 +100,32 @@ cross-origin. Being host-scoped, the cookie also covers DNS rebinding.
 
 SameSite scoping ignores ports, so a hostile page on another localhost port can
 still fire credentialed simple-POSTs (writes execute; the response stays
-unreadable). Cached Basic credentials have the same exposure today, so the
-cookie is no worse — but state-changing routes get an `Origin` check, which is
-the cheap answer to both. An `Origin: null` passes it only beside
+unreadable). Cached Basic credentials have the same exposure today, so for THAT
+surface the cookie is no worse — but state-changing routes get an `Origin`
+check, which is the cheap answer to both. An `Origin: null` passes it only beside
 `Sec-Fetch-Site: same-origin`: under the `no-referrer` policy `app.py` serves,
 a browser sends `null` for the dashboard's OWN no-cors writes (a form post, a
 beacon in Gecko and WebKit), while a hostile page on another port that sends
 `null` is `same-site` at best, and `Sec-Fetch-Site` is a header no page can set.
+
+Port-blind scoping has a second consequence the comparison above does not
+cover, and there the cookie IS worse than Basic: the browser also SENDS it to
+every other server on `localhost` it visits, where cached Basic credentials,
+which are per origin, never go. A dev server that logs request headers, another
+app, or another account's process on a shared machine therefore receives a
+working session, and can replay it from outside a browser, where neither
+`SameSite` nor the `Origin` check applies — it reads `/api/tap-token` and mints
+login links like the dashboard does. On a single-user machine little of that is
+new, since a process running as the operator can already read `.auth-password`;
+the real exposure is other accounts' listeners and logs. A cookie cannot be
+scoped to a port, so what bounds a copy is its lifetime: a session with no
+request for 12 h is retired (an open dashboard polls every 0.5–2 s, so a live
+tab never gets near that), and every session ends 7 days after its sign-in
+however busy it is. Reaching either costs one tray click, the same as a restart.
+Binding the session to the port with a second secret held in `sessionStorage`
+and sent as a header would close this for API calls, but not for the WAV and
+audio downloads that cannot carry a header, and it would touch every fetch path;
+it was weighed and not taken.
 
 `SameSite=Strict` over `Lax` is deliberate: it costs a cookie on
 web-page-initiated navigation to the dashboard (a link in a wiki or a chat app

@@ -10,7 +10,11 @@ differently by which of the two a caller used.
 
 Everything here is in memory and per-process, deliberately: a Recorder restart
 logs the browser out, which costs one tray click and buys no third secret at rest
-beside `.auth-password` and `.tap-token`. It is also DOM-free, HTTP-free and
+beside `.auth-password` and `.tap-token`. A session also ends on its own — after
+`SESSION_IDLE_S` without a request, and `SESSION_MAX_S` after sign-in — because
+the browser hands this cookie to every server on localhost, not just this port's
+(ADR-0023), and a copy made there must not stay good for as long as the Recorder
+runs. It is also DOM-free, HTTP-free and
 FastAPI-free, so the state machine below is unit-tested directly rather than
 through a client.
 
@@ -46,6 +50,27 @@ TOKEN_TTL_S: float = 60.0
 #: window costs nothing beyond its own length.
 GRACE_S: float = 10.0
 
+#: How long a session survives with no request at all. An open dashboard polls
+#: every 0.5–2 s (ADR-0013), so a tab that is open never gets near this; what it
+#: bounds is a cookie that LEFT the tab. Cookies are scoped to the host and not
+#: the port, so every other server on localhost the browser visits — a dev server
+#: that logs headers, another app, another account's process on a shared machine —
+#: receives this one too (ADR-0023). A copy nobody keeps using dies here.
+SESSION_IDLE_S: float = 12 * 60 * 60
+
+#: The hard ceiling on one sign-in, however busy. A copy that whoever holds it
+#: keeps warm would otherwise live exactly as long as the Recorder does. Reaching
+#: it costs the operator one tray click, the same as a Recorder restart.
+SESSION_MAX_S: float = 7 * 24 * 60 * 60
+
+
+@dataclass
+class _Session:
+    """One issued session: when its link was spent, and when it was last used."""
+
+    issued_at: float
+    last_seen: float
+
 
 @dataclass
 class _Link:
@@ -68,9 +93,9 @@ class LoginLinks:
     """
 
     _links: dict[str, _Link] = field(default_factory=dict)
-    #: The issued sessions, held UTF-8-encoded: `validate` compares against every
+    #: The issued sessions, keyed UTF-8-encoded: `validate` compares against every
     #: one of them on the hottest path, and `hmac.compare_digest` needs bytes.
-    _cookies: set[bytes] = field(default_factory=set)
+    _sessions: dict[bytes, _Session] = field(default_factory=dict)
     #: Injected so the tests drive expiry without sleeping. `time.monotonic` and
     #: not `time.time`: a clock step (NTP, a laptop waking) must not retire a
     #: live link or resurrect a dead one.
@@ -111,7 +136,7 @@ class LoginLinks:
         if link.cookie is None:
             link.cookie = secrets.token_urlsafe(32)
             link.spent_at = now
-            self._cookies.add(link.cookie.encode("utf-8"))
+            self._sessions[link.cookie.encode("utf-8")] = _Session(issued_at=now, last_seen=now)
             return link.cookie
 
         # Already spent. Inside the grace window this is the scanner/double-click
@@ -124,20 +149,37 @@ class LoginLinks:
         return None
 
     def validate(self, cookie: str | None) -> bool:
-        """Whether `cookie` is a session this store issued. Each candidate is
-        compared in constant time, like every other credential check in the
-        Recorder — a dict/set lookup would answer in a length- and
-        content-dependent time.
+        """Whether `cookie` is a live session this store issued, and if so, mark
+        it used. Each candidate is compared in constant time, like every other
+        credential check in the Recorder — a dict lookup would answer in a length-
+        and content-dependent time.
+
+        Expired sessions are retired HERE rather than in `_sweep`: this already
+        walks every session on every request, so the walk that decides "is it
+        live" is also the one that forgets the dead. A presented cookie whose
+        session has expired is refused, never refreshed back to life.
 
         The presented cookie is encoded ONCE rather than per stored session: this
         runs on the hottest path in the app (`auth.basic_auth_middleware`, crossed
-        by the dashboard's 500 ms poll) and the set only grows, one entry per
-        sign-in, for the process lifetime.
+        by the dashboard's 500 ms poll).
         """
         if not cookie:
             return False
         probe = cookie.encode("utf-8")
-        return any(hmac.compare_digest(probe, issued) for issued in self._cookies)
+        now = self._now()
+        matched: bytes | None = None
+        dead: list[bytes] = []
+        for issued, session in self._sessions.items():
+            if now - session.last_seen > SESSION_IDLE_S or now - session.issued_at > SESSION_MAX_S:
+                dead.append(issued)
+            elif hmac.compare_digest(probe, issued):
+                matched = issued
+        for issued in dead:
+            del self._sessions[issued]
+        if matched is None:
+            return False
+        self._sessions[matched].last_seen = now
+        return True
 
     def _find(self, token: str) -> str | None:
         """The stored token equal to `token`, compared in constant time. Returns
@@ -155,9 +197,8 @@ class LoginLinks:
         ones past their grace. Swept on touch rather than on a timer, the way
         `transcribers`' idle sweep is, so there is no background task to own.
 
-        Issued COOKIES are not swept — they are the browser's session and live as
-        long as the process does. Their number is bounded by how many times the
-        operator has signed in, and minting requires the password.
+        Issued SESSIONS are not swept here: `validate` retires them, since it
+        walks all of them on every request anyway (see there).
         """
         now = self._now()
         dead = [
