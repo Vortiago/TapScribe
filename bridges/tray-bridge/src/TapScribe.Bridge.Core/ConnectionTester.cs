@@ -77,6 +77,33 @@ public static class ConnectionTester
         }
     }
 
+    /// <summary>
+    /// How many jobs the Recorder on this machine has in flight — a synchronous
+    /// <c>GET /healthz</c> under the same short deadline as <see cref="AnswersOnLoopback"/> —
+    /// or null when it could not be asked. A Bundle's Quit stops the Recorder it started, and
+    /// this is what lets it ask the operator first instead of letting a strip, transcription
+    /// or summary die with the process. Null means "could not tell", and a caller must not
+    /// keep a tray from quitting on that: a Recorder that cannot answer is not doing much.
+    /// </summary>
+    /// <param name="http">The caller's client, so no handler is churned per probe.</param>
+    public static int? ActiveJobsOnLoopback(int port, HttpClient http, TimeSpan timeout)
+    {
+        try
+        {
+            using var control = new ControlClient("127.0.0.1", port, tls: false, token: "", http);
+            using var deadline = new CancellationTokenSource(timeout);
+            return control.ActiveJobsAsync(deadline.Token).GetAwaiter().GetResult();
+        }
+        catch (Exception error) when (
+            error is HttpRequestException or TaskCanceledException or OperationCanceledException
+                or SocketException or InvalidOperationException or System.Text.Json.JsonException)
+        {
+            // Nothing listening, no answer in time, or an answer that was not the Recorder's
+            // JSON. None of those says the Recorder is busy.
+            return null;
+        }
+    }
+
     /// <summary>Run the probe under the shared timeout and describe every outcome, a throw
     /// included. Both dialogs run this fire-and-forget from a click, where an escaping exception
     /// is swallowed by the scheduler and strands the status line on "Testing...".</summary>

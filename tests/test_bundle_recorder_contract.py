@@ -1,8 +1,9 @@
 """The things the Bundle's C# tray says about the Recorder it boots.
 
 `BundleDefaults.RecorderPort`, `BundleDefaults.DashboardUser`, the route and verb
-`LoginLink` mints at, the `"path"` key it reads out of the answer, and the name of
-the password file it reads are the Recorder's own values, re-typed on the other
+`LoginLink` mints at, the `"path"` key it reads out of the answer, the name of
+the password file it reads, and the `/healthz` count its Quit asks for are the
+Recorder's own values, re-typed on the other
 side of a language boundary. CLAUDE.md's rule for that shape
 is a mechanical lock-step check — `tools/stamp_tap_wire.py` plus
 `tests/test_tap_wire_contract.py` for the `/tap` wire — and these three had none.
@@ -108,4 +109,39 @@ def test_the_tray_reads_the_password_file_the_recorder_writes() -> None:
     # forever, and both Open dashboard and Copy password quietly degrade.
     assert _const(LAYOUT, "string PasswordFileName") == f'"{config.AUTH_PASSWORD_FILE.name}"', (
         "BundleLayout.PasswordFileName and config.AUTH_PASSWORD_FILE have drifted"
+    )
+
+
+def test_the_quit_probe_reads_a_count_the_recorder_reports(recorder_under_test) -> None:
+    # A Bundle's Quit asks `/healthz` for `active_jobs` before it stops the Recorder. The C#
+    # side treats a missing count as zero ("not busy"), so a drift in the route or the key is
+    # a Quit that silently stops asking and lets a summary die mid-run.
+    from fastapi.testclient import TestClient
+
+    from tapscribe.app import app
+    from tapscribe.routes.deps import get_recorder
+
+    control = (
+        REPO_ROOT / "bridges" / "tray-bridge" / "src" / "TapScribe.Bridge.Core" / "ControlClient.cs"
+    ).read_text(encoding="utf-8")
+    probe = re.search(
+        r'ActiveJobsAsync.*?GetAsync\(new Uri\(_baseUri, "([^"]+)"\).*?TryGetProperty\("(\w+)"',
+        control,
+        re.DOTALL,
+    )
+    assert probe, "ControlClient.ActiveJobsAsync no longer has the shape this test reads"
+    path, key = probe.group(1), probe.group(2)
+
+    served = {(method, row.path) for row in registered_routes(app) for method in row.methods}
+    assert ("GET", path) in served, f"the tray asks GET {path}, which the Recorder does not serve"
+
+    app.dependency_overrides[get_recorder] = lambda: recorder_under_test
+    app.state.recorder = recorder_under_test
+    try:
+        with TestClient(app) as client:
+            body = client.get(path).json()
+    finally:
+        app.dependency_overrides.clear()
+    assert isinstance(body.get(key), int), (
+        f"GET {path} no longer reports {key!r}; the tray would read every Recorder as idle"
     )

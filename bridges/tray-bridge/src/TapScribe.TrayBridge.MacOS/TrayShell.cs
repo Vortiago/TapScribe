@@ -43,6 +43,7 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     private MacTrayHost? _host;
     private SettingsWindow? _settingsWindow;
     private bool _uiReleased;
+    private bool _quitAsked; // main thread only: a Bundle Quit is waiting on its confirmation
 
     /// <summary>Build the menu bar over an explicit outside world.</summary>
     /// <param name="dependencies">What a meeting needs: the enumerator, the session mint and the
@@ -256,7 +257,23 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             Shutdown();
             return Task.CompletedTask;
         }
-        return runtime.QuitAsync();
+        if (_host is not { } host)
+            return runtime.QuitAsync();
+
+        // A Bundle's Quit stops its Recorder, and the Recorder's jobs with it, so the host asks
+        // first when one is in flight. The teardown starts only once it has answered, and a
+        // second Quit while it is still asking is the same request, not another alert.
+        if (_quitAsked)
+            return Task.CompletedTask;
+        _quitAsked = true;
+        host.ConfirmQuit(quit =>
+        {
+            if (quit)
+                _ = runtime.QuitAsync();
+            else
+                _quitAsked = false;
+        });
+        return Task.CompletedTask;
     }
 
     private void OpenSettings()

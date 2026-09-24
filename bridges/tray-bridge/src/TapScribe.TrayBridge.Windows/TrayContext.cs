@@ -41,6 +41,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     // started until Startup either.
     private SynchronizationContext? _ui;
     private bool _uiReleased; // Shutdown disposes, and then so does whoever owns the context
+    private bool _quitAsked; // UI thread only: a Bundle Quit is waiting on its confirmation
 
     public TrayContext()
         : this(TrayStores.Settings.Load(), TrayDependencies.Production)
@@ -279,7 +280,23 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
             Shutdown();
             return Task.CompletedTask;
         }
-        return runtime.QuitAsync();
+        if (_host is not { } host)
+            return runtime.QuitAsync();
+
+        // A Bundle's Quit stops its Recorder, and the Recorder's jobs with it, so the host asks
+        // first when one is in flight. The teardown starts only once it has answered, and a
+        // second Quit while it is still asking is the same request, not another dialog.
+        if (_quitAsked)
+            return Task.CompletedTask;
+        _quitAsked = true;
+        host.ConfirmQuit(quit =>
+        {
+            if (quit)
+                _ = runtime.QuitAsync();
+            else
+                _quitAsked = false;
+        });
+        return Task.CompletedTask;
     }
 
     // Rebuild the Past-meetings submenu from the persisted history each time it opens (#168):

@@ -268,6 +268,54 @@ internal sealed class MacTrayHost : IHostView, IDisposable
     private bool RecorderAnswers() =>
         ConnectionTester.AnswersOnLoopback(BundleDefaults.RecorderPort, _http, TimeSpan.FromSeconds(2));
 
+    /// <summary>
+    /// Ask before a Quit that would stop work in flight (<see cref="QuitConfirmation"/>), then
+    /// call <paramref name="then"/> on the main thread with the answer: true to quit. Mirrors the
+    /// Windows half. The probe runs off the main thread, and the answer is POSTED back rather
+    /// than awaited back, because macOS has no SynchronizationContext for an await to return to.
+    /// </summary>
+    internal void ConfirmQuit(Action<bool> then) => _ = Task.Run(() =>
+    {
+        string? warning = null;
+        try
+        {
+            bool stops = _controller.OwnsRunningRecorder;
+            int? jobs = stops
+                ? ConnectionTester.ActiveJobsOnLoopback(BundleDefaults.RecorderPort, _http, QuitConfirmation.ProbeTimeout)
+                : null;
+            warning = QuitConfirmation.WarningFor(stops, jobs);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // Whatever went wrong asking, it is no reason to keep a tray the operator asked to
+            // quit: log it and quit without the question.
+            _log.Write($"quit check: {error}");
+        }
+
+        _post(() => Guarded(() => then(warning is null || AskToQuit(warning))));
+    });
+
+    // RunModal answers NSAlertFirstButtonReturn (1000) plus the index of the button clicked.
+    private const nint QuitButtonResponse = 1001;
+
+    /// <summary>The native confirmation. Keep running is the first button, so Return keeps the
+    /// work.</summary>
+    private static bool AskToQuit(string warning)
+    {
+        using var alert = new NSAlert
+        {
+            AlertStyle = NSAlertStyle.Warning,
+            MessageText = QuitConfirmation.Title,
+            InformativeText = warning,
+        };
+        alert.AddButton(QuitConfirmation.KeepRunningButton);
+        alert.AddButton(QuitConfirmation.QuitButton);
+        // A menu-bar app is never frontmost, and an alert behind the operator's other windows
+        // reads as a Quit that did nothing.
+        NSApplication.SharedApplication.Activate();
+        return alert.RunModal() == QuitButtonResponse;
+    }
+
     /// <summary>The same boundary the Bridge half keeps around an operator action: a bug must
     /// not become a menu bar that vanishes.</summary>
     private void Guarded(Action action)

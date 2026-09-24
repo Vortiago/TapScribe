@@ -266,6 +266,43 @@ internal sealed class TrayHost : IHostView, IDisposable
         }
     }
 
+    /// <summary>
+    /// Ask before a Quit that would stop work in flight (<see cref="QuitConfirmation"/>), then
+    /// call <paramref name="then"/> on the UI thread with the answer: true to quit. The probe is
+    /// a loopback round-trip, so it runs off the UI thread for the reason
+    /// <see cref="OpenDashboard"/> does, and only a Recorder this tray started is asked, since
+    /// only that one stops with the Quit.
+    /// </summary>
+    internal void ConfirmQuit(Action<bool> then) => _ = Task.Run(() =>
+    {
+        string? warning = null;
+        try
+        {
+            bool stops = _controller.OwnsRunningRecorder;
+            int? jobs = stops
+                ? ConnectionTester.ActiveJobsOnLoopback(BundleDefaults.RecorderPort, _http, QuitConfirmation.ProbeTimeout)
+                : null;
+            warning = QuitConfirmation.WarningFor(stops, jobs);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // Whatever went wrong asking, it is no reason to keep a tray the operator asked to
+            // quit: log it and quit without the question.
+            _log.Write($"quit check: {error}");
+        }
+
+        _post(() => Guarded(() => then(warning is null || AskToQuit(warning))));
+    });
+
+    /// <summary>The native confirmation. No is the default button, so Return keeps the work.</summary>
+    private static bool AskToQuit(string warning) =>
+        MessageBox.Show(
+            $"{warning}\n\n{QuitConfirmation.Question}",
+            QuitConfirmation.Title,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+
     /// <summary>Whether SOMETHING is serving the Recorder's port. The rule — and the five
     /// ways of not being there — belong to <see cref="ConnectionTester"/>, which already owns
     /// what <c>GET /health</c> means; both shells had written it out identically.</summary>

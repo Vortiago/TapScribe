@@ -95,7 +95,13 @@ async def healthz(recorder: Recorder = Depends(get_recorder)):
     plain curl). No auth required — must also be exempt in
     `config.AUTH_EXEMPT_ROUTES`. The richer shape vs `/health` lets an
     operator alert on meaningful state (recording paused unexpectedly,
-    live channel stuck in `error`) without scraping `/api/state`."""
+    live channel stuck in `error`) without scraping `/api/state`.
+
+    `active_jobs` counts the strip / transcribe / diarize / summarize /
+    pipeline jobs in flight, whoever started them. A Bundle tray reads it
+    before its Quit stops the Recorder, so the operator is asked first rather
+    than having the work die with the process — and it needs no credential
+    to ask, which is why it is here and not on `/api/state`."""
     from .. import __version__
 
     active_streams = await recorder.streams.snapshot()
@@ -106,5 +112,6 @@ async def healthz(recorder: Recorder = Depends(get_recorder)):
             "recording_enabled": recorder.recording_enabled,
             "live_channel_state": recorder.live.info.get("state", ""),
             "active_taps": len(active_streams),
+            "active_jobs": len(recorder.jobs.snapshot()),
         }
     )

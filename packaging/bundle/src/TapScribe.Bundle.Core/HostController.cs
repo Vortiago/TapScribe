@@ -141,7 +141,14 @@ public sealed class HostController : IDisposable
     /// password to it (<see cref="LoginLink"/>: "the password sent somewhere it does not
     /// belong"). The shell opens the plain dashboard instead.
     /// </summary>
-    public bool MayMintLoginLink
+    public bool MayMintLoginLink => OwnsRunningRecorder;
+
+    /// <summary>
+    /// Whether the Recorder on the port is the one this tray started, and up: the one a Quit
+    /// stops, and the only one whose answers are known to be this install's. Quit consults it
+    /// before asking that Recorder whether it is busy (<see cref="QuitConfirmation"/>).
+    /// </summary>
+    public bool OwnsRunningRecorder
     {
         get
         {

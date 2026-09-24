@@ -68,7 +68,12 @@ spawn, not configured. A Recorder that was already running when the tray
 launched (a `start.sh` in a terminal, another user's install holding port 8001)
 outlives the tray's Quit and shows as running-but-unmanaged. Start / Stop
 Recorder are separate menu items, so stopping the server does not mean quitting
-the tray.
+the tray. Because a Quit does stop the tray's OWN Recorder, and with it every
+strip, transcription and summary that process is running (none of them resume on
+the next launch), the tray first asks the Recorder's `/healthz` for its
+`active_jobs` and, if any are in flight, asks the operator before quitting. A
+Recorder that cannot be asked is not treated as busy: a failed probe must never
+be what keeps a tray from quitting.
 
 Unmanaged is decided by the spawn attempt, not by probing: the tray starts its
 child, and an `EADDRINUSE` exit plus a `/health` that answers means someone

@@ -78,6 +78,26 @@ public sealed class ControlClient : IDisposable
     }
 
     /// <summary>
+    /// GET /healthz (auth-exempt) and return how many jobs — strip, transcribe, diarize,
+    /// summarize, the end-of-meeting pipeline — the Recorder has in flight, whoever started
+    /// them. Throws like <see cref="CheckHealthAsync"/> when it cannot be asked. A Recorder
+    /// that does not report the count answers 0: one too old to say it is busy is not
+    /// treated as busy.
+    /// </summary>
+    public async Task<int> ActiveJobsAsync(CancellationToken cancellationToken = default)
+    {
+        using HttpResponseMessage response =
+            await _http.GetAsync(new Uri(_baseUri, "/healthz"), cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using JsonDocument doc = await JsonDocument.ParseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return doc.RootElement.TryGetProperty("active_jobs", out JsonElement jobs) && jobs.TryGetInt32(out int count)
+            ? count
+            : 0;
+    }
+
+    /// <summary>
     /// POST /api/tap/sessions/{session}/pipeline to trigger the end-of-meeting
     /// pipeline (strip → transcribe → summarize). The request body is empty: the
     /// Recorder ignores it and resolves the batch model + summarizer from
