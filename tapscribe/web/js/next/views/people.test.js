@@ -1,17 +1,11 @@
-// Unit tests for the People Region model (run via `node --test`, no DOM).
-//
-// #255: the People region moved from a hand-maintained sig to a Region model
-// (templates.js `renderRegionModel`). These pin exactly the dependencies the
-// old sig docstring hand-enumerated — the server name, the pending-rename
-// overlay, the identities, the sessions SET (not just its length), live /
-// recorded, and the focused session. Drop any of them from `peopleModel` and
-// the region silently goes stale; that is what these tests now catch at the
-// derivation instead of at an e2e audit.
+// Unit tests for the People Region model (#255, no DOM). Every field a row
+// renders from must vary the serialised model, or the region goes stale, and
+// `pregRowView` must read the model as the row shows it.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { peopleModel } from "./people.js";
+import { peopleModel, pregRowView } from "./people.js";
 
 /** A /api/state Person row, as thin as the derivation reads it. */
 const person = (over = {}) => ({
@@ -40,35 +34,77 @@ test("the model carries the focused session and every render field per row", () 
       pending: null,
       identities: ["dev-1"],
       sessions: ["s1"],
-      count: 1,
       live: false,
       recorded: true,
     },
   ]);
 });
 
-test("a pending rename reaches the serialised model", () => {
-  // The old sig's `pendingNames.get(p.id)` term: without it a typed name never
-  // re-renders, and the row keeps showing the server's value mid-edit.
-  const plain = JSON.stringify(peopleModel([person()], "s1", noPending));
-  const edited = JSON.stringify(
-    peopleModel([person()], "s1", (id) => (id === "p_1" ? "Ada Lovelace" : undefined)),
-  );
-  assert.notEqual(edited, plain);
+/** The serialised model, which is the region's swap gate, for one Person. */
+const sig = (over = {}, here = "s1", pendingOf = noPending) =>
+  JSON.stringify(peopleModel([person(over)], here, pendingOf));
+
+test("every field a row renders from varies the serialised model", () => {
+  const base = sig();
+  for (const [what, changed] of [
+    ["name", sig({ name: "Grace" })],
+    ["named", sig({ named: false })],
+    ["identities", sig({ identities: ["dev-2"] })],
+    ["live", sig({ live: true })],
+    ["recorded", sig({ recorded: false })],
+    // The old sig's `pendingNames.get(p.id)` term: without it a typed name
+    // never re-renders, and the row keeps showing the server's value mid-edit.
+    ["a pending rename", sig({}, "s1", (id) => (id === "p_1" ? "Ada Lovelace" : undefined))],
+    // `is-here` and the count tooltip read the array, not its length: a
+    // length-only term missed ["s1"] → ["s2"] at equal session_count.
+    ["a sessions-SET change", sig({ sessions: ["s2"] })],
+    // The `is-here` highlight keys on it: a model that ignored `here` would
+    // strand the highlight on the previously focused session.
+    ["the focused session", sig({}, "s2")],
+    // Clearing the field is an edit: it must not collide with no edit at all.
+    ["a pending empty name", sig({}, "s1", () => "")],
+  ]) {
+    assert.notEqual(changed, base, `${what} must reach the sig`);
+  }
 });
 
-test("a sessions-SET change at equal session_count reaches the serialised model", () => {
-  // The trap the old comment warned about: `is-here` and the count tooltip read
-  // the array, not its length — a length-only term missed ["s1"] → ["s2"].
-  const one = JSON.stringify(peopleModel([person({ sessions: ["s1"] })], "s1", noPending));
-  const two = JSON.stringify(peopleModel([person({ sessions: ["s2"] })], "s1", noPending));
-  assert.notEqual(one, two);
+/** One model row, from a Person with `over` applied. */
+const row = (over = {}, pending = undefined) => peopleModel([person(over)], "", () => pending).people[0];
+
+test("the input shows a pending edit, else the chosen name, else nothing", () => {
+  assert.equal(pregRowView(row({}, "Ada L"), "").shown, "Ada L");
+  assert.equal(pregRowView(row({}, ""), "").shown, "", "a cleared field stays cleared");
+  assert.equal(pregRowView(row(), "").shown, "Ada");
+  assert.equal(pregRowView(row({ named: false, name: "Mic 1" }), "").shown, "");
 });
 
-test("here flips with the focused session", () => {
-  // The `is-here` highlight keys on it; a model that ignored `here` would
-  // strand the highlight on the previously focused session.
-  const s1 = JSON.stringify(peopleModel([person()], "s1", noPending));
-  const s2 = JSON.stringify(peopleModel([person()], "s2", noPending));
-  assert.notEqual(s1, s2);
+test("the placeholder falls back from the name to the first identity", () => {
+  assert.equal(pregRowView(row({ named: false, name: "Mic 1" }), "").placeholder, "Mic 1");
+  assert.equal(pregRowView(row({ name: "", identities: ["dev-9"] }), "").placeholder, "dev-9");
+  assert.equal(pregRowView(row({ name: "", identities: [] }), "").placeholder, "name…");
+});
+
+test("the avatar fallback is the default label, and empty when there is none", () => {
+  assert.equal(pregRowView(row({ named: false, name: "Mic 1" }), "").fallback, "Mic 1");
+  assert.equal(pregRowView(row({ name: "", identities: ["dev-9"] }), "").fallback, "dev-9");
+  assert.equal(pregRowView(row({ name: "", identities: [] }), "").fallback, "");
+});
+
+test("the source label reads live, else recorded, else a dash", () => {
+  /** @param {{ src: string, srcClass: string }} v */
+  const srcOf = (v) => [v.src, v.srcClass];
+  assert.deepEqual(srcOf(pregRowView(row({ live: true }), "")), ["● live", "is-live"]);
+  assert.deepEqual(srcOf(pregRowView(row(), "")), ["recorded", "is-recorded"]);
+  assert.deepEqual(srcOf(pregRowView(row({ recorded: false }), "")), ["—", "is-recorded"]);
+});
+
+test("is-here marks a member of the focused session, and nothing when none is focused", () => {
+  assert.equal(pregRowView(row({ sessions: ["s1"] }), "s1").isHere, true);
+  assert.equal(pregRowView(row({ sessions: ["s1"] }), "s2").isHere, false);
+  assert.equal(pregRowView(row({ sessions: [""] }), "").isHere, false);
+});
+
+test("the count reads the sessions list", () => {
+  assert.equal(pregRowView(row({ sessions: ["s1"] }), "").count, "1 session");
+  assert.equal(pregRowView(row({ sessions: ["s1", "s2"] }), "").count, "2 sessions");
 });

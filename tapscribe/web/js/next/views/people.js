@@ -36,7 +36,7 @@ const spkClass = (spk) => `spk-${((spk % 5) + 5) % 5}`;
 const initials = (s) => (s || "?").trim().slice(0, 2).toUpperCase() || "?";
 
 /**
- * One row of the People Region model — every value the rows render from.
+ * One row of the People Region model: every value the rows render from.
  * @typedef {{
  *   id: string,
  *   named: boolean,
@@ -44,7 +44,6 @@ const initials = (s) => (s || "?").trim().slice(0, 2).toUpperCase() || "?";
  *   pending: string | null,
  *   identities: string[],
  *   sessions: string[],
- *   count: number,
  *   live: boolean,
  *   recorded: boolean,
  * }} PeopleRow
@@ -53,11 +52,11 @@ const initials = (s) => (s || "?").trim().slice(0, 2).toUpperCase() || "?";
 
 /**
  * The People view's Region model (templates.js `renderRegionModel`): its
- * serialisation IS the swap gate, so it lists exactly what the rows read —
- * the old hand-maintained sig's field list, as data. `pendingOf` is the
- * pending-rename lookup, taken as a function so the derivation stays pure.
+ * serialisation IS the swap gate, so it lists exactly what the rows read.
+ * `pendingOf` is the pending-rename lookup, taken as a function so the
+ * derivation stays pure.
  * @param {import('../../types.js').Person[]} people
- * @param {string} here — the focused session id, "" when none.
+ * @param {string} here The focused session id, "" when none.
  * @param {(id: string) => string | undefined} pendingOf
  * @returns {PeopleModel}
  */
@@ -71,10 +70,40 @@ export function peopleModel(people, here, pendingOf) {
       pending: pendingOf(p.id) ?? null,
       identities: p.identities,
       sessions: p.sessions,
-      count: p.session_count,
       live: p.live,
       recorded: p.recorded,
     })),
+  };
+}
+
+/** The value the input shows absent a local edit: the chosen name, or "" for
+ * an unnamed Person (its default then surfaces as the placeholder). Also the
+ * baseline the catch-up sweep compares a pending edit against.
+ * @param {{ named: boolean, name: string }} p */
+const serverName = (p) => (p.named ? p.name : "");
+
+/** A Person's default label: its name, else its first identity. "" when it has
+ * neither, so each caller adds its own last fallback.
+ * @param {{ name: string, identities: string[] }} p */
+const defaultLabel = (p) => p.name || p.identities[0] || "";
+
+/**
+ * What one registry row displays, read from its model row alone.
+ * @param {PeopleRow} row
+ * @param {string} here The focused session id, "" when none.
+ */
+export function pregRowView(row, here) {
+  const n = row.sessions.length;
+  return {
+    // `here` guard first: with no focused session, a "" in `sessions` must
+    // not highlight the row.
+    isHere: here !== "" && row.sessions.includes(here),
+    shown: row.pending ?? serverName(row),
+    fallback: defaultLabel(row),
+    placeholder: defaultLabel(row) || "name…",
+    count: `${n} session${n === 1 ? "" : "s"}`,
+    src: row.live ? "● live" : row.recorded ? "recorded" : "—",
+    srcClass: row.live ? "is-live" : "is-recorded",
   };
 }
 
@@ -89,13 +118,6 @@ export function build(ctx) {
   const headHost = pick(frag, "head");
   const hint = pick(frag, "hint");
   const peopleHost = pick(frag, "people");
-
-  /** The value the input shows absent a local edit: the chosen name, or "" for
-   * an unnamed Person (its default then surfaces as the placeholder). Also the
-   * baseline the catch-up sweep compares a pending edit against — one source for
-   * the rule.
-   * @param {import('../../types.js').Person} p */
-  const serverName = (p) => (p.named ? p.name : "");
 
   // Pending renames, so a save + re-poll round trip doesn't clear the field the
   // operator just typed. Per-view (unlike session labels, shared by two editors)
@@ -126,30 +148,29 @@ export function build(ctx) {
   const persist = (pid) => saver.save(pid, rowStatus(pid));
 
   /**
-   * One registry row, built from a model row and nothing else — the build
-   * reading live state would reopen the drift the Region model closes.
+   * One registry row, rendered from its model row and `speakerIndex`, which
+   * is stable per id. Reading other live state here reopens the drift the
+   * Region model closes. Event handlers may write live state.
    * @param {PeopleRow} row
-   * @param {PeopleRow[]} all — every model row, for the merge options.
-   * @param {string} here — the focused session id, "" when none.
+   * @param {PeopleRow[]} all Every model row, for the merge options.
+   * @param {string} here The focused session id, "" when none.
    */
   const pregRow = (row, all, here) => {
+    const view = pregRowView(row, here);
     const node = tpl("tpl-next-pregrow");
     const rowEl = pick(node, "row");
-    if (row.sessions.includes(here)) rowEl.classList.add("is-here");
+    if (view.isHere) rowEl.classList.add("is-here");
 
     const av = pick(node, "av");
     av.classList.add(spkClass(speakerIndex(row.id)));
     /** Avatar initials = current field text, else the Person's default.
      * @param {string} v */
-    const avatarText = (v) => initials(v || row.name || row.identities[0] || "?");
-    // The name to SHOW: pending edit > chosen name > "" (so an unnamed Person
-    // shows its default only as the placeholder, inviting a name).
-    const shown = row.pending ?? (row.named ? row.name : "");
-    av.textContent = avatarText(shown);
+    const avatarText = (v) => initials(v || view.fallback || "?");
+    av.textContent = avatarText(view.shown);
 
     const name = /** @type {HTMLInputElement} */ (pick(node, "name"));
-    name.value = shown;
-    name.placeholder = row.name || row.identities[0] || "name…";
+    name.value = view.shown;
+    name.placeholder = view.placeholder;
     name.addEventListener("input", () => {
       pendingNames.set(row.id, name.value);
       av.textContent = avatarText(name.value);
@@ -171,11 +192,11 @@ export function build(ctx) {
     };
 
     const src = pick(node, "src");
-    src.textContent = row.live ? "● live" : row.recorded ? "recorded" : "—";
-    src.classList.add(row.live ? "is-live" : "is-recorded");
+    src.textContent = view.src;
+    src.classList.add(view.srcClass);
 
     const count = pick(node, "count");
-    count.textContent = `${row.count} session${row.count === 1 ? "" : "s"}`;
+    count.textContent = view.count;
     count.title = row.sessions.join(", ");
 
     // Device identity token(s) — each detachable when the Person owns more than
@@ -207,7 +228,7 @@ export function build(ctx) {
       if (other.id === row.id) continue;
       const o = document.createElement("option");
       o.value = other.id;
-      o.textContent = other.name || other.identities[0] || other.id;
+      o.textContent = defaultLabel(other) || other.id;
       merge.appendChild(o);
     }
     merge.addEventListener("change", () => {
@@ -224,7 +245,7 @@ export function build(ctx) {
     return node;
   };
 
-  /** The region's build: rows straight from the model, nothing else read.
+  /** The region's build: one row per model row (see `pregRow`).
    * @param {PeopleModel} model @returns {Node} */
   const buildPeopleRows = (model) => {
     if (!model.people.length) {
@@ -265,7 +286,9 @@ export function build(ctx) {
     hint.textContent = `${people.length} ${people.length === 1 ? "person" : "people"}${liveN ? ` · ${liveN} live` : ""}`;
 
     // Region model: the serialisation IS the sig, so nothing the rows read can
-    // go stale unlisted (templates.js renderRegionModel). Swept overlay first.
+    // go stale unlisted (templates.js renderRegionModel). The sweep above runs
+    // before the model reads the overlay, so a caught-up rename never reaches
+    // the sig.
     renderRegionModel(
       peopleHost,
       peopleModel(people, sess?.session || "", (id) => pendingNames.get(id)),

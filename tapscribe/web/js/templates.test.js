@@ -1,18 +1,7 @@
-// Unit tests for the renderRegionModel primitive (run via `node --test`).
-//
-// #255: a region whose inputs are a pure derivation of state can render from a
-// Region model — a plain JSON-serialisable value whose serialisation IS the
-// render signature. These pin the seam's contract: the model reaches `build`
-// unchanged, the gate reads the SERIALISATION (not object identity), and the
-// interaction hold, the tick-retry, markRegionStale and the sig audit are
-// renderRegion's unchanged — the audit stays the backstop, now over modelled
-// regions too.
-//
-// The frontend tsconfig excludes *.test.js, so this file is never typechecked.
-// The fake host records swaps and serialises children into `innerHTML` (the
-// audit probe compares it); the method definition and the innerHTML getter keep
-// check-conventions' raw-swap / html-string regexes clean — the fake only ever
-// reads or defines, never calls or assigns through a dot.
+// Unit tests for renderRegionModel (#255): the gate reads the model's
+// serialisation, and renderRegion's holds, retry, markRegionStale and audit
+// still apply. The fake host defines `replaceChildren` and reads `innerHTML`,
+// never calls or assigns them, so check-conventions' regexes stay clean.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -43,7 +32,7 @@ const fakeNode = () => {
   return node;
 };
 
-/** A document with no focus and no selection — the seam's guards read exactly
+/** A document with no focus and no selection: the seam's guards read exactly
  * these three things before handing the swap to canon. */
 const fakeDoc = () => ({
   body: {},
@@ -144,7 +133,7 @@ test("an undefined model gates on a constant serialisation", () => {
     assert.equal(host.swaps, 1);
     renderRegionModel(host, undefined, () => "row");
     // JSON.stringify(undefined) is undefined, which renderRegion reads as "no
-    // sig" — an ungated region would swap every tick, and with a caret parked
+    // sig": an ungated region would swap every tick, and with a caret parked
     // inside it would mark the retry forever (#245). `?? ""` closes that.
     assert.equal(host.swaps, 1);
     assert.equal(consumeDeferredRender(), false);

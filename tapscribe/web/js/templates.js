@@ -26,7 +26,7 @@
 //     all three interaction holds; canon renderRegion performs the swap. The
 //     sig is read BEFORE the holds — see `renderRegion` for why that ordering
 //     is what makes one mechanism affordable (#245).
-//   - renderRegionModel — the same gate driven by a **Region model**, whose
+//   - renderRegionModel: the same gate driven by a **Region model**, whose
 //     serialisation IS the sig (see its JSDoc; CONTEXT.md has the term).
 //   - interactionHeld() — the document-wide hold predicate the poll pacer
 //     uses to keep the /api/state cadence fast while the operator works.
@@ -356,15 +356,10 @@ export function markRegionStale(host) {
 }
 
 /**
- * Render a region from a **Region model** — a plain JSON-serialisable value
- * the caller derives from state, whose serialisation IS the render signature.
- * `build` receives only the model, so a render input the model does not carry
- * cannot vary the render: the drift hand-maintained sigs allow is closed by
- * construction for everything that flows through the model. `build` must read
- * only `model` — a closure over live state reopens the drift.
- * Interaction holds, the gate order, markRegionStale and the sig audit are
- * renderRegion's unchanged; `?? ""` gates the `undefined` model on a constant
- * (JSON.stringify(undefined) is undefined = no sig = retry-marking churn, #245).
+ * Render a region from a **Region model** (CONTEXT.md): `build` reads only
+ * `model`, whose `JSON.stringify` is the sig. The model must be plain JSON, since
+ * a Set, a Map, an undefined key or NaN serialises lossily. `?? ""` gives an
+ * undefined model a constant sig, where no sig would churn the retry (#245).
  * @template M
  * @param {Element} host
  * @param {M} model

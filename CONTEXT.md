@@ -458,10 +458,10 @@ hold".
 
 The plain JSON-serialisable value a modelled region renders from: its
 serialisation IS the region's render signature, so a render input the model
-omits cannot vary the render. The build reads only the model — a closure over
+omits cannot vary the render. The build reads only the model: a closure over
 live state reopens the drift the model closes. The region is still swapped
 whole; only the sig's source changes.
-_Avoid_: "view-model" (the MVVM sense; this is per-region and serialised),
+_Avoid_: "view-model" (the MVVM sense: this is per-region and serialised),
 "state snapshot" (the poll body is the **State view**).
 
 ## Pending edit
