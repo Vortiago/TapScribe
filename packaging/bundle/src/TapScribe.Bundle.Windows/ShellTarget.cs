@@ -65,7 +65,7 @@ public static class ShellTarget
         // CreateProcess looks in the tray's own folder and its current directory BEFORE
         // System32, and a per-user install's folder is the operator's to write to: a
         // rundll32.exe planted there would be handed the live login link.
-        string forwarder = Path.Combine(Environment.SystemDirectory, "rundll32.exe");
+        string forwarder = Path.Join(Environment.SystemDirectory, "rundll32.exe");
 
         if (!CreateProcessW(
                 forwarder, commandLine, IntPtr.Zero, IntPtr.Zero, false,
