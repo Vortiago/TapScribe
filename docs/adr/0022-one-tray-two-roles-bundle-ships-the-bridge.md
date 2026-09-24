@@ -55,6 +55,14 @@ with no tray to stop them. The macOS seam therefore pairs the process group
 with a parent-death watch in the child's lifetime (kqueue `EVFILT_PROC` on the
 tray's pid), so a dead parent is a signal rather than a leak.
 
+That grandchild was never actually in the tray's group: `live.py` gives
+`whisperlivekit-server` a process group of its own so `stop()` can signal its
+whole tree, and that takes it out of the tray's reach too. It is covered from
+the Recorder's side instead. `tapscribe.live_guard` runs inside the server's
+group as the Recorder's child, polls its parent, and ends the group when the
+Recorder is gone. So when the tray reaps the Recorder, the server follows one
+hop later, and the same holds for a Recorder that dies on its own.
+
 **Quit stops only a Recorder the tray started.** Ownership is recorded at
 spawn, not configured. A Recorder that was already running when the tray
 launched (a `start.sh` in a terminal, another user's install holding port 8001)

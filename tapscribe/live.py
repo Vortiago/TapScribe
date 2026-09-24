@@ -427,6 +427,52 @@ def build_live_cmd(
     return cmd
 
 
+def build_live_guard_cmd(python: str, recorder_pid: int, server_pid: int) -> list[str]:
+    """The argv for `tapscribe.live_guard`, which ends the live server when the
+    Recorder dies without stopping it. Pure and list-form like `build_live_cmd`:
+    a module name and two integers."""
+    return [python, "-m", "tapscribe.live_guard", str(recorder_pid), str(server_pid)]
+
+
+#: The real class, bound before anything can substitute it. Only a real child has
+#: a pid that names a process group a guard can join; the lookalikes tests put in
+#: `subprocess.Popen`'s place carry pids that name nothing, or somebody else.
+_POPEN = subprocess.Popen
+
+
+def spawn_live_guard(server: Any) -> subprocess.Popen[bytes] | None:
+    """Start `tapscribe.live_guard` inside the live server's process group, as
+    this process's child. POSIX only: on Windows the Bundle's job object already
+    ends the server with the Recorder.
+
+    Non-fatal by design. Without the guard the server still runs and still
+    stops normally; what is lost is the cleanup after a Recorder that dies
+    without stopping it, so that is logged rather than raised.
+    """
+    if os.name != "posix" or not isinstance(server, _POPEN):
+        return None
+    argv = build_live_guard_cmd(sys.executable, os.getpid(), server.pid)
+    try:
+        guard = subprocess.Popen(
+            argv,
+            process_group=server.pid,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(
+            f"[tapscribe] live-server guard did not start ({e}); a Recorder that "
+            "crashes will leave whisperlivekit-server running",
+            flush=True,
+        )
+        return None
+    # Reaped on its own thread: it exits with the server's group, on a schedule
+    # no path in LiveChannel waits on.
+    threading.Thread(target=guard.wait, name="live-guard-reaper", daemon=True).start()
+    return guard
+
+
 def _probe_port_free(host: str, port: int) -> str | None:
     """Bind a throwaway socket to (host, port). Return None if the port
     is free, else a human-readable diagnostic.
@@ -1015,9 +1061,13 @@ class WhisperLiveKitChannel(LiveChannelBase):
                 errors="replace",
             )
             # On POSIX, give the child its own process group so we can SIGTERM
-            # the whole tree (uvicorn → ASR worker) cleanly.
+            # the whole tree (uvicorn → ASR worker) cleanly. A GROUP, not a new
+            # session: `spawn_live_guard` puts its watcher in this group, and a
+            # process can only join a group in its own session. No stdin, so the
+            # background group never touches the Recorder's terminal.
             if os.name == "posix":
-                popen_kwargs["start_new_session"] = True
+                popen_kwargs["process_group"] = 0
+                popen_kwargs["stdin"] = subprocess.DEVNULL
 
             try:
                 print(
@@ -1031,6 +1081,7 @@ class WhisperLiveKitChannel(LiveChannelBase):
                 self.info["state"] = "error"
                 self.info["last_error"] = f"spawn failed: {e}"
                 return False, self.info["last_error"]
+            spawn_live_guard(self._proc)
 
             self.info["model"] = self.config.model
             self.info["language"] = self.config.language
