@@ -87,8 +87,17 @@ if grep -q '<relocate>' "$work/expanded/PackageInfo"; then
   exit 1
 fi
 # Same rule for the postinstall: checked in what was built, not in what was handed
-# to pkgbuild. An expanded component keeps its Scripts as a cpio archive.
-if ! tar -tzf "$work/expanded/Scripts" | grep -q 'postinstall$'; then
+# to pkgbuild. `pkgutil --expand` unpacks a component's Scripts into a directory
+# (only the Payload stays archived); the archive branch is there so a pkgutil that
+# ever stops unpacking it fails this check for the right reason, not a tar error.
+postinstall_built() {
+  if [ -d "$1" ]; then
+    [ -x "$1/postinstall" ]
+  else
+    tar -tzf "$1" | grep -q 'postinstall$'
+  fi
+}
+if ! postinstall_built "$work/expanded/Scripts"; then
   echo "$out carries no postinstall: an upgrade would leave the old app behind" >&2
   exit 1
 fi
