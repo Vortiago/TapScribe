@@ -1,0 +1,29 @@
+#!/bin/sh
+# postinstall for TapScribe.app — both the bridge-only and the Bundle package
+# (build-macos-pkg.sh adds it to each). `installer` runs it as root.
+#
+# Removes the app this package supersedes. The bridge-only package used to
+# install /Applications/TapScribe.TrayBridge.MacOS.app; both packages now
+# install TapScribe.app under the same package identifier, and `installer`
+# never removes a bundle an older receipt wrote. That old bundle is owned by
+# root, because `installer` wrote it, so the tray's own first-launch removal
+# (LegacyAppBundle), which runs as the operator, cannot delete it. Root is
+# here, so the removal is too; the tray's attempt stays as the fallback for
+# an app that arrived some other way.
+#
+# Narrow on purpose (ADR-0024). One fixed path, only when that bundle is ours
+# by identifier, and never through a symlink. It writes nothing and reads no
+# $HOME, which is what ADR-0024 rejects a postinstall for. And it never fails
+# the install: an old app left behind costs a second icon, not a broken one.
+
+target=${3:-/}
+legacy="${target%/}/Applications/TapScribe.TrayBridge.MacOS.app"
+
+[ -L "$legacy" ] && exit 0
+[ -d "$legacy" ] || exit 0
+
+id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$legacy/Contents/Info.plist" 2>/dev/null) || exit 0
+[ "$id" = "net.havso.tapscribe.traybridge" ] || exit 0
+
+/bin/rm -rf "$legacy" || true
+exit 0

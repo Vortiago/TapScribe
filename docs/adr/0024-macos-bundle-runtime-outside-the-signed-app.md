@@ -64,7 +64,9 @@ Apple membership and CI secrets, and is deferred rather than rejected.
 **A `pkg` postinstall script writing into the installing user's home.**
 Rejected: `installer` runs it as root with `$HOME` at `/var/root`, so it must
 resolve the console user by hand — root-shaped, fiddly, and untestable on the
-Linux CI leg that covers the rest of `Bundle.Core`.
+Linux CI leg that covers the rest of `Bundle.Core`. The objection is to reaching
+into a user's home, not to a root script as such: see the one postinstall both
+packages do carry, under Consequences.
 
 **Fetch python-build-standalone on first run**, the way
 `tapscribe/diarizers/model.py` fetches CAM++ with a verified sha256. Precedent
@@ -77,3 +79,23 @@ The runtime exists twice on disk — once read-only in the `.app`, once writable
 in the data root. Order-of 300 MB rather than 150 MB, and an uninstall that
 deletes only the `.app` leaves the runtime behind with the operator's data,
 which is the correct side to err on.
+
+Both packages install `/Applications/TapScribe.app` under one identifier, which
+is what lets a Bundle upgrade a bridge-only install in place. It cuts the other
+way too, so the packages carry two rules of their own, both in
+`bridges/tray-bridge/tools/build-macos-pkg.sh` and both proven on CI's macOS
+leg:
+
+- **The bridge-only package refuses to install over a Bundle.** Replacing the
+  app there deletes the Bundle's `python/` and `wheel/`, and the Recorder just
+  disappears from the menu. The dashboard offers that package on every install,
+  so the refusal is in the package: a Distribution `installation-check` that
+  `installer` runs before it writes anything, keyed on the same `python/` OR
+  `wheel/` probe the tray uses for its own role.
+- **Both packages carry a postinstall that removes the app they supersede**,
+  `/Applications/TapScribe.TrayBridge.MacOS.app`. `installer` wrote that bundle,
+  so it is owned by root, and the tray's first-launch removal
+  (`LegacyAppBundle`), which runs as the operator, cannot delete it. The script
+  touches that one path only, only when the bundle there is ours by identifier,
+  never through a symlink, and never fails the install. It writes nothing and
+  reads no `$HOME`, so it is not the postinstall rejected above.

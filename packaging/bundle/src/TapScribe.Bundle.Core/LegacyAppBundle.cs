@@ -11,9 +11,11 @@ namespace TapScribe.Bundle.Core;
 /// the Applications folder, one of them dead, which is the exact outcome the rename exists
 /// to prevent.
 ///
-/// A first-launch removal rather than a <c>pkg</c> postinstall script, for the reason
-/// ADR-0024 already rejects those: a script runs as root, and this way the rule is here,
-/// in the assembly the Linux CI leg tests.
+/// The packages' own postinstall does this first, as root (ADR-0024): <c>installer</c> wrote
+/// the old bundle and it is owned by root, so this removal, which runs as the operator,
+/// cannot delete that one and only logs why. It stays for the case no postinstall ever runs
+/// in: a new app that arrived unzipped rather than installed, beside an old one the operator
+/// unzipped too and so may delete.
 ///
 /// Deliberately narrow. It removes ONE known path, only when the app doing the removing is
 /// itself the installed one, and it never touches anything it did not ship. A cleanup that

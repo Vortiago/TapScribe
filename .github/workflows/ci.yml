@@ -739,6 +739,65 @@ jobs:
           kill "$pid"
           echo "OK: the installed bundle launched and stayed up."
 
+      # The bridge-only package must never install over a Bundle: both install
+      # /Applications/TapScribe.app under one identifier, so replacing the app there
+      # deletes the Bundle's interpreter and wheel, and the dashboard offers this
+      # package on every install. build-macos-pkg.sh gives it a Distribution
+      # installation-check; this proves `installer` honours it and that nothing was
+      # written before the refusal. A fake payload in the app the quarantine proof
+      # installed stands in for a Bundle, and AFTER the launch proof, so that one
+      # never boots a payload-bearing app.
+      - name: Prove the bridge-only package will not replace a Bundle
+        run: |
+          set -euo pipefail
+          resources=/Applications/TapScribe.app/Contents/Resources
+          sudo mkdir -p "$resources/python"
+          sudo touch "$resources/python/marker"
+
+          if sudo installer -pkg probe.pkg -target / > refuse.log 2>&1; then
+            echo "FAIL: the bridge-only package installed over a Bundle."
+            cat refuse.log
+            exit 1
+          fi
+          if [ ! -f "$resources/python/marker" ]; then
+            echo "FAIL: the install was refused, but the Bundle's payload is gone anyway."
+            cat refuse.log
+            exit 1
+          fi
+
+          # And it refuses a BUNDLE, not a reinstall: without the payload it installs.
+          sudo rm -rf "$resources/python"
+          sudo installer -pkg probe.pkg -target /
+          echo "OK: the bridge-only package refuses a Bundle and still reinstalls over itself."
+
+      # The postinstall both packages carry removes the app this one supersedes. The
+      # old bundle is owned by root, because `installer` wrote it, so only a root
+      # script can remove it; the tray's own first-launch attempt runs as the
+      # operator and cannot. Both sides of its narrowness are proven: ours by
+      # identifier goes, and a stranger at the same path stays.
+      - name: Prove the postinstall removes the app the package supersedes
+        run: |
+          set -euo pipefail
+          legacy=/Applications/TapScribe.TrayBridge.MacOS.app
+
+          sudo mkdir -p "$legacy/Contents"
+          sudo defaults write "$legacy/Contents/Info" CFBundleIdentifier net.havso.tapscribe.traybridge
+          sudo installer -pkg probe.pkg -target /
+          if [ -e "$legacy" ]; then
+            echo "FAIL: the superseded app is still in /Applications after an install."
+            exit 1
+          fi
+
+          sudo mkdir -p "$legacy/Contents"
+          sudo defaults write "$legacy/Contents/Info" CFBundleIdentifier org.example.not-ours
+          sudo installer -pkg probe.pkg -target /
+          if [ ! -d "$legacy" ]; then
+            echo "FAIL: the postinstall removed an app that is not TapScribe's."
+            exit 1
+          fi
+          sudo rm -rf "$legacy"
+          echo "OK: the postinstall removes the superseded app, and only that app."
+
   # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
   # WS client, control client) must build and its tests run with no Windows
   # dependency. Building only the test project — which references the core and
