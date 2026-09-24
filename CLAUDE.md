@@ -135,7 +135,12 @@
   region whose output drifts from its sig is recorded to
   `globalThis.__TAPSCRIBE_SIG_DRIFT`. The
   `test_renderregion_sig_audit_finds_no_drift` e2e test enables it across
-  the views and asserts no drift.
+  the views and asserts no drift. For a NEW region whose inputs are a pure
+  derivation of state, prefer `renderRegionModel(host, model, build)`
+  (`web/js/templates.js`): the model's serialisation IS the sig and `build`
+  reads only the model, so the sig cannot go stale for values the model
+  carries. `renderRegion` with a hand-maintained sig, and the audit, stay
+  the supported form where the inputs are not a JSON model.
 - Every lazily-fetched body on `/next` is a **lazy resource**
   (`web/js/lazy-resource.js` `createResource`, declared in `web/js/api.js`), and
   a view reads it by **binding a watcher once at build time**
