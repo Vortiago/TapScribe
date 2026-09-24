@@ -1144,14 +1144,14 @@ public sealed class BridgeRuntime
         // observed here for the same reason: whether the taps closed cleanly is not the thing
         // standing between the operator and a shell that goes away.
         if (meeting is not null)
-            await CappedAsync(meeting.Orchestrator.DisposeAsync().AsTask()).ConfigureAwait(false);
+            await CappedTeardownAsync(meeting.Orchestrator).ConfigureAwait(false);
 
         // The attached twin, under the same cap and for the same reason. Exclusive with the
         // meeting above, so at most one of the two ever runs — but read separately rather than
         // as an else, because "exactly one is non-null" is the invariant, not the assumption.
         Attached? attached = TakeAttached();
         if (attached is not null)
-            await CappedAsync(attached.Orchestrator.DisposeAsync().AsTask()).ConfigureAwait(false);
+            await CappedTeardownAsync(attached.Orchestrator).ConfigureAwait(false);
 
         // A Disconnect already in flight took the attached taps before this method could, and
         // its drain is still running. Same reasoning as the End wait below: cut short, the taps
@@ -1190,6 +1190,14 @@ public sealed class BridgeRuntime
     /// </summary>
     private Task CappedAsync(Task teardown) =>
         Task.WhenAny(teardown, Task.Delay(_budgets.QuitTeardownCap));
+
+    // Started on the pool, never inline. A session with no Utterance left to drain runs its
+    // DisposeAsync synchronously to the end, device release included, so a device that hangs
+    // closing would block the CALLER (the shell's UI thread, before QuitAsync's first await)
+    // for the whole hang, and CappedAsync would be handed a task only once it was over: the
+    // backstop would never be consulted in exactly the quiet-room case it exists for.
+    private Task CappedTeardownAsync(CaptureOrchestrator orchestrator) =>
+        CappedAsync(Task.Run(() => orchestrator.DisposeAsync().AsTask()));
 
     /// <summary>
     /// A streaming meeting: the pipelines (which hold the enumerator their endpoints came out
