@@ -11,6 +11,7 @@
   transcribe       the batch transcribe triggers
   summarize        summarize a session, the model list, the saved default
   live             live channel control and its transcript feed
+  login            the login link and the dashboard session it mints
   people           the People registry view and its mutations
   models           the model catalog and the in-process model cache
   operator_config  the persisted text config and the language catalog
@@ -49,6 +50,7 @@ from .bridges import router as bridges_router
 from .diagnostics import router as diagnostics_router
 from .diarize import router as diarize_router
 from .live import router as live_router
+from .login import router as login_router
 from .models import router as models_router
 from .operator_config import router as operator_config_router
 from .people import router as people_router
@@ -72,6 +74,7 @@ ALL_ROUTERS: tuple[APIRouter, ...] = (
     transcribe_router,
     summarize_router,
     live_router,
+    login_router,
     people_router,
     models_router,
     operator_config_router,

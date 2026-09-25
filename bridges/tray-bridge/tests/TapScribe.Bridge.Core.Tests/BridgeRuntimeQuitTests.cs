@@ -15,6 +15,30 @@ namespace TapScribe.Bridge.Core.Tests;
 public class BridgeRuntimeQuitTests
 {
     [Fact]
+    public async Task QuitAsync_MidAttachedTap_ClosesEveryPipelineBeforeReleasingTheShell()
+    {
+        // The attached twin of the meeting case below. An attached tap holds the same
+        // orchestrator over the same devices, so a teardown that only knows about meetings
+        // leaves a room mic streaming into the Recorder with no tray left to stop it.
+        using var harness = new RuntimeHarness();
+        FakeAudioCapture mic = harness.AddDevice("mic", DeviceFlow.Capture);
+        FakeAudioCapture system = harness.AddDevice("system", DeviceFlow.Render);
+
+        BridgeRuntime runtime = harness.Build();
+        runtime.Connect();
+        await RuntimeHarness.ConnectSettledAsync(runtime);
+        Assert.True(harness.View.CanDisconnect, "nothing was attached, so this proves nothing");
+
+        await runtime.QuitAsync();
+
+        Assert.True(mic.Disposed);
+        Assert.True(system.Disposed);
+        Assert.True(harness.Enumerator.Disposed, "the device enumerator was stranded at quit");
+        Assert.True(harness.View.ShutdownCalled, "the shell was never told teardown had finished");
+        Assert.True(harness.View.CapturesReleasedBeforeShutdown);
+    }
+
+    [Fact]
     public async Task QuitAsync_MidMeeting_ClosesEveryPipelineBeforeReleasingTheShell()
     {
         using var harness = new RuntimeHarness();
@@ -46,8 +70,10 @@ public class BridgeRuntimeQuitTests
         Assert.True(harness.View.ShutdownWasMarshalled, "Shutdown bypassed the dispatcher");
     }
 
-    [Fact]
-    public async Task QuitAsync_WhenTheTeardownOutlivesItsCap_StillLetsTheShellGo()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task QuitAsync_WhenTheTeardownOutlivesItsCap_StillLetsTheShellGo(bool openUtterance)
     {
         // The cap is a BACKSTOP, so overrunning it is an expected outcome rather than an error:
         // a device that hangs closing, or a drain waiting on a Recorder that accepted the
@@ -75,10 +101,14 @@ public class BridgeRuntimeQuitTests
         runtime.Start();
         await RuntimeHarness.StartSettledAsync(runtime);
         Assert.True(harness.View.CanEnd, "no meeting was running, so this proves nothing");
-        // An open Utterance, so the session's teardown has a drain to await and the hung release
-        // below lands on a continuation rather than on the quit's own thread. Without it the
-        // whole teardown runs inline and the cap is never consulted.
-        mic.Emit(Fixtures.Loud(40));
+        // Both shapes a Quit meets. With an open Utterance the session's teardown has a drain to
+        // await, so the hung release lands on its continuation. Without one (a quiet room) the
+        // session's DisposeAsync runs synchronously to the end, hung release included, so the
+        // runtime must not start it on its own thread or the cap is never consulted. This test
+        // used to lean on the Emit alone, and flaked whenever the loud frame had not opened an
+        // Utterance by the time Quit ran: that was the unguarded shape leaking through.
+        if (openUtterance)
+            mic.Emit(Fixtures.Loud(40));
 
         try
         {

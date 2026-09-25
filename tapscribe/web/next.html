@@ -61,8 +61,10 @@
     <!-- Floating "show taps" button — only visible while the rail is hidden. -->
     <button class="rail-show" type="button" id="tapsRailShow" title="Show the active-taps rail" aria-label="Show active taps">🛰️ taps</button>
 
-    <!-- Client-error bar (wireErrorBar, web/js/lib/chrome.js): hidden until an
-         unhandled error/rejection fills it; also beacons /api/client-errors. -->
+    <!-- Client-error bar: hidden until something fills it. wireErrorBar
+         (web/js/lib/chrome.js) writes an unhandled error/rejection here and
+         beacons /api/client-errors; next/main.js writes the signed-out cue when
+         the poll answers 401, and clears only what it wrote. -->
     <output id="errbar" hidden></output>
 
     <script type="module" src="/web/js/next/main.js"></script>

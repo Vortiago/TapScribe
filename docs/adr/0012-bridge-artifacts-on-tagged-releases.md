@@ -14,6 +14,19 @@ under **stable, unversioned filenames**:
 - `TapScribe.TrayBridge-win-x64.zip`
 - `TapScribe.TrayBridge-osx-arm64.pkg`
 - `TapScribe.TrayBridge-osx-arm64.zip`
+- `TapScribe-Setup-win-x64.exe` — the Windows [Bundle](../../CONTEXT.md#bundle).
+  Attached under the same permanent-URL contract, but downloaded into a separate
+  `bundle-artifacts/` path and **absent from `bridges_catalog.BRIDGE_ARTIFACTS`**:
+  a Bundle is not a Bridge, so it never appears in the dashboard's "Get a bridge"
+  card — you need a Bundle to have a dashboard. It ships the same tray the
+  Windows zip does, which is why the release job reuses that artifact rather than
+  publishing a second copy (ADR-0022).
+- `TapScribe-Bundle-osx-arm64.pkg` — the macOS [Bundle](../../CONTEXT.md#bundle)
+  (ADR-0024). Everything said above about the Windows one holds: same
+  `bundle-artifacts/` path, absent from `BRIDGE_ARTIFACTS`, and built from the
+  `.app` the macOS tray job already published rather than a second publish of the
+  same tray. It is that `.app` with a read-only interpreter and wheel laid inside
+  it, which is why the two macOS assets differ in size and not in tray.
 
 The dashboard's Settings "Get a bridge" card links to
 `https://github.com/{GITHUB_REPO}/releases/latest/download/<asset>`.

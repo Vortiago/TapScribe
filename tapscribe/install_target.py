@@ -50,7 +50,7 @@ def resolve_install_spec(raw: str | None) -> str:
     """Validate an untrusted ``--install-spec`` and return the pip target.
 
     ``None`` (the default, i.e. nobody passed the flag) means the checkout.
-    A ``.whl`` path is absolutised here — the Launcher may pass one relative to
+    A ``.whl`` path is absolutised here — the tray may pass one relative to
     the install directory while pip runs with a different cwd. A pinned
     ``tapscribe==X.Y.Z`` passes through.
 

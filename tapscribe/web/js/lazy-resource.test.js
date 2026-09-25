@@ -131,6 +131,39 @@ test("remember-error: the failure is surfaced, repainted once, and not refetched
   assert.equal(d.calls.length, 2, "a new signature is a new key — it fetches at once");
 });
 
+test("onFailure as a function: each rejection is governed by the policy it answers for THAT error", async () => {
+  // A signed-out 401 (the session cookie died with the Recorder, ADR-0023) says
+  // nothing about a WAV. Remembered, it pinned "401 …" on the canvas for the rest
+  // of the tab, after the operator had signed back in; paced like retry-next-poll,
+  // it is asked again. A failure that IS about the body is still remembered.
+  const d = deferredLoad();
+  const signedOut = new Error("401 Authentication required");
+  const res = createResource((/** @type {string} */ id) => id, d.load, {
+    onFailure: (err) => (err === signedOut ? "retry-next-poll" : "remember-error"),
+  });
+  let landed = 0;
+  const view = res.watch(() => { landed += 1; });
+
+  view.resolve(["wav"]);
+  d.reject(1, signedOut);
+  await flush();
+  assert.equal(landed, 0, "silent, like retry-next-poll: nothing new to show");
+  const paced = view.resolve(["wav"]);
+  assert.equal(paced.error, null, "never reported as the body's own failure");
+  assert.equal(paced.loading, true);
+  assert.equal(d.calls.length, 1, "the tick right after it is skipped");
+  view.resolve(["wav"]);
+  assert.equal(d.calls.length, 2, "and the next one asks again");
+
+  const unreadable = new Error("500 could not read WAV");
+  d.reject(2, unreadable);
+  await flush();
+  assert.equal(landed, 1, "a remembered failure is something to render");
+  assert.equal(view.resolve(["wav"]).error, unreadable);
+  view.resolve(["wav"]);
+  assert.equal(d.calls.length, 2, "and it stands until the key changes");
+});
+
 test("holdKeyOf: a signature flip resolves the last-good body, not the cold sentinel (#266)", async () => {
   // files_sig flips once per TRACK during a batch transcribe. Reporting the
   // refetch as a cold load blanks the whole multi-item region to "loading…" once

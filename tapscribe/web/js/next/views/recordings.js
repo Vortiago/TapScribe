@@ -324,8 +324,9 @@ export function build(ctx) {
       waveform.setPreview(null);
     }
     // Peaks: `remember-error`, so an unreadable WAV shows the reason instead of
-    // being re-asked every poll tick (api.js declares that; the key changes with
-    // the WAV's byte size, which is the only thing that could change the answer).
+    // being re-asked every poll tick (api.js declares that, a 401 aside; the key
+    // changes with the WAV's byte size, which is the only thing that could change
+    // the answer).
     const peaks = heroPeaks.resolve([sid, sel.name, "original", fileSig]);
     /** @type {"ok" | "loading" | "error"} */
     let state = "loading";
@@ -990,6 +991,15 @@ export function build(ctx) {
         wavHint.textContent = `${files.length} original${files.length === 1 ? "" : "s"}`;
       }
     }
+
+    // ---- Hero canvas: its lazy bodies resolve EVERY tick ---------------------
+    // Like any region's (CLAUDE.md). A quiet tick answers from the cache and the
+    // wave sig in `drawWaveform` skips the draw, so this costs two lookups. What it
+    // buys is the retry a transiently failed load is owed: a 401 while the tab was
+    // signed out is paced like `retry-next-poll` (api.js), and only a resolve
+    // collects that. Behind the chrome gate alone, the WAV picked during the spell
+    // sat on "loading waveform…" after sign-in until the operator picked it again.
+    if (sel && !filesLoading) drawWaveform(sel);
 
     // ---- Job progress bar (in place, every tick — render-signature hygiene) -
     renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job);

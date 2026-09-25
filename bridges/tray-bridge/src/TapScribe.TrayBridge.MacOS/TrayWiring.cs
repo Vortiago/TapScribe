@@ -24,6 +24,7 @@ internal static class TrayWiring
             // handle while nothing is recording. The enumerator owns the HAL it is given.
             static () => new MacOSAudioDeviceEnumerator(new CoreAudioHal()),
             MintDetachedSessionAsync,
+            ConnectionTester.CheckSettingsAsync,
             stores.Settings,
             stores.MeetingState,
             stores.MeetingHistory);

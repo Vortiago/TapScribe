@@ -31,7 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="TapScribe — local-first transcription recorder + dashboard.",
     )
     p.add_argument("--host", default="localhost", help="Bind address. Use 0.0.0.0 to expose on LAN.")
-    p.add_argument("--port", type=int, default=8001)
+    # Defaulted FROM config, which `main()` then stamps back onto it: one declaration of the
+    # port, rather than a literal here that a launch skipping argparse would disagree with.
+    p.add_argument("--port", type=int, default=config.PORT)
     p.add_argument(
         "--live-model",
         default="tiny.en",
@@ -162,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="What pip installs TapScribe from when /setup installs model "
         "backends: omitted (a dev checkout, the default), a path to the "
         "Windows Bundle's shipped .whl, or a pinned 'tapscribe==X.Y.Z'. "
-        "The Bundle's Launcher passes its wheel. See ADR-0015.",
+        "The Bundle's tray passes its wheel. See ADR-0015.",
     )
     return p
 
@@ -193,6 +195,11 @@ def main() -> None:
         backend_pref = "cpu"
     config.AUTH_ENABLED = not args.no_auth
     config.AUTO_START_LIVE = args.auto_live
+    # What the dashboard session cookie is scoped and secured by — see the two
+    # constants' own comment in config.py. Stamped here, beside AUTH_ENABLED, so
+    # every boot-time fact the auth layer needs is set in one place.
+    config.PORT = args.port
+    config.TLS_ENABLED = args.tls or bool(args.cert or args.key)
 
     live_config_kwargs: dict[str, object] = dict(
         model=args.live_model,
@@ -279,7 +286,7 @@ def main() -> None:
     # files; reuse it across restarts so browsers only prompt once.
     ssl_certfile: str | None = None
     ssl_keyfile: str | None = None
-    use_tls = args.tls or bool(args.cert or args.key)
+    use_tls = config.TLS_ENABLED
     if use_tls:
         from pathlib import Path as _Path
 

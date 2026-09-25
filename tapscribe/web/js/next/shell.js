@@ -7,7 +7,7 @@
 // CONTEXT.md "Source pick · original / stripped · effective source").
 
 import { tpl, pick } from "../templates.js";
-import { postJson, mutateButton } from "../api.js";
+import { postJson, mutateButton, errText } from "../api.js";
 import { createProgressSync } from "../vc/components/progress/progress.js";
 import { createEmptyStateSync } from "../vc/components/empty-state/empty-state.js";
 import { serverSessionLabel } from "./session-labels.js";
@@ -326,7 +326,7 @@ export function wireRecPill(btn, getState, { afterMutate }) {
     const enabled = nextRecordingEnabled(getState());
     mutateButton(btn, () => postJson("/api/recording/toggle", { enabled }), {
       afterMutate,
-      failMessage: (e) => `Recording toggle failed: ${e}`,
+      failMessage: (e) => `Recording toggle failed: ${errText(e)}`,
     });
   });
 }

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- CROSS-PLATFORM on purpose: no WinForms, no P/Invoke, no Windows-only
+       APIs, so every decision the host role makes (layout resolution, argv
+       construction, log rotation, password reading) is unit-tested on the
+       Linux CI leg. System.IO *is* cross-platform, so the two types that
+       genuinely need the disk (BundleLayout's wheel scan, PasswordFile)
+       live here too and are tested against a temp dir. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TapScribe.Bundle.Core</RootNamespace>
+  </PropertyGroup>
+
+</Project>

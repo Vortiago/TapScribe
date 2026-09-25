@@ -50,7 +50,7 @@ def test_existing_wheel_resolves_to_its_absolute_path(tmp_path):
 
 
 def test_relative_wheel_path_is_absolutised(tmp_path, monkeypatch):
-    """The Launcher may pass a path relative to the install dir; pip runs with
+    """The tray may pass a path relative to the install dir; pip runs with
     a different cwd, so the seam resolves it once, here."""
     wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
     wheel.write_bytes(b"")

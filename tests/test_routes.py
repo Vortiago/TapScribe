@@ -469,6 +469,15 @@ def test_healthz_returns_documented_shape(client, recorder_under_test):  # noqa:
     assert isinstance(body["live_channel_state"], str)
     assert isinstance(body["active_taps"], int)
     assert body["active_taps"] >= 0
+    assert body["active_jobs"] == 0
+
+
+def test_healthz_counts_jobs_in_flight(client, recorder_under_test):
+    """A Bundle tray asks this before its Quit stops the Recorder: any job in
+    flight, however it was started, has to show up here."""
+    _claim_job(recorder_under_test, "s1", kind="transcribe")
+
+    assert client.get("/healthz").json()["active_jobs"] == 1
 
 
 # ---------------------------------------------------------------------------

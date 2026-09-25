@@ -42,6 +42,68 @@ public readonly record struct ConnectionTestOutcome(string Text, bool Ok);
 /// </summary>
 public static class ConnectionTester
 {
+    /// <summary>
+    /// Whether SOMETHING is serving a Recorder's port — a synchronous <c>GET /health</c> with
+    /// a short deadline, answering false for every way of not being there.
+    ///
+    /// The discriminator a Bundle's host role needs when the Recorder it just spawned exits
+    /// immediately: "someone else's Recorder holds this port" versus "this install is
+    /// broken" (ADR-0022). Here rather than in each tray shell, where it had been written
+    /// twice character-for-character, and here rather than in Bundle.Core, which must not
+    /// reference Bridge.Core — a Bundle is not a Bridge. Beside <see cref="TestAsync"/>
+    /// because both wrap the same call for the same question, and the filter below is
+    /// deliberately the one that method's callers already keep.
+    ///
+    /// Loopback and no token by design: a Bundle IS the Recorder on its own machine, and
+    /// <c>/health</c> takes no credential.
+    /// </summary>
+    /// <param name="http">The caller's client, so no handler is churned per probe.</param>
+    public static bool AnswersOnLoopback(int port, HttpClient http, TimeSpan timeout) =>
+        OnLoopback(port, http, timeout, async (control, token) =>
+        {
+            await control.CheckHealthAsync(token).ConfigureAwait(false);
+            return true;
+        }, unanswered: false);
+
+    /// <summary>
+    /// How many jobs the Recorder on this machine has in flight — a synchronous
+    /// <c>GET /healthz</c> under the same short deadline as <see cref="AnswersOnLoopback"/> —
+    /// or null when it could not be asked. A Bundle's Quit stops the Recorder it started, and
+    /// this is what lets it ask the operator first instead of letting a strip, transcription
+    /// or summary die with the process. Null means "could not tell", and a caller must not
+    /// keep a tray from quitting on that: a Recorder that cannot answer is not doing much.
+    /// </summary>
+    /// <param name="http">The caller's client, so no handler is churned per probe.</param>
+    public static int? ActiveJobsOnLoopback(int port, HttpClient http, TimeSpan timeout) =>
+        OnLoopback<int?>(port, http, timeout,
+            async (control, token) => await control.ActiveJobsAsync(token).ConfigureAwait(false),
+            unanswered: null);
+
+    /// <summary>
+    /// Ask the Recorder on this machine's loopback one question, synchronously and under
+    /// <paramref name="timeout"/>, answering <paramref name="unanswered"/> for every way of it
+    /// not being there to ask: nothing listening, no answer in time, or an answer that was not
+    /// the Recorder's JSON. None of those says somebody else's healthy Recorder holds the port,
+    /// and none says it is busy.
+    /// </summary>
+    private static T OnLoopback<T>(
+        int port, HttpClient http, TimeSpan timeout,
+        Func<ControlClient, CancellationToken, Task<T>> ask, T unanswered)
+    {
+        try
+        {
+            using var control = new ControlClient("127.0.0.1", port, tls: false, token: "", http);
+            using var deadline = new CancellationTokenSource(timeout);
+            return ask(control, deadline.Token).GetAwaiter().GetResult();
+        }
+        catch (Exception error) when (
+            error is HttpRequestException or OperationCanceledException or SocketException
+                or InvalidOperationException or System.Text.Json.JsonException)
+        {
+            return unanswered;
+        }
+    }
+
     /// <summary>Run the probe under the shared timeout and describe every outcome, a throw
     /// included. Both dialogs run this fire-and-forget from a click, where an escaping exception
     /// is swallowed by the scheduler and strands the status line on "Testing...".</summary>
@@ -62,6 +124,23 @@ public static class ConnectionTester
             // malformed entry throwing below it. What is lost is the stack.
             return new ConnectionTestOutcome($"Test failed: {ex.Message}", Ok: false);
         }
+    }
+
+    /// <summary>
+    /// The probe over an operator's settings, shaped as
+    /// <see cref="BridgeDependencies.CheckConnection"/>: what both shells pass as their
+    /// production pre-flight for Connect (ADR-0025). Named here rather than written as a
+    /// lambda at each wiring site, because the two would be character-for-character the same
+    /// and would drift apart the first time one of them learned something.
+    ///
+    /// Connect has no mint to round-trip the Recorder, so without this an unreachable
+    /// Recorder or a refused token stays silent until the first person speaks.
+    /// </summary>
+    public static Task<ConnectionTestResult> CheckSettingsAsync(
+        BridgeSettings settings, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return TestAsync(settings.ToConnectionOptions(), http: null, cancellationToken);
     }
 
     public static async Task<ConnectionTestResult> TestAsync(
@@ -104,10 +183,18 @@ public static class ConnectionTester
             // ConnectAsync threw above). Guard the other shape too: a server that
             // accepts then immediately closes must not read as "accepted". A close
             // within the window => rejected; silence => accepted.
+            //
+            // Except a NORMAL close. That is the Recorder refusing the TAP, not the
+            // token: it accepts the upgrade and then closes 1000 while recording is
+            // paused on the dashboard (routes/tap.py), which a bad token never gets
+            // far enough to see. Read as a rejection, it sent an operator whose token
+            // was fine to re-enter it — and, since Connect to live gates on this probe,
+            // refused to connect at all while a meeting's Start went ahead.
             bool closedByServer = await tap
                 .WaitForServerCloseAsync(TimeSpan.FromMilliseconds(400), cancellationToken)
                 .ConfigureAwait(false);
-            return closedByServer
+            bool tokenRefused = closedByServer && tap.CloseStatus != WebSocketCloseStatus.NormalClosure;
+            return tokenRefused
                 ? new ConnectionTestResult(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: false, TokenError: "the Recorder closed the tap immediately (token rejected)")
                 : new ConnectionTestResult(Reachable: true, ReachError: null, TokenChecked: true, TokenAccepted: true, TokenError: null);
         }

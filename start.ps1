@@ -95,7 +95,7 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 #     skip with $env:TAPSCRIBE_NO_CUDA_TORCH=1.
 #
 # These used to be inlined here and, near-identically, in start.sh. They now
-# live in `tapscribe.preflight` so the Windows Bundle's Launcher — which has no
+# live in `tapscribe.preflight` so the Windows Bundle's tray — which has no
 # start.ps1 to inherit them from — runs the SAME steps rather than a C#
 # reimplementation that drifts (ADR-0015). `plan_steps` is pure and unit-tested;
 # `--dry-run` prints what it would do.

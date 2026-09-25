@@ -22,7 +22,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { sessionTranscript, sessionSummary, sessionFiles } from "./api.js";
+import { sessionTranscript, sessionSummary, sessionFiles, wavePeaks } from "./api.js";
 
 // A minimal Response-like the real _unwrap accepts. _unwrap reads .ok, .status,
 // .headers.get("content-type") and .json(); an application/json content-type
@@ -237,6 +237,41 @@ describe("sessionFiles resolve: known-empty guards + failure pacing", () => {
         await flush();
         assert.equal(landed, 1); // the successful retry lands via onLand
         assert.deepEqual(tick().value, [{ name: "ok.wav" }]);
+      },
+    );
+  });
+});
+
+describe("wavePeaks resolve: a 401 is not the file's failure", () => {
+  it("remembers an unreadable WAV, but asks again after a signed-out 401", async () => {
+    // remember-error is for a failure that is a property of the file. A 401 is the
+    // tab being signed out (ADR-0023): remembered, the WAV an operator picked
+    // during the spell read "401 Authentication required" until the tab reloaded.
+    await withFetch(
+      (_url, n) => {
+        if (n === 1) return errRes(401, "Authentication required");
+        if (n === 2) return jsonRes({ peaks: [0.5] });
+        return errRes(500, "could not read WAV");
+      },
+      async (calls) => {
+        const view = wavePeaks.watch(() => {});
+        const tick = (sig) => view.resolve(["peaks-401-s", "a.wav", "original", sig]);
+
+        tick("1");
+        await flush();
+        assert.equal(tick("1").error, null, "the 401 is not shown as the WAV's error");
+        assert.equal(calls.length, 1, "paced: the tick after the failure is skipped");
+        tick("1");
+        assert.equal(calls.length, 2, "then asked again, which answers once signed back in");
+        await flush();
+        assert.deepEqual(tick("1").value, { peaks: [0.5] });
+
+        // A genuine read failure on another key is still remembered and shown.
+        tick("2");
+        await flush();
+        assert.match(String(tick("2").error), /500 could not read WAV/);
+        tick("2");
+        assert.equal(calls.length, 3, "no retry of a failure that is the file's own");
       },
     );
   });

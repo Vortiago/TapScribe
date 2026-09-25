@@ -6,7 +6,7 @@ namespace TapScribe.TrayBridge.MacOS;
 
 /// <summary>
 /// The menu bar: an <see cref="NSStatusItem"/> with a status header line, Start meeting / End
-/// meeting / Past meetings / Settings… / Quit. It owns the AppKit half of the Bridge and nothing
+/// meeting / Connect to live / Disconnect / Past meetings / Settings… / Quit. It owns the AppKit half of the Bridge and nothing
 /// else. Every decision about what a meeting DOES belongs to <see cref="BridgeRuntime"/>, which is
 /// written once and tested without AppKit; this class is its <see cref="ITrayView"/> and its menu,
 /// the same split the WinForms <c>TrayContext</c> makes (ADR-0020).
@@ -27,6 +27,8 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     private readonly NSMenuItem _notice;
     private readonly NSMenuItem _start;
     private readonly NSMenuItem _end;
+    private readonly NSMenuItem _connect;
+    private readonly NSMenuItem _disconnect;
     private readonly NSMenuItem _pastMeetings;
 
     // Held so the managed wrappers outlive the native windows they drive: a window whose only
@@ -36,6 +38,9 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
     private NSStatusItem? _statusItem;
     private BridgeRuntime? _runtime;
+    /// <summary>The Recorder section, or null on a bridge-only install — in which case the
+    /// menu is exactly what it was before the host role existed (ADR-0022).</summary>
+    private MacTrayHost? _host;
     private SettingsWindow? _settingsWindow;
     private bool _uiReleased;
 
@@ -53,6 +58,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _notice = new NSMenuItem("") { Enabled = false, Hidden = true };
         _start = new NSMenuItem("Start meeting", (_, _) => OnRuntime(runtime => runtime.Start()));
         _end = new NSMenuItem("End meeting", (_, _) => OnRuntime(runtime => runtime.End())) { Enabled = false };
+        // Connect to live (ADR-0025): stream into whatever session the Recorder has open,
+        // rather than minting one. Beside Start/End rather than under a submenu — it is the
+        // other way to do the one thing this tray is for.
+        _connect = new NSMenuItem("Connect to live", (_, _) => OnRuntime(runtime => runtime.Connect()));
+        _disconnect = new NSMenuItem("Disconnect", (_, _) => OnRuntime(runtime => runtime.Disconnect())) { Enabled = false };
         _pastMeetings = new NSMenuItem("Past meetings") { Submenu = _pastMeetingsMenu };
         // Seeded rather than left empty until menuWillOpen: fills it. AppKit will not open a
         // submenu with no items, so an empty one never fires the delegate that would populate it.
@@ -64,7 +74,7 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         var quit = new NSMenuItem("Quit", "q", (_, _) => Guarded(() => _ = QuitAsync()));
 
         // AppKit's automatic enablement asks each item's target whether it is live and overrides
-        // Enabled every time the menu opens, which would undo every SetMenuState the runtime makes.
+        // Enabled every time the menu opens, which would undo every SetCommands the runtime makes.
         // Both menus: the Past-meetings items carry a managed handler rather than a target/action
         // pair, so auto-enablement would grey out every meeting in it.
         _menu.AutoEnablesItems = false;
@@ -74,7 +84,22 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _menu.AddItem(NSMenuItem.SeparatorItem);
         _menu.AddItem(_start);
         _menu.AddItem(_end);
+        _menu.AddItem(_connect);
+        _menu.AddItem(_disconnect);
         _menu.AddItem(_pastMeetings);
+
+        // The host role's own section, when this install carries a payload (ADR-0022). Between
+        // the tap commands and Settings/Quit: it is a different lifecycle, and the separator it
+        // brings with it says so. TryAttach answers null for a bridge-only tray, and then not one
+        // item of this is added — which is what makes that menu byte-identical to the one before
+        // the role existed.
+        _host = MacTrayHost.TryAttach(_dispatcher.Post, ShowNotice);
+        if (_host is not null)
+        {
+            foreach (NSMenuItem item in _host.MenuItems)
+                _menu.AddItem(item);
+        }
+
         _menu.AddItem(NSMenuItem.SeparatorItem);
         _menu.AddItem(settings);
         _menu.AddItem(quit);
@@ -115,6 +140,16 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _statusItem = NSStatusBar.SystemStatusBar.CreateStatusItem(NSStatusItemLength.Variable);
         _statusItem.Menu = _menu;
         ShowStatus(StatusView.For(new TrayStatus.Idle()));
+
+        // The host role FIRST. Its boot — possibly a 300 MB runtime copy (ADR-0024), then
+        // preflight and the Recorder — runs off the main thread and renders through the
+        // dispatcher, which always queues, so nothing it shows can overtake the Bridge's tap
+        // state below. Started after the Bridge half instead, it waited on the settings load,
+        // which is a Keychain read on this thread: after every update that read BLOCKS on a
+        // password prompt (an ad-hoc signature is a new identity to the Keychain, README), so
+        // the co-located Recorder did not even start until the operator answered a dialog
+        // about the Bridge's tap token.
+        _host?.Startup();
 
         var runtime = new BridgeRuntime(this, _dispatcher, _deps, _deps.SettingsStore.Load());
         _runtime = runtime;
@@ -173,11 +208,14 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
         _notice.Hidden = true;
     }
 
-    /// <summary>Enable or disable the two meeting commands.</summary>
-    public void SetMenuState(bool canStart, bool canEnd)
+    /// <summary>Enable or disable the tap commands.</summary>
+    public void SetCommands(TrayCommands commands)
     {
-        _start.Enabled = canStart;
-        _end.Enabled = canEnd;
+        ArgumentNullException.ThrowIfNull(commands);
+        _start.Enabled = commands.CanStart;
+        _end.Enabled = commands.CanEnd;
+        _connect.Enabled = commands.CanConnect;
+        _disconnect.Enabled = commands.CanDisconnect;
     }
 
     /// <summary>A new window per call, on screen immediately in its Loading state so an empty
@@ -207,8 +245,9 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
     // ---- Commands ------------------------------------------------------------------------
 
-    /// <summary>Quit, awaitable so the teardown the operator's click starts can be waited on.
-    /// Ends in <see cref="Shutdown"/>, which the runtime marshals back here.</summary>
+    /// <summary>Quit. Ends in <see cref="Shutdown"/>, which the runtime marshals back here.
+    /// On a Bundle the teardown starts only once the host's confirmation has answered, so the
+    /// task returned then is already complete.</summary>
     private Task QuitAsync()
     {
         if (_runtime is not { } runtime)
@@ -218,7 +257,13 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             Shutdown();
             return Task.CompletedTask;
         }
-        return runtime.QuitAsync();
+        if (_host is not { } host)
+            return runtime.QuitAsync();
+
+        // A Bundle's Quit stops its Recorder, and the Recorder's jobs with it, so the host asks
+        // first when one is in flight, and the teardown starts once it has answered.
+        host.ConfirmQuit(() => _ = runtime.QuitAsync());
+        return Task.CompletedTask;
     }
 
     private void OpenSettings()
@@ -349,5 +394,11 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             NSStatusBar.SystemStatusBar.RemoveStatusItem(_statusItem);
             _statusItem = null;
         }
+
+        // LAST, and not for tidiness: disposing the host role stops the Recorder it started
+        // and then signals the process group this process is itself in (ProcessGroupReaper).
+        // Anything sequenced after it may not run.
+        _host?.Dispose();
+        _host = null;
     }
 }

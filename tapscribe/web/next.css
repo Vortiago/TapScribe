@@ -1319,9 +1319,10 @@ button.wavrow {
   .sesscol--strip, .sesscol--size { display: none; }
 }
 
-/* Client-error bar (wireErrorBar, web/js/lib/chrome.js) — hidden until an
-   unhandled error/rejection fills it. Fixed to the bottom edge so it can't
-   shift the layout under an open control mid-error. */
+/* Client-error bar — hidden until something fills it. Two owners share it:
+   wireErrorBar (web/js/lib/chrome.js) for an unhandled error/rejection, and
+   next/main.js's signed-out cue when the poll starts answering 401. Fixed to
+   the bottom edge so it can't shift the layout under an open control mid-error. */
 #errbar {
   position: fixed;
   inset-block-end: 0;

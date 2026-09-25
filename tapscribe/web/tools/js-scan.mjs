@@ -1,9 +1,10 @@
-// canonical source: vanilla-web/tools/js-scan.mjs@9f20766 — vendored copy, do not edit here
+// canonical source: vanilla-web/tools/js-scan.mjs@a36aeda sha256:4083e3bd992c0155acf41c0e2c90da0cc093f3b0389ddd139494c6fc153532a7
 // @ts-check
 // js-scan — shared quote/backtick/${}-aware scanning helpers for the check-*.mjs
 // static checkers (check-conventions.mjs, check-slots.mjs). Not a gate half
 // itself — check.mjs discovers halves via a `tools/check-*.mjs` glob, and this
 // filename doesn't match that prefix, so it's never misdetected as one.
+import { globSync } from "node:fs";
 
 /** tools/ sits in the app/skill root — every check-*.mjs resolves its file set
  * relative to this. Shared here (rather than re-declared per file) since it's
@@ -13,6 +14,25 @@ export const ROOT = new URL("../", import.meta.url);
  * fixtures, vendored third-party CSS) never belong in a source scan. Some
  * checkers extend this with their own extra skipped dirs. */
 export const SKIP = /(^|\/)(node_modules|testing)\//;
+
+/** Glob under `cwd`, POSIX-separated. The one door every checker's file set comes
+ * through, so the `/`-shaped predicates (SKIP above, each checker's extra-skip,
+ * `split("/").pop()`) match on Windows too — raw, they match nothing there and the
+ * gate fails on the canon its exemptions exist to spare. Normalise where paths
+ * ENTER; at each predicate, the next checker re-derives the bug. Takes an array as
+ * readily as one, because globSync does.
+ * @param {string | string[]} pattern @param {URL | string} [cwd]
+ * @returns {string[]} */
+export function scanPaths(pattern, cwd = ROOT) {
+  return globSync(pattern, { cwd }).map((p) => p.replaceAll("\\", "/"));
+}
+
+/** CR-stripped: the form every comparison of file CONTENT here runs on. Git checks
+ * the same blob out as CRLF under `core.autocrlf`, so raw bytes are a property of
+ * the checkout, not the content, and a copy written on one platform reads as drift
+ * on the other. Strips EVERY CR to match `lib-stamp.sh`'s `tr -d '\r'`, which
+ * cannot import this and must agree digit for digit. @param {string} text */
+export const lf = (text) => text.replace(/\r/g, "");
 
 /** 1-based line of an index into text. @param {string} text @param {number} idx */
 export const lineOf = (text, idx) => text.slice(0, idx).split("\n").length;

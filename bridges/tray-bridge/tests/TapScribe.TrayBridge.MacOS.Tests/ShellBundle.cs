@@ -13,7 +13,16 @@ namespace TapScribe.TrayBridge.MacOS.Tests;
 /// </summary>
 internal static class ShellBundle
 {
+    /// <summary>The project on disk — <c>src/&lt;name&gt;/&lt;name&gt;.csproj</c>.</summary>
     private const string ProjectName = "TapScribe.TrayBridge.MacOS";
+
+    /// <summary>What the built bundle is CALLED, which is <c>AssemblyName</c> and no longer
+    /// the project name (ADR-0024): one tray per OS means the bridge-only build and the
+    /// Bundle install the same <c>TapScribe.app</c>, so a Bundle upgrades a bridge-only
+    /// install in place. Separate from <see cref="ProjectName"/> deliberately — they were
+    /// one constant, and the day they diverged this search would have looked for a bundle
+    /// that no longer exists and failed every test in the project with it.</summary>
+    private const string AppName = "TapScribe";
 
     /// <summary>The manifest inside the built <c>.app</c>: what the operator's Mac reads.
     /// </summary>
@@ -64,7 +73,7 @@ internal static class ShellBundle
     private static string Locate()
     {
         string root = Path.Join(ProjectDirectory, "bin", Configuration);
-        string tail = Path.Join($"{ProjectName}.app", "Contents", "Info.plist");
+        string tail = Path.Join($"{AppName}.app", "Contents", "Info.plist");
         // Only the BUILD output counts, so anything under publish/ is skipped. A publish
         // artifact is a second bundle this search has no way to rank against the first, and
         // two matches fail the exactly-one rule below and take every test in this project

@@ -39,9 +39,10 @@ Session).
 - **`src/TapScribe.TrayBridge.Windows`** (net10.0-windows WinForms): the tray
   shell, which is Core's `ITrayView` over a `NotifyIcon` and a
   `ContextMenuStrip`.
-  Widgets only: the menu (Start meeting / End meeting / Past meetings /
-  Settings… / Quit), the 4-tab Settings dialog, and the per-meeting summary
-  window with Copy. What a meeting DOES is `BridgeRuntime`'s.
+  Widgets only: the menu (Start meeting / End meeting / Connect to live /
+  Disconnect / Past meetings / Settings… / Quit), the 4-tab Settings dialog,
+  and the per-meeting summary window with Copy. What a meeting DOES is
+  `BridgeRuntime`'s. It also carries `TrayHost` — the **host role**, below.
 - **`src/TapScribe.Bridge.MacOS`** (net10.0): the Mac platform layer. Today the
   macOS 14.4 floor, the sysctl that reads this Mac's version, and the Mac half
   of the storage layer: `KeychainTapTokenStore` (the tap token in the login
@@ -86,6 +87,42 @@ Session).
 NAudio and no Windows API**. CI's `dotnet-core-crossplatform` job builds and
 tests the core on Linux and fails the moment it takes a Windows dependency.
 
+## Two roles, one tray
+
+There is ONE tray per OS (ADR-0022). It is always a Bridge; it ALSO boots,
+supervises and reaps a co-located Recorder — the **host role** — when a host
+payload sits beside it on disk, which is what a
+[Bundle](../../CONTEXT.md#bundle) install puts there. The role is a fact about
+the install, not a flag, a build variant or a setting: the same executable ships
+in the bridge-only zip and inside the Windows installer, and a bridge-only tray
+renders exactly the menu it did before the role existed.
+
+The rules live in `packaging/bundle/`'s `HostController` and are tested there;
+the shell owns the widgets. Its section adds **Start Recorder** / **Stop
+Recorder** (separate from Quit — stopping the server is not quitting the tray),
+**Open dashboard**, **Copy password** and **Show log**, with the Recorder's state
+in that section's header line. The tray ICON stays the Bridge's tap state: it is
+what an operator watches during a call.
+
+Two behaviours there are load-bearing and easy to undo by accident:
+
+- **Open dashboard mints a login link** (ADR-0023) against the LOCAL Recorder, so
+  the browser lands signed in and never shows the native password prompt. Never
+  the host in bridge settings — a tray may supervise one Recorder and tap into
+  another.
+- **Quit stops only a Recorder this tray started.** One that was already running
+  (a `start.sh` in a terminal, another install holding port 8001) shows as
+  running-but-unmanaged and outlives Quit. Which it is comes from the spawn
+  attempt plus a `/health` probe, never from parsing the child's output.
+
+The Mac shell carries the same role (`MacTrayHost`), with two differences that are
+macOS's rather than the role's (ADR-0024). The interpreter is COPIED out of the
+`.app` on first launch, because pip writing inside a signed bundle would invalidate
+its signature — so an upgrade re-copies and says the model backends are gone. And
+the menu carries **Reveal recordings in Finder**, because the data root is under
+`~/Library/Application Support`, which Finder hides; that location was chosen over
+`~/Documents` precisely because those are TCC-protected.
+
 ## Prerequisites
 
 - **.NET 10 SDK** (`global.json` pins the band; `dotnet --version` should
@@ -123,7 +160,7 @@ On macOS:
 # from this directory (bridges/tray-bridge/)
 dotnet test  tests/TapScribe.TrayBridge.MacOS.Tests/TapScribe.TrayBridge.MacOS.Tests.csproj -c Release
 dotnet build src/TapScribe.TrayBridge.MacOS/TapScribe.TrayBridge.MacOS.csproj -c Release
-open src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
+open src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.app
 ```
 
 `open` rather than `dotnet run`, because the app has to launch as a **bundle**:
@@ -189,7 +226,7 @@ installer, code signing, or auto-update: it's a copy-and-run exe. Ships as
 ```bash
 # from this directory (bridges/tray-bridge/)
 dotnet publish src/TapScribe.TrayBridge.MacOS -c Release -p:CreatePackage=false
-APP=src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.TrayBridge.MacOS.app
+APP=src/TapScribe.TrayBridge.MacOS/bin/Release/net10.0-macos/osx-arm64/TapScribe.app
 tools/build-macos-pkg.sh "$APP" 0.0.0 TapScribe.TrayBridge-osx-arm64.pkg
 ditto -c -k --keepParent "$APP" TapScribe.TrayBridge-osx-arm64.zip
 ```
@@ -226,7 +263,7 @@ if it is wrong:
    section, and click **Open Anyway**. The button disappears about an hour after
    the blocked attempt, so if it is not there, try opening the package again
    first. On macOS 26 this step also asks for an admin password.
-3. Let the installer put `TapScribe.TrayBridge.MacOS.app` in `/Applications`,
+3. Let the installer put `TapScribe.app` in `/Applications`,
    then open it. The icon appears in the **menu bar**, with no Dock icon and no
    window, which is what `LSUIElement` buys. **No Terminal step, and no second
    Gatekeeper prompt.**
@@ -244,7 +281,7 @@ part on a real runner, since Apple documents none of it.
 If you took the zip instead, the `xattr` step is still the only escape:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/TapScribe.TrayBridge.MacOS.app
+xattr -dr com.apple.quarantine /Applications/TapScribe.app
 ```
 
 Notarisation is what removes the block in step 2, and it needs a paid Apple
@@ -280,7 +317,7 @@ knowing before you reach for one:
   opened from Finder, the Dock or `open -a` inherits `launchd`'s environment,
   not your shell's, so an export in `~/.zshrc` is simply not there. Launching
   the binary inside the bundle from a terminal
-  (`TAPSCRIBE_HOST=… TapScribe.TrayBridge.MacOS.app/Contents/MacOS/TapScribe.TrayBridge.MacOS`)
+  (`TAPSCRIBE_HOST=… TapScribe.app/Contents/MacOS/TapScribe`)
   does seed it, and so does typing the values into Settings once.
 - **An update asks for your login password to reach the token.** A Keychain
   item's ACL trusts the app that created it, identified by its code signature,
@@ -351,7 +388,7 @@ everything below, still needs a person.
 
 1. Start a Recorder: `python -m tapscribe --no-auth` (or `./start.ps1`).
 2. `dotnet run --project src/TapScribe.TrayBridge.Windows`. On macOS launch the built
-   bundle instead (`open …/TapScribe.TrayBridge.MacOS.app`, or its inner binary
+   bundle instead (`open …/TapScribe.app`, or its inner binary
    from a terminal when you want the stderr): only the bundle carries the
    `Info.plist` that makes it a menu-bar app and names the microphone in the TCC
    prompt, and only a bundle gets its own grants rather than inheriting the

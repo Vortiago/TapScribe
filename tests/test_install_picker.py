@@ -216,7 +216,7 @@ def test_selection_load_handles_malformed_file(tmp_state):
 # OSError/JSONDecodeError, so an AttributeError/TypeError raised while walking
 # the shape escapes `main()`: `python -m tapscribe.install_picker` exits
 # non-zero, `start.sh` prints "install picker failed; aborting" and `exit 1` —
-# the Recorder never boots, and in a Bundle the Launcher just logs a traceback
+# the Recorder never boots, and in a Bundle the tray just logs a traceback
 # (ADR-0015). These are realistic hand-edits, not fuzz: the picker's own
 # non-interactive warning tells operators to "edit .tapscribe-install.json".
 
@@ -598,7 +598,7 @@ def test_main_reads_and_writes_the_state_file_given_on_the_cli(tmp_path, monkeyp
 
 def test_main_records_removed_backends_to_a_sidecar(tmp_path, monkeypatch, tmp_stamp):
     """`removed_backend_families()` has always warned to STDERR — invisible in a
-    Bundle, where the Launcher pipes output to a log file nobody opens. The
+    Bundle, where the tray pipes output to a log file nobody opens. The
     operator upgrades, their models quietly stop installing, and nothing they'd
     look at says so. Record it where the dashboard can read it."""
     state = tmp_path / ".tapscribe-install.json"

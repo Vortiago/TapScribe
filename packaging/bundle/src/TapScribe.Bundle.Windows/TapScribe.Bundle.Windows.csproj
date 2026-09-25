@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Windows half of the host role: one type, JobObject, and the Win32
+       P/Invoke it needs. It sits BEHIND IProcessReaper (Core) precisely so the
+       cross-platform lifecycle stays on the Linux CI leg — the same split
+       TapScribe.Bridge.Core / .Windows already keeps for audio capture.
+
+       net10.0, not net10.0-windows: DllImport into kernel32 needs no Windows
+       TFM, and staying framework-neutral means this project COMPILES on the
+       Linux leg (its behaviour is Windows-only, and its tests say so with
+       [RequiresWindows]). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TapScribe.Bundle.Windows</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../TapScribe.Bundle.Core/TapScribe.Bundle.Core.csproj" />
+  </ItemGroup>
+
+</Project>

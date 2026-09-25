@@ -9,7 +9,7 @@ CPU-only torch wheel for a CUDA build.
 A Bundle (ADR-0015) has no `start.ps1`, so those steps were homeless. Skipping
 the CUDA one in particular is silently expensive: every Windows NVIDIA operator
 would get `Available backends: ['cpu']` with nothing pointing at why. Rather
-than reimplement the probes in the Launcher's C#, both callers run this module,
+than reimplement the probes in the tray's C#, both callers run this module,
 so a fifth check added later can't drift between two copies.
 
 `plan_steps` is pure and returns the work as data — every probe is injected —
@@ -19,7 +19,7 @@ without running pip. `main` executes a plan.
 Stdlib-only, like its siblings: this runs against a venv that may hold nothing
 but pip. (`PYTHONUNBUFFERED` is deliberately NOT here — it must be set in the
 recorder's *own* environment by whoever launches it, which a separate preflight
-process cannot do. `start.ps1` sets it; the Launcher sets it on the child.)
+process cannot do. `start.ps1` sets it; the Bundle's tray sets it on the child.)
 """
 
 from __future__ import annotations
@@ -215,7 +215,7 @@ def run_steps(steps: list[Step], *, run: Callable[[list[str]], int] | None = Non
 
     Non-fatal failures are printed with the step's `reason` so the operator
     learns which capability just degraded — in a Bundle this is the only trace,
-    since the Launcher pipes this to a log file rather than a terminal.
+    since the Bundle's tray pipes this to a log file rather than a terminal.
 
     Steps run with `cwd=REPO_ROOT`, matching `install_picker.run_install`. That
     is load-bearing for the checkout topology, where the pip target is the
