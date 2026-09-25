@@ -43,7 +43,6 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
     private MacTrayHost? _host;
     private SettingsWindow? _settingsWindow;
     private bool _uiReleased;
-    private bool _quitAsked; // main thread only: a Bundle Quit is waiting on its confirmation
 
     /// <summary>Build the menu bar over an explicit outside world.</summary>
     /// <param name="dependencies">What a meeting needs: the enumerator, the session mint and the
@@ -246,8 +245,9 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
 
     // ---- Commands ------------------------------------------------------------------------
 
-    /// <summary>Quit, awaitable so the teardown the operator's click starts can be waited on.
-    /// Ends in <see cref="Shutdown"/>, which the runtime marshals back here.</summary>
+    /// <summary>Quit. Ends in <see cref="Shutdown"/>, which the runtime marshals back here.
+    /// On a Bundle the teardown starts only once the host's confirmation has answered, so the
+    /// task returned then is already complete.</summary>
     private Task QuitAsync()
     {
         if (_runtime is not { } runtime)
@@ -261,18 +261,8 @@ internal sealed class TrayShell : NSApplicationDelegate, ITrayView, INSMenuDeleg
             return runtime.QuitAsync();
 
         // A Bundle's Quit stops its Recorder, and the Recorder's jobs with it, so the host asks
-        // first when one is in flight. The teardown starts only once it has answered, and a
-        // second Quit while it is still asking is the same request, not another alert.
-        if (_quitAsked)
-            return Task.CompletedTask;
-        _quitAsked = true;
-        host.ConfirmQuit(quit =>
-        {
-            if (quit)
-                _ = runtime.QuitAsync();
-            else
-                _quitAsked = false;
-        });
+        // first when one is in flight, and the teardown starts once it has answered.
+        host.ConfirmQuit(() => _ = runtime.QuitAsync());
         return Task.CompletedTask;
     }
 

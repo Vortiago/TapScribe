@@ -43,6 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
+from .live_guard import TERM_GRACE_S
 from .nb_whisper import download_nb_whisper_ct2_dir
 from .speech_gate import effective_gate_config
 from .text import read_config
@@ -272,7 +273,7 @@ class LiveChannel(Protocol):
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]: ...
 
-    def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]: ...
+    def stop(self, *, timeout: float = TERM_GRACE_S) -> tuple[bool, str]: ...
 
 
 @dataclass(frozen=True)
@@ -754,7 +755,7 @@ class LiveChannelBase:
     ) -> tuple[bool, str]:
         raise NotImplementedError
 
-    def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:  # pragma: no cover
+    def stop(self, *, timeout: float = TERM_GRACE_S) -> tuple[bool, str]:  # pragma: no cover
         raise NotImplementedError
 
     def _effective_gate_kind(self) -> str:
@@ -1099,7 +1100,7 @@ class WhisperLiveKitChannel(LiveChannelBase):
             threading.Thread(target=self._pump_logs, args=(self._proc,), daemon=True).start()
             return True, f"started pid {self._proc.pid}"
 
-    def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:
+    def stop(self, *, timeout: float = TERM_GRACE_S) -> tuple[bool, str]:
         """Terminate the live child (if any). Idempotent."""
         with self._lock:
             proc = self._proc

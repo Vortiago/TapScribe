@@ -16,11 +16,10 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from unittest.mock import patch
 
 import pytest
 
-from tapscribe.live import LiveConfig, WhisperLiveKitChannel, build_live_guard_cmd, spawn_live_guard
+from tapscribe.live import build_live_guard_cmd, spawn_live_guard
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
 
@@ -140,43 +139,3 @@ def test_no_guard_for_a_child_that_is_not_a_real_process():
 
 def test_the_guard_argv_is_a_module_and_two_integers():
     assert build_live_guard_cmd("/py", 11, 22) == ["/py", "-m", "tapscribe.live_guard", "11", "22"]
-
-
-@posix_only
-def test_the_server_gets_a_process_group_not_a_session():
-    """The guard joins the server's group, and a process can only join a group in
-    its own session: `start_new_session` would make every guard spawn fail."""
-    seen: dict[str, object] = {}
-
-    class _Stdout:
-        def __iter__(self):
-            return iter(())
-
-    class _Child:
-        pid = 0
-        stdout = _Stdout()
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            return 0
-
-    def fake_popen(cmd, **kwargs):
-        seen.update(kwargs)
-        return _Child()
-
-    chan = WhisperLiveKitChannel(
-        config=LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=0),
-        use_mlx=False,
-    )
-    with (
-        patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
-        patch("tapscribe.live.subprocess.Popen", side_effect=fake_popen),
-    ):
-        ok, _ = chan.start()
-
-    assert ok
-    assert seen.get("process_group") == 0
-    assert "start_new_session" not in seen
-    assert seen.get("stdin") == subprocess.DEVNULL

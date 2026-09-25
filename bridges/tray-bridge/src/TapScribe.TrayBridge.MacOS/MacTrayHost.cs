@@ -162,12 +162,8 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         string url = BundleDefaults.DashboardUrl;
         try
         {
-            // Only this tray's own, running Recorder is traded the password for a link: in any
-            // other state the listener on the port is not known to be this install's.
-            if (_controller.MayMintLoginLink)
-                url = LoginLink.DashboardUrlFor(_http, _layout, _log.Write);
-            else
-                _log.Write("login link: the Recorder on the port is not this tray's own — opening the dashboard signed out.");
+            // Signed in only against this tray's own, running Recorder (HostController says why).
+            url = _controller.DashboardUrl(_http, _layout, _log.Write);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -269,31 +265,17 @@ internal sealed class MacTrayHost : IHostView, IDisposable
         ConnectionTester.AnswersOnLoopback(BundleDefaults.RecorderPort, _http, TimeSpan.FromSeconds(2));
 
     /// <summary>
-    /// Ask before a Quit that would stop work in flight (<see cref="QuitConfirmation"/>), then
-    /// call <paramref name="then"/> on the main thread with the answer: true to quit. Mirrors the
-    /// Windows half. The probe runs off the main thread, and the answer is POSTED back rather
-    /// than awaited back, because macOS has no SynchronizationContext for an await to return to.
+    /// Quit, asking first when it would stop work in flight: the flow is
+    /// <see cref="HostController.ConfirmQuit"/>'s, and this supplies the two things only a
+    /// shell has, the Bridge's probe and the native dialog. <paramref name="quit"/> runs on
+    /// the main thread once the operator has answered, or straight away when there is
+    /// nothing to ask.
     /// </summary>
-    internal void ConfirmQuit(Action<bool> then) => _ = Task.Run(() =>
-    {
-        string? warning = null;
-        try
-        {
-            bool stops = _controller.OwnsRunningRecorder;
-            int? jobs = stops
-                ? ConnectionTester.ActiveJobsOnLoopback(BundleDefaults.RecorderPort, _http, QuitConfirmation.ProbeTimeout)
-                : null;
-            warning = QuitConfirmation.WarningFor(stops, jobs);
-        }
-        catch (Exception error) when (error is not OutOfMemoryException)
-        {
-            // Whatever went wrong asking, it is no reason to keep a tray the operator asked to
-            // quit: log it and quit without the question.
-            _log.Write($"quit check: {error}");
-        }
-
-        _post(() => Guarded(() => then(warning is null || AskToQuit(warning))));
-    });
+    internal void ConfirmQuit(Action quit) => _controller.ConfirmQuit(
+        () => ConnectionTester.ActiveJobsOnLoopback(BundleDefaults.RecorderPort, _http, QuitConfirmation.ProbeTimeout),
+        AskToQuit,
+        () => Guarded(quit),
+        _log.Write);
 
     // RunModal answers NSAlertFirstButtonReturn (1000) plus the index of the button clicked.
     private const nint QuitButtonResponse = 1001;

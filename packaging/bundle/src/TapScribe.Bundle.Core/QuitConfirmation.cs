@@ -2,8 +2,9 @@ namespace TapScribe.Bundle.Core;
 
 /// <summary>
 /// Whether a Bundle's Quit should ask first, and in what words. Both shells show the same
-/// dialog, so the decision and the text live here, where the Linux CI leg tests them, and the
-/// shells keep only the native dialog call.
+/// dialog, so the decision and the text live here, where the Linux CI leg tests them;
+/// <see cref="HostController.ConfirmQuit"/> runs the flow around it, and the shells keep only
+/// the native dialog call.
 ///
 /// A Bundle's Quit stops the Recorder this tray started, and the Recorder's strip /
 /// transcribe / summarize jobs live only in that process: quitting mid-job ends the work, and
@@ -30,14 +31,13 @@ public static class QuitConfirmation
     /// <summary>
     /// The warning to show before quitting, or null to quit straight away.
     /// </summary>
-    /// <param name="stopsRecorder">Whether this Quit stops a Recorder this tray started
-    /// (<see cref="HostController.OwnsRunningRecorder"/>). A Recorder somebody else started
-    /// outlives the Quit, and so does its work.</param>
-    /// <param name="activeJobs">How many jobs that Recorder reported in flight, or null when it
-    /// could not be asked. Unknown is not busy: a Recorder that cannot answer is not doing
-    /// much, and a Quit must never be held hostage to a probe that failed.</param>
-    public static string? WarningFor(bool stopsRecorder, int? activeJobs) =>
-        stopsRecorder && activeJobs > 0
+    /// <param name="activeJobs">How many jobs the Recorder this Quit stops reported in flight,
+    /// or null when there is none to ask (somebody else's Recorder outlives the Quit, and so
+    /// does its work) or it could not be asked. Unknown is not busy: a Recorder that cannot
+    /// answer is not doing much, and a Quit must never be held hostage to a probe that
+    /// failed.</param>
+    public static string? WarningFor(int? activeJobs) =>
+        activeJobs > 0
             ? "TapScribe is still processing a recording. Quitting stops that work, and it does "
               + "not pick up again on its own: you can run it again from the dashboard later."
             : null;

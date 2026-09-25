@@ -41,7 +41,6 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
     // started until Startup either.
     private SynchronizationContext? _ui;
     private bool _uiReleased; // Shutdown disposes, and then so does whoever owns the context
-    private bool _quitAsked; // UI thread only: a Bundle Quit is waiting on its confirmation
 
     public TrayContext()
         : this(TrayStores.Settings.Load(), TrayDependencies.Production)
@@ -268,8 +267,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
 
     // ---- Commands ------------------------------------------------------------------------
 
-    /// <summary>Quit, awaitable so a test can wait for the teardown the operator's click
-    /// starts. Ends in <see cref="Shutdown"/>, which the runtime marshals back here.</summary>
+    /// <summary>Quit. Ends in <see cref="Shutdown"/>, which the runtime marshals back here.
+    /// Awaitable on a bridge-only tray, so a test can wait for the teardown the click starts;
+    /// on a Bundle the teardown starts only once the host's confirmation has answered, so the
+    /// task returned then is already complete.</summary>
     internal Task QuitAsync()
     {
         BridgeRuntime? runtime = _runtime;
@@ -284,18 +285,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayView
             return runtime.QuitAsync();
 
         // A Bundle's Quit stops its Recorder, and the Recorder's jobs with it, so the host asks
-        // first when one is in flight. The teardown starts only once it has answered, and a
-        // second Quit while it is still asking is the same request, not another dialog.
-        if (_quitAsked)
-            return Task.CompletedTask;
-        _quitAsked = true;
-        host.ConfirmQuit(quit =>
-        {
-            if (quit)
-                _ = runtime.QuitAsync();
-            else
-                _quitAsked = false;
-        });
+        // first when one is in flight, and the teardown starts once it has answered.
+        host.ConfirmQuit(() => _ = runtime.QuitAsync());
         return Task.CompletedTask;
     }
 

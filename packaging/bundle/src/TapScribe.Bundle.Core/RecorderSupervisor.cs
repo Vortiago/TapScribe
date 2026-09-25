@@ -222,8 +222,17 @@ public sealed class RecorderSupervisor : IRecorderHost
             {
                 // Quit landed between RunCore's check and this spawn. Kill OUTSIDE the
                 // lock — Stop() takes the same lock, and blocking it behind a kill is
-                // the opposite of what Quit is trying to achieve.
-                process.Kill();
+                // the opposite of what Quit is trying to achieve. Guarded like every other
+                // kill here: the catch below is for a launch that failed, and would report
+                // a kill that raced the exit as one.
+                try
+                {
+                    process.Kill();
+                }
+                catch (Exception error) when (IsExpectedKillFailure(error))
+                {
+                    _log($"preflight (quit raced the spawn): {error.Message}");
+                }
                 return false;
             }
 
@@ -254,6 +263,19 @@ public sealed class RecorderSupervisor : IRecorderHost
             return false;
         }
     }
+
+    /// <summary>
+    /// What killing a child that may already be on its way out can throw with nothing wrong:
+    /// it exited between <c>HasExited</c> and <c>Kill</c>, or was never started
+    /// (InvalidOperation, Win32), the platform cannot kill it (NotSupported), or — <c>Kill</c>
+    /// is whole-tree and throws only after trying the rest — part of the tree would not die
+    /// (Aggregate). The one list, so a kill site cannot forget a member of it.
+    /// </summary>
+    private static bool IsExpectedKillFailure(Exception error) =>
+        error is InvalidOperationException
+            or System.ComponentModel.Win32Exception
+            or NotSupportedException
+            or AggregateException;
 
     private void StartRecorder(string wheel)
     {
@@ -300,7 +322,7 @@ public sealed class RecorderSupervisor : IRecorderHost
                 if (!process.HasExited)
                     process.Kill();
             }
-            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or AggregateException)
+            catch (Exception error) when (IsExpectedKillFailure(error))
             {
                 // Already gone, or exited between HasExited and Kill — or, the
                 // AggregateException, part of the tree would not die (Kill is whole-tree and
@@ -429,7 +451,7 @@ public sealed class RecorderSupervisor : IRecorderHost
                 if (!preflight.HasExited)
                     preflight.Kill();
             }
-            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or AggregateException)
+            catch (Exception error) when (IsExpectedKillFailure(error))
             {
                 _log($"stop (preflight): {error.Message}");
             }
@@ -449,7 +471,7 @@ public sealed class RecorderSupervisor : IRecorderHost
                 process.WaitForExit(5000);
             }
         }
-        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or AggregateException)
+        catch (Exception error) when (IsExpectedKillFailure(error))
         {
             // Already gone, or exited between HasExited and Kill, or (AggregateException) a
             // descendant the whole-tree kill could not end. Nothing to do — and the reaper

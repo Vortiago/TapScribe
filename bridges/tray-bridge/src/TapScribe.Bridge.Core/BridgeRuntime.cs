@@ -374,24 +374,18 @@ public sealed class BridgeRuntime
                 settings.EffectiveDevices, enumerator.List(), baseOptions.Identity);
             if (resolution.Verdict != SelectionVerdict.Ok)
             {
-                string why = DescribeVerdict(resolution.Verdict);
                 bool attachedLive;
                 lock (_gate)
                     attachedLive = _attached is not null;
-                if (attachedLive)
-                    // A takeover refused BEFORE its drain: the attached tap is still feeding
-                    // the current session, so the menu goes back to ITS commands (Disconnect,
-                    // or Start once the selection is fixed) rather than to an idle one with no
-                    // way left to disconnect what is still streaming. The header says why; the
-                    // tap's next Utterance puts its own status back.
-                    _dispatcher.Post(() =>
-                    {
-                        ShowAttached();
-                        ApplyStatus(new TrayStatus.Error(why));
-                        _view.ShowNotice(failureTitle, why, NoticeKind.Warning);
-                    });
-                else
-                    FailToIdle(failureTitle, why);
+                // A takeover refused BEFORE its drain leaves the attached tap still feeding the
+                // current session, so the menu goes back to ITS commands (Disconnect, or Start
+                // once the selection is fixed) rather than to an idle one with no way left to
+                // disconnect what is still streaming. The header says why; the tap's next
+                // Utterance puts its own status back.
+                FailTo(
+                    attachedLive ? TrayCommands.Attached : TrayCommands.Idle,
+                    failureTitle,
+                    DescribeVerdict(resolution.Verdict));
                 return null;
             }
 
@@ -409,11 +403,8 @@ public sealed class BridgeRuntime
                 // session nobody will record into, and opening devices only to close them at
                 // publish, is work for a shell that is going away. Null, like the verdict's
                 // hard stop, so the caller neither fails to idle nor publishes.
-                lock (_gate)
-                {
-                    if (_quitting)
-                        return null;
-                }
+                if (Quitting())
+                    return null;
             }
 
             // 2) The Recorder round-trip, before any device is opened: an unreachable Recorder
@@ -693,15 +684,21 @@ public sealed class BridgeRuntime
     /// <summary>Roll the menu back to idle and surface why. Marshalled, because every caller
     /// reaches it from a continuation; <see cref="Failed"/> is the same three actions for a
     /// caller already on the UI thread.</summary>
-    private void FailToIdle(string title, string message) =>
-        _dispatcher.Post(() => Failed(new TrayStatus.Error(message), title, message));
+    private void FailToIdle(string title, string message) => FailTo(TrayCommands.Idle, title, message);
 
-    /// <summary>Surface a failure and return the menu to idle. The one spelling of "something
-    /// went wrong and the operator can try again", so a start failure and a pipeline failure
-    /// cannot drift into doing these three things in two different orders.</summary>
-    private void Failed(TrayStatus status, string title, string message)
+    /// <summary><see cref="FailToIdle"/> for a failure whose menu goes back to something other
+    /// than idle: a takeover refused while an attached tap still streams returns to ITS
+    /// commands.</summary>
+    private void FailTo(TrayCommands commands, string title, string message) =>
+        _dispatcher.Post(() => Failed(new TrayStatus.Error(message), title, message, commands));
+
+    /// <summary>Surface a failure and return the menu to <paramref name="commands"/>, idle
+    /// unless said otherwise. The one spelling of "something went wrong and the operator can
+    /// try again", so a start failure and a pipeline failure cannot drift into doing these
+    /// three things in two different orders.</summary>
+    private void Failed(TrayStatus status, string title, string message, TrayCommands? commands = null)
     {
-        ShowIdleControls();
+        _view.SetCommands(commands ?? TrayCommands.Idle);
         ApplyStatus(status);
         _view.ShowNotice(title, message, NoticeKind.Warning);
     }

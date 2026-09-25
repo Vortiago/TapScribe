@@ -124,18 +124,145 @@ public class HostControllerTests
         // while it is still coming up, or stopped, nothing on the port is known to be ours.
         var world = new World { Host = { Manages = true } };
         world.Controller.Start();
-        Assert.False(world.Controller.MayMintLoginLink, "minted while the Recorder was still coming up");
+        Assert.False(world.Controller.OwnsRunningRecorder, "minted while the Recorder was still coming up");
 
         world.Controller.Report(RecorderState.Running, "up");
-        Assert.True(world.Controller.MayMintLoginLink);
+        Assert.True(world.Controller.OwnsRunningRecorder);
 
         world.Controller.Report(RecorderState.Stopped, "down");
-        Assert.False(world.Controller.MayMintLoginLink);
+        Assert.False(world.Controller.OwnsRunningRecorder);
 
         var elsewhere = new World { Host = { Manages = false } };
         elsewhere.Controller.Start();
         elsewhere.Controller.Report(RecorderState.Unmanaged, "already running from somewhere else");
-        Assert.False(elsewhere.Controller.MayMintLoginLink, "the password was offered to a Recorder that is not ours");
+        Assert.False(elsewhere.Controller.OwnsRunningRecorder, "the password was offered to a Recorder that is not ours");
+    }
+
+    [Fact]
+    public void DashboardUrl_ForARecorderThatIsNotOurs_OpensSignedOutWithoutMinting()
+    {
+        var world = new World { Host = { Manages = false } };
+        world.Controller.Start();
+        world.Controller.Report(RecorderState.Unmanaged, "already running from somewhere else");
+        var logged = new List<string>();
+        // No handler behind this client: a mint would throw, so reaching one fails the test.
+        using var http = new HttpClient(new RefusingHandler());
+
+        string url = world.Controller.DashboardUrl(http, BundleLayout.ForWindows("prog", "profile"), logged.Add);
+
+        Assert.Equal(BundleDefaults.DashboardUrl, url);
+        Assert.Contains(logged, line => line.Contains("not this tray's own", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ConfirmQuit_AJobInFlightOnOurRecorder_AsksFirst()
+    {
+        World world = RunningWorld(manages: true);
+        string? asked = null;
+        int quits = 0;
+
+        int before = world.Posted;
+        world.Controller.ConfirmQuit(() => 1, warning => { asked = warning; return true; }, () => quits++, _ => { });
+        RunTheAnswer(world, before);
+
+        Assert.NotNull(asked);
+        Assert.Equal(1, quits);
+    }
+
+    [Fact]
+    public void ConfirmQuit_KeepRunning_LeavesTheTrayUp_AndTheNextQuitAsksAgain()
+    {
+        World world = RunningWorld(manages: true);
+        int asks = 0;
+        int quits = 0;
+
+        int before = world.Posted;
+        world.Controller.ConfirmQuit(() => 1, _ => { asks++; return false; }, () => quits++, _ => { });
+        RunTheAnswer(world, before);
+        Assert.Equal(0, quits);
+
+        before = world.Posted;
+        world.Controller.ConfirmQuit(() => 1, _ => { asks++; return true; }, () => quits++, _ => { });
+        RunTheAnswer(world, before);
+
+        Assert.Equal(2, asks);
+        Assert.Equal(1, quits);
+    }
+
+    [Fact]
+    public void ConfirmQuit_ASecondClickWhileAsking_IsTheSameRequest()
+    {
+        World world = RunningWorld(manages: true);
+        int probes = 0;
+
+        int before = world.Posted;
+        world.Controller.ConfirmQuit(() => { Interlocked.Increment(ref probes); return 1; }, _ => true, () => { }, _ => { });
+        world.Controller.ConfirmQuit(() => { Interlocked.Increment(ref probes); return 1; }, _ => true, () => { }, _ => { });
+        RunTheAnswer(world, before);
+
+        Assert.Equal(1, probes);
+    }
+
+    [Fact]
+    public void ConfirmQuit_ARecorderThisTrayDoesNotOwn_IsNeitherProbedNorAskedAbout()
+    {
+        // Somebody else's Recorder outlives the Quit, and so does whatever it is working on.
+        World world = RunningWorld(manages: false);
+        bool probed = false;
+        bool asked = false;
+        int quits = 0;
+
+        int before = world.Posted;
+        world.Controller.ConfirmQuit(() => { probed = true; return 3; }, _ => asked = true, () => quits++, _ => { });
+        RunTheAnswer(world, before);
+
+        Assert.False(probed);
+        Assert.False(asked);
+        Assert.Equal(1, quits);
+    }
+
+    [Fact]
+    public void ConfirmQuit_AProbeThatThrows_StillQuits()
+    {
+        World world = RunningWorld(manages: true);
+        var logged = new List<string>();
+        int quits = 0;
+
+        int before = world.Posted;
+        world.Controller.ConfirmQuit(
+            () => throw new InvalidOperationException("probe broke"), _ => false, () => quits++, logged.Add);
+        RunTheAnswer(world, before);
+
+        Assert.Equal(1, quits);
+        Assert.Contains(logged, line => line.Contains("probe broke", StringComparison.Ordinal));
+    }
+
+    /// <summary>A controller whose Recorder is up, with the renders that took it there already
+    /// shown, so the next post is the Quit check's answer.</summary>
+    private static World RunningWorld(bool manages)
+    {
+        var world = new World(holdPosts: true) { Host = { Manages = manages } };
+        world.Controller.Start();
+        world.Controller.Report(manages ? RecorderState.Running : RecorderState.Unmanaged, "up");
+        world.RunPostsNewestFirst();
+        return world;
+    }
+
+    /// <summary>Wait for the Quit check, which probes on the pool, to post its answer, then run
+    /// it the way the shell's UI thread would.</summary>
+    private static void RunTheAnswer(World world, int before)
+    {
+        Assert.True(
+            SpinWait.SpinUntil(() => world.Posted > before, TimeSpan.FromSeconds(10)),
+            "the Quit check never posted its answer");
+        world.RunPostsNewestFirst();
+    }
+
+    private sealed class RefusingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the login link was minted against a Recorder that is not ours");
     }
 
     [Fact]
@@ -215,9 +342,21 @@ public class HostControllerTests
 
         public FakeHost Host { get; } = new();
 
+        // The Quit check posts from the pool while a test waits on the test thread, so the
+        // held posts and their count are read and written under one lock, and a post is held
+        // BEFORE it is counted: a test that sees the count go up then finds the post to run.
+        private readonly Lock _lock = new();
         private readonly List<Action> _held = [];
+        private int _posted;
 
-        public int Posted { get; private set; }
+        public int Posted
+        {
+            get
+            {
+                lock (_lock)
+                    return _posted;
+            }
+        }
 
         public HostController Controller { get; }
 
@@ -227,10 +366,13 @@ public class HostControllerTests
                 View,
                 post: action =>
                 {
-                    Posted++;
-                    if (holdPosts)
-                        _held.Add(action);
-                    else
+                    lock (_lock)
+                    {
+                        if (holdPosts)
+                            _held.Add(action);
+                        _posted++;
+                    }
+                    if (!holdPosts)
                         action();
                 },
                 Host);
@@ -240,9 +382,14 @@ public class HostControllerTests
         /// view before an older one.</summary>
         public void RunPostsNewestFirst()
         {
-            for (int i = _held.Count - 1; i >= 0; i--)
-                _held[i]();
-            _held.Clear();
+            Action[] held;
+            lock (_lock)
+            {
+                held = [.. _held];
+                _held.Clear();
+            }
+            for (int i = held.Length - 1; i >= 0; i--)
+                held[i]();
         }
     }
 }

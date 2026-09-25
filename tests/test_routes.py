@@ -475,17 +475,7 @@ def test_healthz_returns_documented_shape(client, recorder_under_test):  # noqa:
 def test_healthz_counts_jobs_in_flight(client, recorder_under_test):
     """A Bundle tray asks this before its Quit stops the Recorder: any job in
     flight, however it was started, has to show up here."""
-    import anyio.from_thread
-
-    from tapscribe.recorder import JobState
-
-    # JobTracker.claim is async; driven the way the busy-slot tests below do it.
-    with anyio.from_thread.start_blocking_portal() as portal:
-        claimed = portal.call(
-            recorder_under_test.jobs.claim,
-            JobState(session="s1", kind="transcribe", current=0, total=1, started_at=datetime.now(UTC)),
-        )
-    assert claimed
+    _claim_job(recorder_under_test, "s1", kind="transcribe")
 
     assert client.get("/healthz").json()["active_jobs"] == 1
 

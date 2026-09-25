@@ -58,24 +58,12 @@ public static class ConnectionTester
     /// <c>/health</c> takes no credential.
     /// </summary>
     /// <param name="http">The caller's client, so no handler is churned per probe.</param>
-    public static bool AnswersOnLoopback(int port, HttpClient http, TimeSpan timeout)
-    {
-        try
+    public static bool AnswersOnLoopback(int port, HttpClient http, TimeSpan timeout) =>
+        OnLoopback(port, http, timeout, async (control, token) =>
         {
-            using var control = new ControlClient("127.0.0.1", port, tls: false, token: "", http);
-            using var deadline = new CancellationTokenSource(timeout);
-            control.CheckHealthAsync(deadline.Token).GetAwaiter().GetResult();
+            await control.CheckHealthAsync(token).ConfigureAwait(false);
             return true;
-        }
-        catch (Exception error) when (
-            error is HttpRequestException or TaskCanceledException or OperationCanceledException
-                or SocketException or InvalidOperationException)
-        {
-            // Nothing listening, or it did not answer in time. Either way: not somebody
-            // else's healthy Recorder.
-            return false;
-        }
-    }
+        }, unanswered: false);
 
     /// <summary>
     /// How many jobs the Recorder on this machine has in flight — a synchronous
@@ -86,21 +74,33 @@ public static class ConnectionTester
     /// keep a tray from quitting on that: a Recorder that cannot answer is not doing much.
     /// </summary>
     /// <param name="http">The caller's client, so no handler is churned per probe.</param>
-    public static int? ActiveJobsOnLoopback(int port, HttpClient http, TimeSpan timeout)
+    public static int? ActiveJobsOnLoopback(int port, HttpClient http, TimeSpan timeout) =>
+        OnLoopback<int?>(port, http, timeout,
+            async (control, token) => await control.ActiveJobsAsync(token).ConfigureAwait(false),
+            unanswered: null);
+
+    /// <summary>
+    /// Ask the Recorder on this machine's loopback one question, synchronously and under
+    /// <paramref name="timeout"/>, answering <paramref name="unanswered"/> for every way of it
+    /// not being there to ask: nothing listening, no answer in time, or an answer that was not
+    /// the Recorder's JSON. None of those says somebody else's healthy Recorder holds the port,
+    /// and none says it is busy.
+    /// </summary>
+    private static T OnLoopback<T>(
+        int port, HttpClient http, TimeSpan timeout,
+        Func<ControlClient, CancellationToken, Task<T>> ask, T unanswered)
     {
         try
         {
             using var control = new ControlClient("127.0.0.1", port, tls: false, token: "", http);
             using var deadline = new CancellationTokenSource(timeout);
-            return control.ActiveJobsAsync(deadline.Token).GetAwaiter().GetResult();
+            return ask(control, deadline.Token).GetAwaiter().GetResult();
         }
         catch (Exception error) when (
-            error is HttpRequestException or TaskCanceledException or OperationCanceledException
-                or SocketException or InvalidOperationException or System.Text.Json.JsonException)
+            error is HttpRequestException or OperationCanceledException or SocketException
+                or InvalidOperationException or System.Text.Json.JsonException)
         {
-            // Nothing listening, no answer in time, or an answer that was not the Recorder's
-            // JSON. None of those says the Recorder is busy.
-            return null;
+            return unanswered;
         }
     }
 

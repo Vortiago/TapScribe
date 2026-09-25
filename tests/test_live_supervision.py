@@ -264,6 +264,30 @@ def test_start_wires_a_background_pump_that_promotes_state_to_running():
     _wait_until(lambda: chan.info["state"] == "stopped")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_start_gives_the_server_a_process_group_not_a_session():
+    """`tapscribe.live_guard` joins the server's group, and a process can only
+    join a group in its own session: `start_new_session` would make every guard
+    spawn fail. No stdin, so the background group never touches the terminal."""
+    chan = _make_channel()
+    proc = _FakeChildProc()
+
+    with (
+        patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+        patch("tapscribe.live.subprocess.Popen", return_value=proc) as popen,
+    ):
+        ok, _msg = chan.start()
+    assert ok is True
+
+    kwargs = popen.call_args.kwargs
+    assert kwargs.get("process_group") == 0
+    assert "start_new_session" not in kwargs
+    assert kwargs.get("stdin") == subprocess.DEVNULL
+
+    proc.stdout.close()
+    _wait_until(lambda: chan.info["state"] == "stopped")
+
+
 # ---------------------------------------------------------------------------
 # begin_transition — knob validation + replacement body
 # ---------------------------------------------------------------------------

@@ -51,6 +51,13 @@ def _const(source: Path, declaration: str) -> str:
     return found.group(1).strip()
 
 
+def _served() -> set[tuple[str, str]]:
+    """Every (verb, path) the Recorder serves."""
+    from tapscribe.app import app
+
+    return {(method, row.path) for row in registered_routes(app) for method in row.methods}
+
+
 def test_the_tray_and_the_recorder_agree_on_the_port() -> None:
     assert _const(DEFAULTS, "int RecorderPort") == str(config.PORT), (
         "BundleDefaults.RecorderPort and config.PORT have drifted. The tray would boot the "
@@ -86,8 +93,6 @@ def test_the_tray_reads_the_key_the_mint_route_writes() -> None:
 def test_the_tray_mints_at_a_route_the_recorder_serves() -> None:
     # The same silent failure as a drifted username: a mint at a path or verb the Recorder
     # does not serve answers 404/405, which LoginLink treats as "could not mint".
-    from tapscribe.app import app
-
     minted = re.search(
         r'new HttpRequestMessage\(HttpMethod\.(\w+),\s*new Uri\(root \+ "([^"]+)"\)\)',
         LOGIN_LINK.read_text(encoding="utf-8"),
@@ -95,8 +100,7 @@ def test_the_tray_mints_at_a_route_the_recorder_serves() -> None:
     assert minted, "LoginLink.cs no longer builds its mint request in the shape this test reads"
     verb, path = minted.group(1).upper(), minted.group(2)
 
-    served = {(method, row.path) for row in registered_routes(app) for method in row.methods}
-    assert (verb, path) in served, (
+    assert (verb, path) in _served(), (
         f"the tray mints with {verb} {path}, which the Recorder does not serve; every "
         "Open dashboard would fall back to the signed-out page with nothing in any log "
         "but a status code"
@@ -132,8 +136,7 @@ def test_the_quit_probe_reads_a_count_the_recorder_reports(recorder_under_test) 
     assert probe, "ControlClient.ActiveJobsAsync no longer has the shape this test reads"
     path, key = probe.group(1), probe.group(2)
 
-    served = {(method, row.path) for row in registered_routes(app) for method in row.methods}
-    assert ("GET", path) in served, f"the tray asks GET {path}, which the Recorder does not serve"
+    assert ("GET", path) in _served(), f"the tray asks GET {path}, which the Recorder does not serve"
 
     app.dependency_overrides[get_recorder] = lambda: recorder_under_test
     app.state.recorder = recorder_under_test

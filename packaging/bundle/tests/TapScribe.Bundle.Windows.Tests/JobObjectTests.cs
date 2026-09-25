@@ -30,11 +30,9 @@ public class JobObjectTests
     private static JobObject? Create()
     {
         JobObject? created = JobObject.TryCreate(_ => { });
+        // Unlocked: xUnit runs one class's tests one at a time.
         if (created is not null)
-        {
-            lock (Rooted)
-                Rooted.Add(created);
-        }
+            Rooted.Add(created);
         return created;
     }
 

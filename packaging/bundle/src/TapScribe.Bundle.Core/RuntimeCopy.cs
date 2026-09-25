@@ -92,14 +92,14 @@ public static class RuntimeCopy
             // of megabytes to gigabytes under a data root Finder hides. Retried on every
             // launch, since a launch that finds its own runtime intact is the ordinary one,
             // and the only one most operators will ever have again after an upgrade.
-            RemoveLeftovers(layout, OtherVersions(layout), log);
+            RemoveLeftovers(layout, log);
             return new RuntimeCopyResult(RuntimeCopyOutcome.Current);
         }
 
         // Runtimes for OTHER versions, kept until the new one is complete so a failed
-        // upgrade leaves the operator with the Recorder they had. Read ONCE: the list is
-        // reported as PreviousVersion and then deleted, and two enumerations that had to
-        // agree could stop agreeing the first time the filter changed.
+        // upgrade leaves the operator with the Recorder they had. Read here only to report
+        // (the outcome, and PreviousVersion); RemoveLeftovers deletes whatever is not this
+        // version's once the copy is in place.
         List<string> superseded = OtherVersions(layout);
 
         RuntimeCopyOutcome outcome = present
@@ -129,32 +129,36 @@ public static class RuntimeCopy
 
         // Only now — the new runtime is complete, so the old ones have stopped being the
         // fallback they were being kept as.
-        RemoveLeftovers(layout, superseded, log);
+        RemoveLeftovers(layout, log);
 
         return new RuntimeCopyResult(outcome, superseded.FirstOrDefault());
     }
 
     /// <summary>
-    /// Delete the superseded runtimes and every partial copy left under the runtime root.
-    /// Called once the runtime for THIS version is complete — after a copy, and on every
-    /// launch that finds it already intact, which is what makes "the next launch tries
-    /// again" true for a delete that failed or was interrupted.
+    /// Delete everything under the runtime root but this version's own runtime: the
+    /// superseded runtimes and every partial copy, of any version. Called once the runtime
+    /// for THIS version is complete — after a copy, and on every launch that finds it already
+    /// intact, which is what makes "the next launch tries again" true for a delete that failed
+    /// or was interrupted.
     ///
-    /// Partials of any version count: <see cref="OtherVersions"/> leaves them out on purpose
-    /// (a partial must never be reported as the version the operator came from), so without
-    /// this a crash marker from an earlier release's first launch would outlive every later
-    /// one. By the time this runs, this version's own partial has been renamed into place.
+    /// Partials count although <see cref="OtherVersions"/> leaves them out (a partial must never
+    /// be reported as the version the operator came from): without them a crash marker from an
+    /// earlier release's first launch would outlive every later one. By the time this runs,
+    /// this version's own partial has been renamed into place.
     /// </summary>
-    private static void RemoveLeftovers(BundleLayout layout, IEnumerable<string> superseded, Action<string> log)
+    private static void RemoveLeftovers(BundleLayout layout, Action<string> log)
     {
-        string[] partials = Directory.Exists(layout.RuntimeRoot)
-            ? [.. Directory.GetDirectories(layout.RuntimeRoot)
-                .Select(Path.GetFileName)
-                .OfType<string>()
-                .Where(name => name.EndsWith(PartialSuffix, StringComparison.Ordinal))]
-            : [];
+        if (!Directory.Exists(layout.RuntimeRoot))
+            return;
 
-        foreach (string old in superseded.Concat(partials).ToList())
+        string mine = Path.GetFileName(layout.RuntimeDirectory);
+        List<string> leftovers = Directory.GetDirectories(layout.RuntimeRoot)
+            .Select(Path.GetFileName)
+            .OfType<string>()
+            .Where(name => !string.Equals(name, mine, StringComparison.Ordinal))
+            .ToList();
+
+        foreach (string old in leftovers)
         {
             log($"runtime: removing the superseded {old}.");
             try

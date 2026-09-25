@@ -91,6 +91,9 @@ public sealed class HostController : IDisposable
     private long _reports;
     private long _shown;
 
+    /// <summary>A Quit is waiting on its confirmation. Under <c>_gate</c>.</summary>
+    private bool _quitAsked;
+
     public HostController(IHostView view, Action<Action> post, IRecorderHost supervisor)
     {
         ArgumentNullException.ThrowIfNull(view);
@@ -134,19 +137,11 @@ public sealed class HostController : IDisposable
     }
 
     /// <summary>
-    /// Whether "Open dashboard" may trade this install's password for a login link: only
-    /// while the Recorder on the port is the one this tray started, and up. In every other
-    /// state whatever answers the port — another user's Recorder, a <c>start.sh</c>, anything
-    /// at all — is not known to be this install's, and a mint is a POST of this install's
-    /// password to it (<see cref="LoginLink"/>: "the password sent somewhere it does not
-    /// belong"). The shell opens the plain dashboard instead.
-    /// </summary>
-    public bool MayMintLoginLink => OwnsRunningRecorder;
-
-    /// <summary>
     /// Whether the Recorder on the port is the one this tray started, and up: the one a Quit
-    /// stops, and the only one whose answers are known to be this install's. Quit consults it
-    /// before asking that Recorder whether it is busy (<see cref="QuitConfirmation"/>).
+    /// stops, and the only one whose answers are known to be this install's. Asked of
+    /// <c>Render</c> rather than of the state directly, for the reason
+    /// <see cref="StopRecorder"/> gives: a new <see cref="RecorderState"/> must not be
+    /// reachable here while the menu that offers it says otherwise.
     /// </summary>
     public bool OwnsRunningRecorder
     {
@@ -154,11 +149,91 @@ public sealed class HostController : IDisposable
         {
             lock (_gate)
             {
-                if (_state != RecorderState.Running)
+                if (!Render(_state, _message).CanStop)
                     return false;
             }
             return _supervisor.Manages;
         }
+    }
+
+    /// <summary>
+    /// Where "Open dashboard" sends the browser: a signed-in link (<see cref="LoginLink"/>)
+    /// only while <see cref="OwnsRunningRecorder"/>. In every other state whatever answers the
+    /// port — another user's Recorder, a <c>start.sh</c>, anything at all — is not known to be
+    /// this install's, and a mint is a POST of this install's password to it ("the password
+    /// sent somewhere it does not belong"), so the plain dashboard opens instead. A loopback
+    /// round-trip when it mints: call it off the UI thread.
+    /// </summary>
+    public string DashboardUrl(HttpClient http, BundleLayout layout, Action<string> log)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        if (OwnsRunningRecorder)
+            return LoginLink.DashboardUrlFor(http, layout, log);
+        log("login link: the Recorder on the port is not this tray's own — opening the dashboard signed out.");
+        return BundleDefaults.DashboardUrl;
+    }
+
+    /// <summary>
+    /// Quit, asking first when it would stop work in flight (<see cref="QuitConfirmation"/>).
+    /// Called on the UI thread; <paramref name="ask"/> and <paramref name="quit"/> run there
+    /// too, through the shell's post. The probe is a loopback round-trip, so it runs on the
+    /// pool, and only a Recorder this tray started is asked, since only that one stops with
+    /// the Quit. A second call while the first is still asking is the same request, not
+    /// another dialog. Nothing that fails while asking keeps the tray from quitting.
+    /// </summary>
+    /// <param name="activeJobs">How many jobs the Recorder reports in flight, or null when it
+    /// cannot be asked: the shell's probe, since Bundle.Core does not reference the Bridge's
+    /// client (the same shape as <see cref="Attach"/>'s <c>recorderAnswers</c>).</param>
+    /// <param name="ask">The native dialog: true to quit.</param>
+    public void ConfirmQuit(Func<int?> activeJobs, Func<string, bool> ask, Action quit, Action<string> log)
+    {
+        ArgumentNullException.ThrowIfNull(activeJobs);
+        ArgumentNullException.ThrowIfNull(ask);
+        ArgumentNullException.ThrowIfNull(quit);
+        ArgumentNullException.ThrowIfNull(log);
+        lock (_gate)
+        {
+            if (_quitAsked)
+                return;
+            _quitAsked = true;
+        }
+
+        _ = Task.Run(() =>
+        {
+            string? warning = null;
+            try
+            {
+                warning = QuitConfirmation.WarningFor(OwnsRunningRecorder ? activeJobs() : null);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                log($"quit check: {error}");
+            }
+
+            _post(() =>
+            {
+                bool go = true;
+                if (warning is not null)
+                {
+                    try
+                    {
+                        go = ask(warning);
+                    }
+                    catch (Exception error) when (error is not OutOfMemoryException)
+                    {
+                        log($"quit dialog: {error}");
+                    }
+                }
+
+                if (go)
+                {
+                    quit();
+                    return;
+                }
+                lock (_gate)
+                    _quitAsked = false;
+            });
+        });
     }
 
     /// <summary>Boot the Recorder and render the section for the first time.</summary>
@@ -241,15 +316,10 @@ public sealed class HostController : IDisposable
     /// </summary>
     public void StopRecorder()
     {
-        lock (_gate)
-        {
-            // Asked of Render for the same reason StartRecorder is, rather than of the
-            // supervisor: a new RecorderState must not be reachable here while the menu
-            // that offers it says otherwise.
-            if (!Render(_state, _message).CanStop)
-                return;
-        }
-        if (!_supervisor.Manages)
+        // Asked of Render (inside OwnsRunningRecorder) for the same reason StartRecorder is,
+        // rather than of the supervisor: a new RecorderState must not be reachable here while
+        // the menu that offers it says otherwise.
+        if (!OwnsRunningRecorder)
             return;
         _supervisor.Stop();
         // No alert: the operator asked for this one.

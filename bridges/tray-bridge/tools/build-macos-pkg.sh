@@ -88,16 +88,8 @@ if grep -q '<relocate>' "$work/expanded/PackageInfo"; then
 fi
 # Same rule for the postinstall: checked in what was built, not in what was handed
 # to pkgbuild. `pkgutil --expand` unpacks a component's Scripts into a directory
-# (only the Payload stays archived); the archive branch is there so a pkgutil that
-# ever stops unpacking it fails this check for the right reason, not a tar error.
-postinstall_built() {
-  if [ -d "$1" ]; then
-    [ -x "$1/postinstall" ]
-  else
-    tar -tzf "$1" | grep -q 'postinstall$'
-  fi
-}
-if ! postinstall_built "$work/expanded/Scripts"; then
+# (only the Payload stays archived).
+if [ ! -x "$work/expanded/Scripts/postinstall" ]; then
   echo "$out carries no postinstall: an upgrade would leave the old app behind" >&2
   exit 1
 fi
@@ -108,7 +100,7 @@ fi
 # over a bridge-only install that is the upgrade — so it ships as built.
 resources="$stage/$(basename "$app")/Contents/Resources"
 if [ -d "$resources/python" ] || [ -d "$resources/wheel" ]; then
-  cp "$component_pkg" "$out"
+  mv "$component_pkg" "$out"
   echo "built $out ($identifier $version, Bundle, not relocatable)"
   exit 0
 fi

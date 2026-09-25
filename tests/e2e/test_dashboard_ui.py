@@ -8007,6 +8007,15 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             await browser.close()
 
 
+async def _mint_login_link(base: str, password: str) -> str:
+    """What the tray does on Open dashboard: ask the Recorder for a one-shot link
+    with the password it read off disk, and answer the path to open."""
+    async with httpx.AsyncClient() as client:
+        minted = await client.post(base + "/api/login-link", auth=("admin", password))
+    assert minted.status_code == 200, minted.text
+    return str(minted.json()["path"])
+
+
 async def test_login_link_signs_the_browser_in_without_an_auth_dialog(
     running_recorder_auth_on: RunningRecorder,
 ) -> None:
@@ -8119,10 +8128,7 @@ async def test_a_link_signed_in_dashboard_can_still_write(
     d.mkdir(parents=True)
     synth_speech_like_wav(d / f"{sid}_Dana_dana_0000dddd.wav", seconds=0.4, freq_hz=210.0)
 
-    async with httpx.AsyncClient() as client:
-        minted = await client.post(base + "/api/login-link", auth=("admin", password))
-        assert minted.status_code == 200, minted.text
-        link = minted.json()["path"]
+    link = await _mint_login_link(base, password)
 
     row = f'#viewRoot .sessrow[data-sid="{sid}"]'
 
@@ -8203,12 +8209,6 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
     base = running_recorder_auth_on.base_url
     password = running_recorder_auth_on.recorder.auth.value
 
-    async def mint() -> str:
-        async with httpx.AsyncClient() as client:
-            answer = await client.post(base + "/api/login-link", auth=("admin", password))
-        assert answer.status_code == 200, answer.text
-        return str(answer.json()["path"])
-
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)
         try:
@@ -8221,7 +8221,7 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
             page.on("response", lambda r: traffic.append(f"{r.status} {r.url}"))
             modules = lambda: len([line for line in traffic if "/web/js/" in line])  # noqa: E731
 
-            await page.goto(base + await mint(), wait_until="domcontentloaded")
+            await page.goto(base + await _mint_login_link(base, password), wait_until="domcontentloaded")
             await page.wait_for_selector("#tapsRailBody", timeout=10000)
 
             # Let the module graph finish arriving before killing the session. The
@@ -8280,7 +8280,7 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
             # for this origin, so the stale tab recovers on its next pass instead of
             # wearing a sign-out notice over a working dashboard.
             second = await context.new_page()
-            await second.goto(base + await mint(), wait_until="domcontentloaded")
+            await second.goto(base + await _mint_login_link(base, password), wait_until="domcontentloaded")
             await second.close()
 
             await page.wait_for_function(
@@ -8319,12 +8319,6 @@ async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
     first, second = f"{sid}_Ana_ana_0000aaaa.wav", f"{sid}_Bo_bo_0000bbbb.wav"
     _seed_wav_session(rec, sid, names=[first, second], seconds=0.4)
 
-    async def mint() -> str:
-        async with httpx.AsyncClient() as client:
-            answer = await client.post(base + "/api/login-link", auth=("admin", password))
-        assert answer.status_code == 200, answer.text
-        return str(answer.json()["path"])
-
     wave_msg = '#viewRoot [data-slot="msg"]'
 
     async with playwright_session() as pw:
@@ -8333,7 +8327,7 @@ async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
 
-            await page.goto(base + await mint(), wait_until="domcontentloaded")
+            await page.goto(base + await _mint_login_link(base, password), wait_until="domcontentloaded")
             await _focus_session_view(page, sid, "recordings")
             await page.locator(f'#viewRoot [data-wav="{second}"]').wait_for(state="visible", timeout=15000)
 
@@ -8387,7 +8381,7 @@ async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
             # (2) A fresh link signs the tab back in; the cue clears, and the WAV
             # picked during the spell is asked again and drawn.
             fresh = await context.new_page()
-            await fresh.goto(base + await mint(), wait_until="domcontentloaded")
+            await fresh.goto(base + await _mint_login_link(base, password), wait_until="domcontentloaded")
             await fresh.close()
             await page.wait_for_function(
                 "() => { const el = document.querySelector('#errbar'); return !!el && el.hidden; }",

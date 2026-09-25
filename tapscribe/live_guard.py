@@ -37,8 +37,8 @@ from collections.abc import Sequence
 #: so a second's lag is nothing, and each look is two syscalls.
 POLL_S: float = 1.0
 
-#: How long the group gets to honour SIGTERM before SIGKILL: the same budget
-#: `LiveChannel.stop` gives it.
+#: How long the group gets to honour SIGTERM before SIGKILL. `LiveChannel.stop`
+#: takes its default from here, so a crash and a normal stop give the same budget.
 TERM_GRACE_S: float = 5.0
 
 
@@ -50,7 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return watch(args.recorder_pid, args.server_pid)
 
 
-def watch(recorder_pid: int, server_pid: int, *, poll_s: float = POLL_S) -> int:
+def watch(recorder_pid: int, server_pid: int) -> int:
     """Poll until the Recorder or the server is gone, and end the server's group
     if it was the Recorder."""
     while True:
@@ -59,7 +59,7 @@ def watch(recorder_pid: int, server_pid: int, *, poll_s: float = POLL_S) -> int:
             return 0
         if not _alive(server_pid):
             return 0  # the server ended on its own: nothing is left to guard
-        time.sleep(poll_s)
+        time.sleep(POLL_S)
 
 
 def _end_group(server_pid: int) -> None:
@@ -80,11 +80,9 @@ def _end_group(server_pid: int) -> None:
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # A process we may not signal holds that pid. The server was started by
-        # our own Recorder, so this is a reused pid and the server is gone.
+    except (ProcessLookupError, PermissionError):
+        # No process holds that pid, or one we may not signal does. The server was
+        # started by our own Recorder, so the latter is a reused pid: gone either way.
         return False
     return True
 
