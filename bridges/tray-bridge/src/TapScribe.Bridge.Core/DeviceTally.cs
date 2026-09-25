@@ -32,6 +32,7 @@ public sealed class DeviceTally
 
     private readonly bool _attached;
 
+    /// <summary>A tally over <paramref name="total"/> devices, none of them heard from yet.</summary>
     /// <param name="total">How many devices the taps were opened on.</param>
     /// <param name="attached">Whether these taps are an attached tap rather than a bracketed
     /// meeting, which is the ONE thing that differs: the counting is identical and only the

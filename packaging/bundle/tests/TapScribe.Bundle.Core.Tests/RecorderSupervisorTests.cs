@@ -104,7 +104,7 @@ public class RecorderSupervisorTests
     {
         using var world = new Fake();
         world.Boot();
-        var recorder = (FakeChild)world.Recorder!;
+        FakeChild recorder = world.Recorder!;
 
         world.Supervisor.Stop();
 

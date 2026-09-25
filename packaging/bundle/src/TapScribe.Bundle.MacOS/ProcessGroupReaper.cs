@@ -172,8 +172,9 @@ public sealed class ProcessGroupReaper : IProcessReaper
         // No run-once dance of its own: Dispose is the only caller and already guards with
         // _disposed, so a second mechanism tracking "the watchdog has been dealt with" would
         // only make a reader check whether either can fire without the other.
-        if (_watchdog is not { } watchdog)
+        if (_watchdog is null)
             return;
+        using Process watchdog = _watchdog;
 
         try
         {
@@ -186,10 +187,6 @@ public sealed class ProcessGroupReaper : IProcessReaper
             // It exited between the check and the kill, or we lost the right to signal it.
             // Both mean the thing we wanted (no watchdog running) is already true.
             _log($"reaper: the parent-death watch had already gone ({error.Message}).");
-        }
-        finally
-        {
-            watchdog.Dispose();
         }
     }
 }

@@ -57,6 +57,8 @@ public sealed class RecorderSupervisor : IRecorderHost
     private IChildProcess? _preflight;
     private bool _stopping;
 
+    /// <summary>A supervisor for the Recorder <paramref name="layout"/> describes. Nothing is
+    /// spawned until <see cref="Start"/>.</summary>
     /// <param name="reaper">The crash backstop, or null for the supported degraded mode.</param>
     /// <param name="spawn">How to start one child. Defaults to a real process.</param>
     /// <param name="recorderAnswers">Whether SOMETHING is serving the Recorder's port —
@@ -116,8 +118,8 @@ public sealed class RecorderSupervisor : IRecorderHost
 
     private void Run()
     {
-        // TASK-BOUNDARY HANDLER — deliberately catches everything, and CodeQL's
-        // cs/catch-of-all-exceptions is dismissed on it for that reason.
+        // TASK-BOUNDARY HANDLER — deliberately catches everything but an out-of-memory,
+        // the same boundary every tray command keeps.
         //
         // Start() is fire-and-forget (Task.Run), so an exception escaping here lands in
         // an unobserved Task and vanishes: no Fail(), no log line, no state change, and a
@@ -133,7 +135,7 @@ public sealed class RecorderSupervisor : IRecorderHost
         {
             RunCore();
         }
-        catch (Exception error)
+        catch (Exception error) when (error is not OutOfMemoryException)
         {
             _log($"unhandled exception in supervisor: {error}");
             Fail($"TapScribe could not start: {error.Message} See the log for details.");

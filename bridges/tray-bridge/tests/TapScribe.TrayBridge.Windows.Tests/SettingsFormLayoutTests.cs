@@ -181,10 +181,8 @@ public class SettingsFormLayoutTests
             foreach (string escape in Escapes(container, control))
                 faults.Add(escape);
 
-            foreach (Control other in siblings)
+            foreach (Control other in siblings.Where(other => !ReferenceEquals(other, control)))
             {
-                if (ReferenceEquals(other, control))
-                    continue;
                 Rectangle hit = Rectangle.Intersect(Ink(control), Ink(other));
                 // One pixel of shared edge is a rounding artefact, not a collision.
                 if (hit.Width > 1 && hit.Height > 1)
