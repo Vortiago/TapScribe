@@ -13,7 +13,7 @@ import argparse
 
 import uvicorn
 
-from . import config, install_target
+from . import bringup_defaults, config, install_target
 from .app import app
 from .live import LiveConfig
 from .recorder import Recorder
@@ -30,16 +30,24 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m tapscribe",
         description="TapScribe — local-first transcription recorder + dashboard.",
     )
-    p.add_argument("--host", default="localhost", help="Bind address. Use 0.0.0.0 to expose on LAN.")
+    # Bring-up defaults are read from `bringup_defaults` (#357): the start scripts
+    # print the same values, so a launch that skips argparse cannot disagree.
+    p.add_argument(
+        "--host", default=bringup_defaults.HOST, help="Bind address. Use 0.0.0.0 to expose on LAN."
+    )
     # Defaulted FROM config, which `main()` then stamps back onto it: one declaration of the
     # port, rather than a literal here that a launch skipping argparse would disagree with.
     p.add_argument("--port", type=int, default=config.PORT)
     p.add_argument(
         "--live-model",
-        default="tiny.en",
+        default=bringup_defaults.MODEL,
         help="WhisperLiveKit model name (tiny.en, small.en, large-v3, ...). Changeable from the dashboard.",
     )
-    p.add_argument("--live-language", default="en", help="WhisperLiveKit language hint (en, no, auto, ...)")
+    p.add_argument(
+        "--live-language",
+        default=bringup_defaults.LANG,
+        help="WhisperLiveKit language hint (en, no, auto, ...)",
+    )
     p.add_argument(
         "--live-host",
         default=None,

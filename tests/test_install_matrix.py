@@ -24,6 +24,8 @@ from pathlib import Path
 
 from conftest import atomic_extras
 
+from tapscribe import preflight
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_MATRIX_YML = REPO_ROOT / ".github" / "workflows" / "install-matrix.yml"
 
@@ -40,3 +42,16 @@ def test_install_matrix_families_are_valid_pyproject_extras():
         # optional-dependencies and names it on failure — the exact check a
         # family whose extra was silently removed (#263: `canary`) needs.
         atomic_extras(family)
+
+
+def test_install_matrix_wheel_index_matches_preflight():
+    r"""The workflow hand-mirrors the prebuilt llama-cpp wheel index the
+    preflight passes (its own comment says "Mirror start.sh / start.ps1's"),
+    but nothing tied the two. `preflight.LLAMA_CPP_WHEEL_INDEX` is the one
+    declaration; a bumped index must not land in only the workflow or only
+    the preflight (#357). The `[^\s)]` stops before the bash `)` closing the
+    array append."""
+    workflow_text = INSTALL_MATRIX_YML.read_text()
+    m = re.search(r"--extra-index-url\s+([^\s)]+)", workflow_text)
+    assert m, "couldn't find the `--extra-index-url` in install-matrix.yml"
+    assert m.group(1) == preflight.LLAMA_CPP_WHEEL_INDEX

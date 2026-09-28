@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tapscribe import preflight
+from tapscribe import preflight, runtime_probe
 from tapscribe.preflight import Step, plan_steps
 
 _WHEEL_MISSING: frozenset[str] = frozenset()
@@ -164,6 +164,26 @@ def test_summarize_extra_is_requested_by_name():
     steps = plan_steps(python="py", system="Linux", module_present=_present("onnxruntime"))
     argv = next(s for s in steps if s.name == "summarize").argv
     assert any(a.endswith("[summarize]") for a in argv), argv
+
+
+def test_summarize_probe_agrees_with_resolve_local_backend():
+    """`summarize_probe_module` re-derives the routing that
+    `catalog.resolve_local_backend` owns, from a (system, machine) pair rather
+    than the live probe — nothing tied the two, so a routing change could move
+    one and leave the other reinstalling on every boot. Pin both answers on
+    the two archetypes the mirror keys on."""
+    from tapscribe.summarizers import catalog
+
+    try:
+        runtime_probe.set_available_backends_for_testing(frozenset({"cpu", "mlx"}))
+        assert catalog.resolve_local_backend() == "mlx"
+        assert preflight.summarize_probe_module("Darwin", "arm64") == "mlx_lm"
+
+        runtime_probe.set_available_backends_for_testing(frozenset({"cpu"}))
+        assert catalog.resolve_local_backend() == "gguf"
+        assert preflight.summarize_probe_module("Linux", "x86_64") == "llama_cpp"
+    finally:
+        runtime_probe.set_available_backends_for_testing(None)
 
 
 def test_llama_cpp_install_uses_the_prebuilt_wheel_index():

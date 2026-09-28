@@ -200,16 +200,26 @@ fi
 python -m tapscribe.preflight || true
 
 # --- Configuration ----------------------------------------------------------
-MODEL="${SX_MODEL:-tiny.en}"
-LANG="${SX_LANG:-en}"
-PORT_WLK="${SX_PORT_WLK:-}"
-PORT_REC="${SX_PORT_REC:-8001}"
-
+# The bring-up values come from `tapscribe.bringup_defaults` so start.sh and
+# start.ps1 cannot re-derive them in parallel (#357). Fatal by design, unlike
+# the preflight above: without the launch config there is nothing to exec.
+LAN_FLAG=()
 if [ "$LAN" -eq 1 ]; then
-    HOST="${SX_HOST:-0.0.0.0}"
-else
-    HOST="${SX_HOST:-localhost}"
+    LAN_FLAG=(--lan)
 fi
+BRINGUP=$(python -m tapscribe.bringup_defaults "${LAN_FLAG[@]}") || {
+    echo "[start] Could not read bring-up defaults; aborting." >&2
+    exit 1
+}
+while IFS='=' read -r _key _val; do
+    case "$_key" in
+        HOST) HOST="$_val" ;;
+        PORT_REC) PORT_REC="$_val" ;;
+        PORT_WLK) PORT_WLK="$_val" ;;
+        MODEL) MODEL="$_val" ;;
+        LANG) LANG="$_val" ;;
+    esac
+done <<< "$BRINGUP"
 
 LAN_IP=""
 if command -v ipconfig >/dev/null 2>&1; then
@@ -258,7 +268,7 @@ if [ "$BROWSER_SETUP" -eq 1 ]; then
 fi
 echo "        Live channel    $LIVE_LABEL"
 echo "        Backend         $BACKEND_LABEL"
-echo "        Initial model   $MODEL  (lang=$LANG; change from the dashboard or via SX_MODEL=…)"
+echo "        Initial model   $MODEL  (lang=$LANG; change from the dashboard)"
 echo ""
 
 python -m tapscribe \

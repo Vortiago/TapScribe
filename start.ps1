@@ -107,17 +107,26 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 & python -m tapscribe.preflight
 
 # --- Configuration ----------------------------------------------------------
-$Model = if ($env:SX_MODEL) { $env:SX_MODEL } else { "tiny.en" }
-$LangCode = if ($env:SX_LANG) { $env:SX_LANG } else { "en" }
-$PortRec = if ($env:SX_PORT_REC) { $env:SX_PORT_REC } else { "8001" }
-$PortWlk = if ($env:SX_PORT_WLK) { $env:SX_PORT_WLK } else { "" }
-if ($env:SX_HOST) {
-    $BindHost = $env:SX_HOST
-} elseif ($Lan) {
-    $BindHost = "0.0.0.0"
-} else {
-    $BindHost = "localhost"
+# The bring-up values come from `tapscribe.bringup_defaults` so start.ps1 and
+# start.sh cannot re-derive them in parallel (#357). Fatal by design, unlike
+# the preflight above: without the launch config there is nothing to launch.
+$BringupArgs = @()
+if ($Lan) { $BringupArgs += "--lan" }
+$BringupLines = @(& python -m tapscribe.bringup_defaults @BringupArgs)
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "[start] Could not read bring-up defaults; aborting."
+    exit 1
 }
+$Bringup = @{}
+foreach ($line in $BringupLines) {
+    $key, $value = $line -split "=", 2
+    $Bringup[$key] = $value
+}
+$BindHost = $Bringup["HOST"]
+$PortRec = $Bringup["PORT_REC"]
+$PortWlk = $Bringup["PORT_WLK"]
+$Model = $Bringup["MODEL"]
+$LangCode = $Bringup["LANG"]
 
 $ExtraArgs = @()
 if ($NoMlx)      { $ExtraArgs += "--no-mlx" }
