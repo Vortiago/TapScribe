@@ -540,8 +540,11 @@ jobs:
       - name: Test bridge-core
         run: dotnet test bridges/tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 
+      # Pinned to a workload set: 10.0.401.1 brings the macOS 27.0 SDK pack, which
+      # needs Xcode 27, and macos-latest does not have it yet (MT0179). Raise the
+      # pin when the runner image ships Xcode 27.
       - name: Install the macos workload
-        run: dotnet workload install macos
+        run: dotnet workload install macos --version 10.0.401
 
       # A dedicated keychain for the [RequiresMacOS] Keychain round trip, because
       # the runner's login keychain is the wrong thing to bet on twice over: if it
