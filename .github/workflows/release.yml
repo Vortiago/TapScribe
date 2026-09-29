@@ -153,9 +153,10 @@ jobs:
         with:
           global-json-file: bridges/tray-bridge/global.json
 
-      # Not on the runner image, and the shell does not build without it.
+      # Not on the runner image, and the shell does not build without it. Pinned
+      # to the set ci.yml pins, which says why.
       - name: Install the macos workload
-        run: dotnet workload install macos
+        run: dotnet workload install macos --version 10.0.401
 
       - name: Derive version from tag
         run: echo "VER=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
