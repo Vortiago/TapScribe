@@ -9,6 +9,14 @@
 #   .\start.ps1 -NoAuth                  # disable dashboard auth + /tap token gate (DEV ONLY)
 #   .\start.ps1 -Tls                     # serve https:// + wss:// (auto self-signed)
 #   .\start.ps1 -NonInteractive          # install the saved/default selection in-terminal (no browser)
+#
+# Configurable via env vars (resolved by `python -m tapscribe.bringup_defaults`):
+#   SX_HOST       bind address (default localhost, 0.0.0.0 under -Lan; a set
+#                 SX_HOST beats -Lan)
+#   SX_PORT_WLK   WhisperLiveKit port (default: ephemeral)
+#   SX_PORT_REC   recorder port (default 8001)
+#   SX_MODEL      initial live Whisper model (default tiny.en; switch live from dashboard)
+#   SX_LANG       language hint (default en)
 
 [CmdletBinding()]
 param(
@@ -107,17 +115,26 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 & python -m tapscribe.preflight
 
 # --- Configuration ----------------------------------------------------------
-$Model = if ($env:SX_MODEL) { $env:SX_MODEL } else { "tiny.en" }
-$LangCode = if ($env:SX_LANG) { $env:SX_LANG } else { "en" }
-$PortRec = if ($env:SX_PORT_REC) { $env:SX_PORT_REC } else { "8001" }
-$PortWlk = if ($env:SX_PORT_WLK) { $env:SX_PORT_WLK } else { "" }
-if ($env:SX_HOST) {
-    $BindHost = $env:SX_HOST
-} elseif ($Lan) {
-    $BindHost = "0.0.0.0"
-} else {
-    $BindHost = "localhost"
+# `tapscribe.bringup_defaults` owns the bring-up values, and start.sh reads
+# the same source. Fatal by design, unlike the preflight above: without the
+# launch config there is nothing to launch.
+$BringupArgs = @()
+if ($Lan) { $BringupArgs += "--lan" }
+$BringupLines = @(& python -m tapscribe.bringup_defaults @BringupArgs)
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "[start] Could not read bring-up defaults; aborting."
+    exit 1
 }
+$Bringup = @{}
+foreach ($line in $BringupLines) {
+    $key, $value = $line -split "=", 2
+    $Bringup[$key] = $value
+}
+$BindHost = $Bringup["HOST"]
+$PortRec = $Bringup["PORT_REC"]
+$PortWlk = $Bringup["PORT_WLK"]
+$Model = $Bringup["MODEL"]
+$LangCode = $Bringup["LANG"]
 
 $ExtraArgs = @()
 if ($NoMlx)      { $ExtraArgs += "--no-mlx" }

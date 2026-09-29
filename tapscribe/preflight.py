@@ -103,7 +103,7 @@ def _module_present(name: str) -> bool:
 def summarize_probe_module(system: str, machine: str) -> str:
     """Which module proves the `[summarize]` extra is usable on this host.
 
-    Mirrors `LocalSummarizer.resolve_local_backend`'s routing: the MLX backend
+    Mirrors `catalog.resolve_local_backend`'s routing: the MLX backend
     on Apple Silicon, the GGUF/llama.cpp one everywhere else. Probing the wrong
     module would either reinstall on every boot or never install at all.
     """

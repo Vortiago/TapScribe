@@ -13,7 +13,7 @@ import argparse
 
 import uvicorn
 
-from . import config, install_target
+from . import bringup_defaults, config, install_target
 from .app import app
 from .live import LiveConfig
 from .recorder import Recorder
@@ -30,16 +30,26 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m tapscribe",
         description="TapScribe — local-first transcription recorder + dashboard.",
     )
-    p.add_argument("--host", default="localhost", help="Bind address. Use 0.0.0.0 to expose on LAN.")
+    # Defaulted from `bringup_defaults`, which the start scripts also read: a bare
+    # `python -m tapscribe` launch gets the same values as a scripted one.
+    p.add_argument(
+        "--host",
+        default=bringup_defaults.HOST,
+        help=f"Bind address. Use {bringup_defaults.HOST_LAN} to expose on LAN.",
+    )
     # Defaulted FROM config, which `main()` then stamps back onto it: one declaration of the
     # port, rather than a literal here that a launch skipping argparse would disagree with.
     p.add_argument("--port", type=int, default=config.PORT)
     p.add_argument(
         "--live-model",
-        default="tiny.en",
+        default=bringup_defaults.MODEL,
         help="WhisperLiveKit model name (tiny.en, small.en, large-v3, ...). Changeable from the dashboard.",
     )
-    p.add_argument("--live-language", default="en", help="WhisperLiveKit language hint (en, no, auto, ...)")
+    p.add_argument(
+        "--live-language",
+        default=bringup_defaults.LANG,
+        help="WhisperLiveKit language hint (en, no, auto, ...)",
+    )
     p.add_argument(
         "--live-host",
         default=None,
@@ -50,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--live-port",
         type=int,
-        default=0,
+        default=int(bringup_defaults.PORT_WLK or 0),
         help="Bind port for the live channel. 0 (default) = pick a free ephemeral "
         "port at spawn time. WhisperLiveKit is internal — only the recorder talks "
         "to it — so a stable well-known port is rarely useful, and a fixed 8000 "
@@ -235,9 +245,9 @@ def main() -> None:
     app.state.install_spec = args.install_spec
     app.state.log_json = bool(args.log_json)
 
-    if args.host == "0.0.0.0":
+    if args.host == bringup_defaults.HOST_LAN:
         print(
-            "[tapscribe] WARNING: binding to 0.0.0.0 exposes the recorder to "
+            f"[tapscribe] WARNING: binding to {bringup_defaults.HOST_LAN} exposes the recorder to "
             "the LAN. Make sure you trust your network.",
             flush=True,
         )
@@ -277,7 +287,7 @@ def main() -> None:
         print(bar, flush=True)
     else:
         print("[tapscribe] WARNING: --no-auth — dashboard AND /tap are UNAUTHENTICATED.", flush=True)
-        if args.host == "0.0.0.0":
+        if args.host == bringup_defaults.HOST_LAN:
             print("[tapscribe] WARNING: combined with LAN binding, anyone on the", flush=True)
             print("[tapscribe]  network can view/delete recordings. Re-enable auth.", flush=True)
 

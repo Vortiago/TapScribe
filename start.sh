@@ -32,7 +32,8 @@
 #   6. Stream all logs to this terminal; Ctrl+C stops everything cleanly.
 #
 # Configurable via env vars:
-#   SX_HOST       bind address (default localhost, overridden by --lan to 0.0.0.0)
+#   SX_HOST       bind address (default localhost, 0.0.0.0 under --lan; a set
+#                 SX_HOST beats --lan)
 #   SX_PORT_WLK   WhisperLiveKit port (default: ephemeral — WLK is internal,
 #                 only the recorder talks to it; pin only if you have a reason)
 #   SX_PORT_REC   recorder port (default 8001)
@@ -200,16 +201,34 @@ fi
 python -m tapscribe.preflight || true
 
 # --- Configuration ----------------------------------------------------------
-MODEL="${SX_MODEL:-tiny.en}"
-LANG="${SX_LANG:-en}"
-PORT_WLK="${SX_PORT_WLK:-}"
-PORT_REC="${SX_PORT_REC:-8001}"
+# `tapscribe.bringup_defaults` owns the bring-up values, and start.ps1 reads
+# the same source. Fatal by design, unlike the preflight above: without the
+# launch config there is nothing to exec.
 
+# Reads the KEY=value lines on stdin into HOST, PORT_REC, PORT_WLK, MODEL and
+# LANG_CODE. LANG_CODE, not LANG: LANG is the exported locale every child reads.
+parse_bringup() {
+    local key val
+    while IFS='=' read -r key val; do
+        case "$key" in
+            HOST) HOST="$val" ;;
+            PORT_REC) PORT_REC="$val" ;;
+            PORT_WLK) PORT_WLK="$val" ;;
+            MODEL) MODEL="$val" ;;
+            LANG) LANG_CODE="$val" ;;
+        esac
+    done
+}
+
+LAN_FLAG=()
 if [ "$LAN" -eq 1 ]; then
-    HOST="${SX_HOST:-0.0.0.0}"
-else
-    HOST="${SX_HOST:-localhost}"
+    LAN_FLAG=(--lan)
 fi
+BRINGUP=$(python -m tapscribe.bringup_defaults "${LAN_FLAG[@]}") || {
+    echo "[start] Could not read bring-up defaults; aborting." >&2
+    exit 1
+}
+parse_bringup <<< "$BRINGUP"
 
 LAN_IP=""
 if command -v ipconfig >/dev/null 2>&1; then
@@ -258,14 +277,14 @@ if [ "$BROWSER_SETUP" -eq 1 ]; then
 fi
 echo "        Live channel    $LIVE_LABEL"
 echo "        Backend         $BACKEND_LABEL"
-echo "        Initial model   $MODEL  (lang=$LANG; change from the dashboard or via SX_MODEL=…)"
+echo "        Initial model   $MODEL  (lang=$LANG_CODE; change from the dashboard or via SX_MODEL=…)"
 echo ""
 
 python -m tapscribe \
     --host "$HOST" \
     --port "$PORT_REC" \
     --live-model "$MODEL" \
-    --live-language "$LANG" \
+    --live-language "$LANG_CODE" \
     "${EXTRA_ARGS[@]}" &
 REC_PID=$!
 

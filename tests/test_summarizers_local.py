@@ -63,14 +63,6 @@ def test_catalog_cross_module_names_are_public():
 
 
 @pytest.fixture
-def reset_available_backends():
-    """Restore the catalog's auto-probe after a test forces the backend set,
-    so a forced {'mlx'}/{'cpu'} can't leak into another test's routing."""
-    yield
-    set_available_backends_for_testing(None)
-
-
-@pytest.fixture
 def extra_present(monkeypatch):
     """Pretend the `[summarize]` backend module IS importable, so a no-generate_fn
     construction doesn't fail the fast dependency probe. Deterministic regardless

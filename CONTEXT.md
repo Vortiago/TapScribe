@@ -17,6 +17,15 @@ Verb/noun split: **the Recorder** writes **a recording**, one WAV per
 [Utterance](#utterance) per speaker. `recording_enabled` gates new recordings
 only; live transcription is independent of it.
 
+## Bring-up defaults
+
+The launch values the start scripts hand the Recorder: bind host, recorder
+port, live port, live model, language hint. They have one Python-side owner,
+`tapscribe/bringup_defaults.py`: the scripts run `python -m
+tapscribe.bringup_defaults` at bring-up and parse the `KEY=value` lines it
+prints. An `SX_*` environment variable overrides each one, and empty counts as
+unset. The module docstring has the precedence rule and the wire format.
+
 ## Transcriber
 
 The protocol for "something that can transcribe one WAV":

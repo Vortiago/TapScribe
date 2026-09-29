@@ -521,6 +521,16 @@ def fake_wlk() -> Iterator[FakeWlkThread]:
         wlk.stop()
 
 
+@pytest.fixture
+def reset_available_backends() -> Iterator[None]:
+    """Restore the catalog's auto-probe after a test forces the backend set,
+    so a forced {'mlx'}/{'cpu'} cannot leak into another test's routing."""
+    from tapscribe.runtime_probe import set_available_backends_for_testing
+
+    yield
+    set_available_backends_for_testing(None)
+
+
 # ---------------------------------------------------------------------------
 # Lightweight transcriber stub — shared across route + cache tests
 # ---------------------------------------------------------------------------

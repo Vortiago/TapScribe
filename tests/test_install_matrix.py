@@ -1,4 +1,5 @@
-"""Meta-test for `.github/workflows/install-matrix.yml`'s `family` axis.
+"""Meta-tests for `.github/workflows/install-matrix.yml`: its `family` axis
+and its llama-cpp wheel index.
 
 The workflow's whole purpose is catching `pip install -e ".[<family>]"`
 regressions per model family (see the workflow's own header comment). A
@@ -24,6 +25,8 @@ from pathlib import Path
 
 from conftest import atomic_extras
 
+from tapscribe import preflight
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_MATRIX_YML = REPO_ROOT / ".github" / "workflows" / "install-matrix.yml"
 
@@ -40,3 +43,15 @@ def test_install_matrix_families_are_valid_pyproject_extras():
         # optional-dependencies and names it on failure — the exact check a
         # family whose extra was silently removed (#263: `canary`) needs.
         atomic_extras(family)
+
+
+def test_install_matrix_wheel_index_matches_preflight():
+    r"""The workflow restates the prebuilt llama-cpp wheel index that
+    `preflight.LLAMA_CPP_WHEEL_INDEX` declares. This test ties every
+    `--extra-index-url` in the workflow to that one declaration, so a bumped
+    index cannot land in only one of them. The `[^\s)]` stops before the bash
+    `)` that closes the array append."""
+    workflow_text = INSTALL_MATRIX_YML.read_text()
+    urls = re.findall(r"--extra-index-url\s+([^\s)]+)", workflow_text)
+    assert urls, "couldn't find an `--extra-index-url` in install-matrix.yml"
+    assert set(urls) == {preflight.LLAMA_CPP_WHEEL_INDEX}, urls

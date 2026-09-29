@@ -117,10 +117,10 @@ jobs:
       - name: Install tapscribe + ${{ matrix.family }} extra
         # `summarize` on non-macOS pulls llama-cpp-python, which builds from
         # source by default (needs cmake + a C++ toolchain — see the "Verify
-        # cmake on PATH" step above). Mirror start.sh / start.ps1's own
-        # SUMMARIZE_PIP_ARGS logic and pass the maintainer's prebuilt
-        # CPU-wheel index so this job matches what an operator's bring-up
-        # actually runs, not a naive install. `shell: bash` so the same
+        # cmake on PATH" step above). Pass the maintainer's prebuilt CPU-wheel
+        # index that `tapscribe.preflight.LLAMA_CPP_WHEEL_INDEX` declares, so
+        # this job matches what an operator's bring-up actually runs, not a
+        # naive install. tests/test_install_matrix.py pins the two equal. `shell: bash` so the same
         # conditional runs on the Windows runner too (default shell there is
         # pwsh).
         shell: bash
