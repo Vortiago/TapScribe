@@ -1,4 +1,5 @@
-"""Meta-test for `.github/workflows/install-matrix.yml`'s `family` axis.
+"""Meta-tests for `.github/workflows/install-matrix.yml`: its `family` axis
+and its llama-cpp wheel index.
 
 The workflow's whole purpose is catching `pip install -e ".[<family>]"`
 regressions per model family (see the workflow's own header comment). A
@@ -45,13 +46,12 @@ def test_install_matrix_families_are_valid_pyproject_extras():
 
 
 def test_install_matrix_wheel_index_matches_preflight():
-    r"""The workflow hand-mirrors the prebuilt llama-cpp wheel index the
-    preflight passes (its own comment says "Mirror start.sh / start.ps1's"),
-    but nothing tied the two. `preflight.LLAMA_CPP_WHEEL_INDEX` is the one
-    declaration; a bumped index must not land in only the workflow or only
-    the preflight (#357). The `[^\s)]` stops before the bash `)` closing the
-    array append."""
+    r"""The workflow restates the prebuilt llama-cpp wheel index that
+    `preflight.LLAMA_CPP_WHEEL_INDEX` declares. This test ties every
+    `--extra-index-url` in the workflow to that one declaration, so a bumped
+    index cannot land in only one of them. The `[^\s)]` stops before the bash
+    `)` that closes the array append."""
     workflow_text = INSTALL_MATRIX_YML.read_text()
-    m = re.search(r"--extra-index-url\s+([^\s)]+)", workflow_text)
-    assert m, "couldn't find the `--extra-index-url` in install-matrix.yml"
-    assert m.group(1) == preflight.LLAMA_CPP_WHEEL_INDEX
+    urls = re.findall(r"--extra-index-url\s+([^\s)]+)", workflow_text)
+    assert urls, "couldn't find an `--extra-index-url` in install-matrix.yml"
+    assert set(urls) == {preflight.LLAMA_CPP_WHEEL_INDEX}, urls

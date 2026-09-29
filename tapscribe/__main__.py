@@ -30,10 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m tapscribe",
         description="TapScribe — local-first transcription recorder + dashboard.",
     )
-    # Bring-up defaults are read from `bringup_defaults` (#357): the start scripts
-    # print the same values, so a launch that skips argparse cannot disagree.
+    # Defaulted from `bringup_defaults`, which the start scripts also read: a bare
+    # `python -m tapscribe` launch gets the same values as a scripted one.
     p.add_argument(
-        "--host", default=bringup_defaults.HOST, help="Bind address. Use 0.0.0.0 to expose on LAN."
+        "--host",
+        default=bringup_defaults.HOST,
+        help=f"Bind address. Use {bringup_defaults.HOST_LAN} to expose on LAN.",
     )
     # Defaulted FROM config, which `main()` then stamps back onto it: one declaration of the
     # port, rather than a literal here that a launch skipping argparse would disagree with.
@@ -58,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--live-port",
         type=int,
-        default=0,
+        default=int(bringup_defaults.PORT_WLK or 0),
         help="Bind port for the live channel. 0 (default) = pick a free ephemeral "
         "port at spawn time. WhisperLiveKit is internal — only the recorder talks "
         "to it — so a stable well-known port is rarely useful, and a fixed 8000 "
@@ -243,9 +245,9 @@ def main() -> None:
     app.state.install_spec = args.install_spec
     app.state.log_json = bool(args.log_json)
 
-    if args.host == "0.0.0.0":
+    if args.host == bringup_defaults.HOST_LAN:
         print(
-            "[tapscribe] WARNING: binding to 0.0.0.0 exposes the recorder to "
+            f"[tapscribe] WARNING: binding to {bringup_defaults.HOST_LAN} exposes the recorder to "
             "the LAN. Make sure you trust your network.",
             flush=True,
         )
@@ -285,7 +287,7 @@ def main() -> None:
         print(bar, flush=True)
     else:
         print("[tapscribe] WARNING: --no-auth — dashboard AND /tap are UNAUTHENTICATED.", flush=True)
-        if args.host == "0.0.0.0":
+        if args.host == bringup_defaults.HOST_LAN:
             print("[tapscribe] WARNING: combined with LAN binding, anyone on the", flush=True)
             print("[tapscribe]  network can view/delete recordings. Re-enable auth.", flush=True)
 

@@ -1,22 +1,14 @@
-"""Bring-up defaults — the one Python owner of the values the start scripts launch with.
+"""Bring-up defaults: the one Python owner of the values the start scripts launch with.
 
-`start.sh` and `start.ps1` each re-derived the same five launch values — bind
-host, recorder port, ephemeral live port, initial live model, language hint —
-and the `SX_*` precedence chain above them, once per language. Two owners of
-one rule drift silently, so both scripts now run `python -m
-tapscribe.bringup_defaults` and parse the five `KEY=value` lines it prints,
-and `__main__.build_parser` imports the same constants so the recorder's own
-argparse defaults cannot disagree with a scripted launch (#357).
+`start.sh` and `start.ps1` run `python -m tapscribe.bringup_defaults` and parse
+the `KEY=value` lines it prints. `__main__.build_parser` imports the same
+constants, so a bare `python -m tapscribe` launch gets the same defaults.
+`resolve` is pure: an env mapping and the `--lan` flag go in, one
+`BringupConfig` comes out.
 
-`resolve` is pure — an env mapping and the `--lan` flag go in, one
-`BringupConfig` comes out — following `preflight.plan_steps`: the whole
-precedence rule lives here and is testable without a shell.
-
-Stdlib-only at import, like its bring-up siblings (the one intra-package
-import, `config`, is itself stdlib-only), so `-m` works against a venv that
-holds nothing but pip, from the repo-root cwd the scripts cd to. A value
-containing a newline is truncated by the scripts' line parsers — pathological
-for model ids, ports and hosts, and accepted.
+Stdlib-only at import (`config` is stdlib-only too), so `-m` works against a
+venv that holds nothing but pip. The scripts' line parsers truncate a value
+that contains a newline, which no model id, port or host does.
 """
 
 from __future__ import annotations
@@ -24,7 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from tapscribe import config
 
@@ -35,7 +27,7 @@ LANG = "en"
 #: Bind host: loopback by default, all interfaces under `--lan`.
 HOST = "localhost"
 HOST_LAN = "0.0.0.0"
-#: Empty = ephemeral — the recorder picks a free live port at spawn.
+#: Empty means ephemeral: the recorder picks a free live port at spawn.
 PORT_WLK = ""
 #: `config.py` owns the one declaration of the recorder port; this is its str form.
 PORT_REC = str(config.PORT)
@@ -43,7 +35,10 @@ PORT_REC = str(config.PORT)
 
 @dataclass(frozen=True)
 class BringupConfig:
-    """The five launch values, resolved. All `str` — they cross a shell boundary."""
+    """The five launch values, resolved. All `str`, because they cross a shell boundary.
+
+    The field order is the wire order, and a field's upper-cased name is its key.
+    """
 
     host: str
     port_rec: str
@@ -72,19 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--lan",
         action="store_true",
-        help="Bind host: 0.0.0.0 instead of localhost.",
+        help=f"Bind host: {HOST_LAN} instead of {HOST}.",
     )
     args = p.parse_args(argv)
 
     cfg = resolve(os.environ, lan=args.lan)
-    for key, value in (
-        ("HOST", cfg.host),
-        ("PORT_REC", cfg.port_rec),
-        ("PORT_WLK", cfg.port_wlk),
-        ("MODEL", cfg.model),
-        ("LANG", cfg.lang),
-    ):
-        print(f"{key}={value}")
+    for name, value in asdict(cfg).items():
+        print(f"{name.upper()}={value}")
     return 0
 
 

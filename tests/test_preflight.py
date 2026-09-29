@@ -139,13 +139,14 @@ def test_onnxruntime_repair_is_not_fatal():
     ("system", "machine", "probe"),
     [
         ("Darwin", "arm64", "mlx_lm"),
+        ("Darwin", "aarch64", "mlx_lm"),
         ("Darwin", "x86_64", "llama_cpp"),
         ("Linux", "x86_64", "llama_cpp"),
         ("Windows", "AMD64", "llama_cpp"),
     ],
 )
 def test_summarize_probe_follows_the_routed_backend(system, machine, probe):
-    """Mirrors LocalSummarizer's resolve_local_backend: mlx_lm on Apple
+    """Mirrors `catalog.resolve_local_backend`: mlx_lm on Apple
     Silicon, llama_cpp everywhere else. Probing the wrong module would either
     reinstall on every boot or never install at all."""
     steps = plan_steps(
@@ -166,24 +167,21 @@ def test_summarize_extra_is_requested_by_name():
     assert any(a.endswith("[summarize]") for a in argv), argv
 
 
-def test_summarize_probe_agrees_with_resolve_local_backend():
-    """`summarize_probe_module` re-derives the routing that
-    `catalog.resolve_local_backend` owns, from a (system, machine) pair rather
-    than the live probe — nothing tied the two, so a routing change could move
-    one and leave the other reinstalling on every boot. Pin both answers on
-    the two archetypes the mirror keys on."""
+def test_summarize_probe_agrees_with_resolve_local_backend(reset_available_backends):
+    """`summarize_probe_module` re-derives, from a (system, machine) pair, the
+    routing that `catalog.resolve_local_backend` owns from the live probe. The
+    two take different inputs, so this test pins each one's answer on the two
+    archetypes (Apple Silicon with MLX, a CPU-only x86 box): a routing change
+    to either one must update this test, which names the other."""
     from tapscribe.summarizers import catalog
 
-    try:
-        runtime_probe.set_available_backends_for_testing(frozenset({"cpu", "mlx"}))
-        assert catalog.resolve_local_backend() == "mlx"
-        assert preflight.summarize_probe_module("Darwin", "arm64") == "mlx_lm"
+    runtime_probe.set_available_backends_for_testing(frozenset({"cpu", "mlx"}))
+    assert catalog.resolve_local_backend() == "mlx"
+    assert preflight.summarize_probe_module("Darwin", "arm64") == "mlx_lm"
 
-        runtime_probe.set_available_backends_for_testing(frozenset({"cpu"}))
-        assert catalog.resolve_local_backend() == "gguf"
-        assert preflight.summarize_probe_module("Linux", "x86_64") == "llama_cpp"
-    finally:
-        runtime_probe.set_available_backends_for_testing(None)
+    runtime_probe.set_available_backends_for_testing(frozenset({"cpu"}))
+    assert catalog.resolve_local_backend() == "gguf"
+    assert preflight.summarize_probe_module("Linux", "x86_64") == "llama_cpp"
 
 
 def test_llama_cpp_install_uses_the_prebuilt_wheel_index():

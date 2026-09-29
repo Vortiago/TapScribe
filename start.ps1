@@ -9,6 +9,14 @@
 #   .\start.ps1 -NoAuth                  # disable dashboard auth + /tap token gate (DEV ONLY)
 #   .\start.ps1 -Tls                     # serve https:// + wss:// (auto self-signed)
 #   .\start.ps1 -NonInteractive          # install the saved/default selection in-terminal (no browser)
+#
+# Configurable via env vars (resolved by `python -m tapscribe.bringup_defaults`):
+#   SX_HOST       bind address (default localhost, 0.0.0.0 under -Lan; a set
+#                 SX_HOST beats -Lan)
+#   SX_PORT_WLK   WhisperLiveKit port (default: ephemeral)
+#   SX_PORT_REC   recorder port (default 8001)
+#   SX_MODEL      initial live Whisper model (default tiny.en; switch live from dashboard)
+#   SX_LANG       language hint (default en)
 
 [CmdletBinding()]
 param(
@@ -107,9 +115,9 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 & python -m tapscribe.preflight
 
 # --- Configuration ----------------------------------------------------------
-# The bring-up values come from `tapscribe.bringup_defaults` so start.ps1 and
-# start.sh cannot re-derive them in parallel (#357). Fatal by design, unlike
-# the preflight above: without the launch config there is nothing to launch.
+# `tapscribe.bringup_defaults` owns the bring-up values, and start.sh reads
+# the same source. Fatal by design, unlike the preflight above: without the
+# launch config there is nothing to launch.
 $BringupArgs = @()
 if ($Lan) { $BringupArgs += "--lan" }
 $BringupLines = @(& python -m tapscribe.bringup_defaults @BringupArgs)

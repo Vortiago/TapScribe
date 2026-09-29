@@ -20,10 +20,11 @@ only; live transcription is independent of it.
 ## Bring-up defaults
 
 The launch values the start scripts hand the Recorder: bind host, recorder
-port, live port, live model, language hint. They have one Python-side owner
-(`tapscribe/bringup_defaults.py`) that the scripts read at bring-up, because a
-bash and a PowerShell copy of the same values drift silently. An `SX_*`
-environment variable overrides each one, and empty counts as unset.
+port, live port, live model, language hint. They have one Python-side owner,
+`tapscribe/bringup_defaults.py`: the scripts run `python -m
+tapscribe.bringup_defaults` at bring-up and parse the `KEY=value` lines it
+prints. An `SX_*` environment variable overrides each one, and empty counts as
+unset. The module docstring has the precedence rule and the wire format.
 
 ## Transcriber
 
