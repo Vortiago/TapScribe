@@ -18,6 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 
 import {
   fmtBytes,
@@ -124,10 +125,8 @@ test("fmtClock renders a parseable instant as hh:mm:ss", () => {
 });
 
 // ── fmtClockZ (the zoned artefact clock) ──
-// The optional zone parameter is what lets these pin LITERAL strings on any
-// runner: no `process.env.TZ` games, no env pollution across `node --test`
-// per-file processes. The offset is the INSTANT's — resolved per instant, so
-// DST is the instant's, not today's.
+// The zone argument pins LITERAL strings on any runner. The offset is the
+// instant's, so DST is the instant's, not today's.
 
 test("fmtClockZ stamps the instant's own UTC offset", () => {
   assert.equal(fmtClockZ("2026-05-12T12:05:12Z", "UTC"), "12:05:12+00:00");
@@ -140,8 +139,33 @@ test("fmtClockZ resolves the DST offset of the instant, not of today", () => {
   assert.equal(fmtClockZ("2026-07-12T12:05:12Z", "America/New_York"), "08:05:12-04:00");
 });
 
+test("fmtClockZ renders midnight as hour 00, never 24", () => {
+  assert.equal(fmtClockZ("2026-01-12T00:05:06Z", "UTC"), "00:05:06+00:00");
+});
+
+test("fmtClockZ reads a naive stamp as UTC, as the server's parse_iso does", () => {
+  assert.equal(fmtClockZ("2026-05-12T12:05:12", "Europe/Oslo"), "14:05:12+02:00");
+  assert.equal(fmtClockZ("2026-05-12T12:05:12.250", "UTC"), "12:05:12+00:00");
+});
+
+test("fmtClockZ keeps the ASCII spelling under a non-English viewer locale", () => {
+  // The runner is en-US, so only a child process with another locale sees a
+  // formatter that follows the viewer locale (da-DK writes `+01.00`).
+  const script = `
+    import { fmtClockZ } from ${JSON.stringify(new URL("./formatters.js", import.meta.url).href)};
+    const locale = new Intl.DateTimeFormat().resolvedOptions().locale;
+    process.stdout.write(JSON.stringify([locale, fmtClockZ("2026-01-12T12:05:12Z", "Europe/Copenhagen")]));`;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, LANG: "da_DK.UTF-8", LC_ALL: "da_DK.UTF-8" },
+    encoding: "utf8",
+  });
+  const [locale, clock] = JSON.parse(out);
+  assert.equal(locale, "da-DK", "the child must run under da-DK, or this test proves nothing");
+  assert.equal(clock, "13:05:12+01:00");
+});
+
 test("fmtClockZ returns ? for missing or unparseable input", () => {
-  // Never "?+00:00" — an unknown time cannot name a zone.
+  // Never "?+00:00": an unknown time cannot name a zone.
   assert.equal(fmtClockZ(null), "?");
   assert.equal(fmtClockZ(undefined), "?");
   assert.equal(fmtClockZ(""), "?");

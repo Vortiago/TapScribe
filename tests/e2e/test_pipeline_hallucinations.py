@@ -283,7 +283,7 @@ async def test_large_session_merge_preserves_all_speakers_in_order(
     # as the HH:MM:SS±HH:MM prefix on each plain_text line, ADR-0026).
     # Per CONTEXT.md this is the merge's sort key, so a regression that
     # re-orders by speaker or filename would surface here. We can't pin
-    # an exact streamed order — the filename timestamp resolution is one
+    # an exact streamed order: the filename timestamp resolution is one
     # second so back-to-back WAVs share a wav_start and the same-second
     # tie-break is filename-alphabetical, not stream-order. The
     # load-bearing property is non-decreasing abs_start.

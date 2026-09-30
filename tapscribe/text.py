@@ -116,9 +116,9 @@ def safe_name(s: str | None) -> str:
 
 
 def parse_iso(s: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp into a tz-aware UTC datetime. Accepts
-    a trailing `Z`, treats naive timestamps as UTC, and returns None for
-    blank/missing input. Used by both the per-WAV sidecar reader and
+    """Parse an ISO-8601 timestamp into a tz-aware datetime. Keeps an
+    explicit offset, reads a trailing `Z` and a naive timestamp as UTC, and
+    returns None for blank/missing input. Used by both the per-WAV sidecar reader and
     the session merger."""
     if not s:
         return None

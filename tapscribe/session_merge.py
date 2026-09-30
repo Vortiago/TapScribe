@@ -306,40 +306,23 @@ class SessionTranscript:
 _LOW_CONFIDENCE_LOGPROB_THRESHOLD = -0.5
 
 
-def _offset_label(utcoffset: timedelta | None) -> str:
-    """`±HH:MM` for an instant's UTC offset; `None` (a naive stamp) is `+00:00`
-    — the `parse_iso` naive-is-UTC convention."""
-    if utcoffset is None:
-        return "+00:00"
-    total_minutes = int(utcoffset.total_seconds()) // 60
-    hours, minutes = divmod(abs(total_minutes), 60)
-    return f"{'-' if total_minutes < 0 else '+'}{hours:02d}:{minutes:02d}"
-
-
 def _clock(abs_start: Any) -> str:
-    """The zoned artefact clock `HH:MM:SS±HH:MM` from either a datetime
-    (mid-merge) or its ISO string (read back off `session-transcript.json`).
-
-    A rendered transcript line's clock names the zone it is in; a line on
-    screen needs none (its pane is the context). The stamp carries the
-    instant's own offset and never converts it — `parse_iso` preserves whatever
-    offset a stored ISO carries, and merge instants are UTC. The JS mirror for
-    the browser-side artefacts is `formatters.fmtClockZ`.
+    """The zoned clock `HH:MM:SS±HH:MM` from either a datetime (mid-merge) or
+    its ISO string (read back off `session-transcript.json`). It keeps the
+    instant's own offset and reads a naive stamp as UTC, as `parse_iso` does.
 
     An unreadable stamp renders `??:??:??` rather than raising: `parse_iso`
     raises on malformed input, and this runs over a file on disk, so one bad
     segment would fail a whole summarize instead of costing one line its clock.
-    An unknown time cannot name a zone.
     """
-    if isinstance(abs_start, datetime):
-        return f"{abs_start.strftime('%H:%M:%S')}{_offset_label(abs_start.utcoffset())}"
+    stamp = abs_start.isoformat() if isinstance(abs_start, datetime) else str(abs_start or "")
     try:
-        dt = parse_iso(str(abs_start or ""))
+        dt = parse_iso(stamp)
     except ValueError:
-        return "??:??:??"
+        dt = None
     if dt is None:
         return "??:??:??"
-    return f"{dt.strftime('%H:%M:%S')}{_offset_label(dt.utcoffset())}"
+    return dt.strftime("%H:%M:%S%:z")
 
 
 def render_transcript_text(
@@ -349,11 +332,8 @@ def render_transcript_text(
 ) -> str:
     """The merged transcript as `[HH:MM:SS±HH:MM] Speaker: text` lines.
 
-    The clock is ZONED — each line names the zone its instant is in, because
-    this text leaves its rendering context (stored file, summarizer input).
-    A line on screen needs no zone; its pane is the context. The JS mirror
-    for the browser-side artefacts is `formatters.fmtClockZ` — one rule,
-    stated at both (ADR-0026).
+    The clock names its zone, because this text leaves the screen (stored
+    file, summarizer input). The JS twin is `formatters.fmtClockZ` (ADR-0026).
 
     The ONE spelling of that format on this side of the wire: `merge_session`
     builds `plain_text` through it, and `batch_summarize` re-renders the stored

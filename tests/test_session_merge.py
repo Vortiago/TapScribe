@@ -316,9 +316,8 @@ def test_merge_session_mixes_primaries_across_wavs(tmp_path: Path):
 
 # ── the zoned artefact clock (#447) ─────────────────────────────────────────
 # A text artefact leaves its rendering context, so its clock must name the
-# zone it is in: `[HH:MM:SS±HH:MM]`. The stamp carries the INSTANT's own
-# offset and never converts it — the same convention `parse_iso` keeps for
-# stored ISO. The JS mirror is `formatters.fmtClockZ`.
+# zone it is in: `[HH:MM:SS±HH:MM]`. The stamp keeps the instant's own offset,
+# as `parse_iso` does for a stored ISO. The JS twin is `formatters.fmtClockZ`.
 
 
 def _one_line(abs_start: object) -> str:
@@ -336,7 +335,7 @@ def test_clock_names_the_offset_an_iso_string_already_carries():
 
 
 def test_clock_renders_an_unknown_time_without_a_zone():
-    # An unknown time cannot name a zone — the bare placeholder stays.
+    # An unknown time cannot name a zone, so the bare placeholder stays.
     assert _one_line("not-a-timestamp") == "[??:??:??] Alice: hi"
     assert _one_line(None) == "[??:??:??] Alice: hi"
 

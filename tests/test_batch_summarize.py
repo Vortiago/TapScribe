@@ -488,7 +488,7 @@ async def test_summarize_input_clock_names_its_zone(recorder_under_test):
     """The clock in the text the model reads names its zone (#447).
 
     The flow that surfaced this (#438) is a model reading and quoting these
-    times into notes nobody reads beside a clock — a bare `09:00:00` there is
+    times into notes nobody reads beside a clock, and a bare `09:00:00` there is
     an ambiguous instant. `_CAT` echoes stdin, so the summary IS the text
     handed to the summarizer, zoned stamp and all."""
     rec = recorder_under_test.recordings_dir

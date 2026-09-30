@@ -21,21 +21,23 @@ in the viewer's zone, which is the context there. See
 [Zoned clock](../../CONTEXT.md#zoned-clock).
 
 Nothing is threaded, because each renderer already holds the instant's zone.
-`_clock` reads `datetime.utcoffset()` and preserves whatever offset a stored
-ISO carries, since `parse_iso` never converts and merge instants are UTC.
+`_clock` keeps whatever offset a datetime or a stored ISO carries, because
+`parse_iso` never converts and merge instants are UTC.
 `formatters.fmtClockZ` resolves ICU's per-instant `longOffset` under a pinned
 `en-US` locale, so the artefact bytes are stable ASCII in every viewer
-locale, and DST is the instant's, not today's. A naive stamp is `+00:00`, the
-`parse_iso` naive-is-UTC convention.
+locale, and DST is the instant's, not today's. Both sides read a naive stamp
+as UTC, the `parse_iso` convention, so one stored stamp names one instant.
 An unreadable stamp stays `??:??:??` (JS `?`): an unknown time cannot name a
 zone.
 
 ## Consequences
 
-**Old stored bodies stay bare until re-merged.** `batch_summarize._summary_input`
-and `buildCopyText` fall back to the stored `plain_text`, so a transcript
-merged before this change renders as stored. That is honest old data, not
-wrong data, and re-merging the session rewrites the artefact zoned.
+**Only the stored `session-transcript.txt` stays bare until re-merged.**
+`batch_summarize._summary_input` and `buildCopyText` render again from the
+stored segments, so the summarizer input, the copy and the `.txt` download of
+an old session are zoned at once. They fall back to the stored `plain_text`
+only for a body with no segments. Re-merging the session rewrites the file
+zoned.
 
 **`fmtSessionLabel` stays bare UTC.** It labels a session from the id's own
 slice, not a transcript line, so the rule does not reach it. It is the

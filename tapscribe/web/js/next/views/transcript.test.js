@@ -4,11 +4,12 @@
 // list. Plus buildExportSegments, the subtitle-export clock: the merged
 // schema's absolute ISO stamps -> the relative seconds toSRT/toVTT take. And
 // buildCopyText, the clipboard/.txt artefact: every line carries a zoned
-// clock. Node's built-in runner, no DOM — importing transcript.js is
+// clock. Node's built-in runner, no DOM: importing transcript.js is
 // side-effect-free (it only references `document` inside functions).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 
 import { recordingFor, recordingVariants, buildExportSegments, buildCopyText } from "./transcript.js";
 import { toSRT } from "../subtitles.js";
@@ -172,9 +173,21 @@ test("buildExportSegments tolerates a body with no segments at all", () => {
 
 // ---- buildCopyText: the clipboard/.txt artefact clock ----------------------
 // A copy leaves the pane, so its clock names its zone (#447): the line is
-// `[HH:MM:SS±HH:MM] Alias: text`. The runner's zone is not a literal, so the
-// SHAPE is pinned here — the offset must be there, whatever it resolves to —
-// and the offset's own digits are pinned in formatters.test.js (fmtClockZ).
+// `[HH:MM:SS±HH:MM] Alias: text`. The runner's zone is unknown here, so these
+// pin the SHAPE, and a child process under a fixed TZ pins the literal line.
+
+test("buildCopyText stamps each line in the viewer's zone", () => {
+  const script = `
+    import { buildCopyText } from ${JSON.stringify(new URL("./transcript.js", import.meta.url).href)};
+    const seg = { abs_start: "2026-01-12T12:05:12+00:00", abs_end: "2026-01-12T12:05:14+00:00",
+      speaker: "Spk0", text: "hi", source_wav: "a.wav", low_confidence: false };
+    process.stdout.write(buildCopyText({ segments: [seg], plain_text: "", suppressed: [] }, { aliases: { Spk0: "Alice" } }));`;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, TZ: "Europe/Copenhagen" },
+    encoding: "utf8",
+  });
+  assert.equal(out, "[13:05:12+01:00] Alice: hi");
+});
 
 test("buildCopyText stamps every line with a zone", () => {
   const out = buildCopyText(
@@ -197,8 +210,7 @@ test("buildCopyText keeps the [uncertain] marker on low-confidence lines", () =>
 });
 
 test("buildCopyText falls back to plain_text when no segment yields a line", () => {
-  // An old stored body (merged before the zoned clock) renders as stored —
-  // honest old data, not wrong data.
+  // A body with no segments renders its stored text as is.
   const body = { segments: [], plain_text: "[09:00:00] Alice: old body", suppressed: [] };
   assert.equal(buildCopyText(body, meta()), "[09:00:00] Alice: old body");
 });

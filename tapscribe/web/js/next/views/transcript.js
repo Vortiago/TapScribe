@@ -129,9 +129,9 @@ function* aliasedSegments(full, meta) {
  *  · A segment whose `abs_start` will not parse is DROPPED rather than emitted
  *    with a NaN stamp. NaN would latch into `tZero` (NaN !== null), poisoning
  *    every later `absStart - tZero`, so ONE corrupt value in a hand-edited or
- *    truncated sidecar would garble the whole document — the same invariant
- *    fmtClockZ states for the copy path ("a single corrupt sidecar value must
- *    garble one cell, never abort the entire render"). A parseable start with a
+ *    truncated sidecar would garble the whole document. This is the invariant
+ *    formatters.toInstant states for the clocks ("one corrupt sidecar value
+ *    must garble one cell"). A parseable start with a
  *    corrupt end keeps its line, as a zero-length cue.
  *
  * Pure — module-scope (not a build() closure local) so the unit tests can reach
@@ -160,20 +160,11 @@ export function buildExportSegments(full, meta) {
 }
 
 /**
- * The COPY TEXT — the bytes behind the clipboard copy AND the .txt download
- * (they reuse this one function, so the two exports can never disagree).
- * Rebuild from segments so display-name aliases match what the user sees —
- * the backend's `plain_text` uses raw speaker keys. Which segments qualify
- * and what a speaker is called is the shared aliasedSegments walk (the same
- * line set the .srt/.vtt exports get); this function owns only the LINE
- * format: "[HH:MM:SS±HH:MM] Alias: text" — the zoned artefact clock, because
- * a copy leaves the pane and must name its own zone (ADR-0026; the server's
- * stored artefact spells it the same way, `session_merge._clock`) — the
- * "[uncertain]" suffix on low-confidence lines, and a fallback to plain_text
- * when no segments produced a line.
- *
- * Pure — module-scope (not a build() closure local) so the unit tests can
- * reach this slice's own trap without driving a browser.
+ * The text behind the clipboard copy and the .txt download: one
+ * "[HH:MM:SS±HH:MM] Alias: text" line per aliasedSegments line, with the
+ * zoned `fmtClockZ` clock (ADR-0026) and an "[uncertain]" suffix on a
+ * low-confidence line. It falls back to plain_text, which has raw speaker
+ * keys, when no segment yields a line.
  * @param {import('../../types.js').MergedTranscript} full
  * @param {import('../../types.js').EffectiveMeta} meta
  * @returns {string}
@@ -625,9 +616,6 @@ export function build(ctx) {
   });
 
   // ---- Copy merged transcript (ported from classic main.js onCopyMerged) ----
-  // The line format lives in module-scope `buildCopyText` (shared with the
-  // .txt download, so the bytes stay identical); this section owns the
-  // controls around it.
 
   const flashCopyStatus = makeStatusFlasher(txCopyStatus);
 
@@ -669,11 +657,10 @@ export function build(ctx) {
     });
   };
 
-  // .txt reuses buildCopyText, so its bytes — zone-stamped clocks included —
-  // are identical to the clipboard copy (not the backend's plain_text, which
-  // carries raw speaker keys). .srt/.vtt go through the relative-clock
-  // conversion; an empty cue list renders as "" rather than toVTT([])'s truthy
-  // header-only document, which is not a file worth handing the operator.
+  // .txt reuses buildCopyText, so its bytes are identical to the clipboard
+  // copy. .srt/.vtt go through the relative-clock conversion; an empty cue
+  // list renders as "" rather than toVTT([])'s truthy header-only document,
+  // which is not a file worth handing the operator.
   wireExport(txDownloadTxt, ".txt", "text/plain;charset=utf-8", buildCopyText);
   wireExport(txDownloadSrt, ".srt", "application/x-subrip", (full, meta) => {
     const segments = buildExportSegments(full, meta);
