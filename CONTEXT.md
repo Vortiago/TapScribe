@@ -117,6 +117,15 @@ were in effect. `source_language` records what the model was *told* to expect
 Post-processors (`hallucinations.apply`) consume one and return a new one via
 `dataclasses.replace`, never mutating in place.
 
+## Zoned clock
+
+A transcript clock stamp carrying the UTC offset of the instant it shows
+(`HH:MM:SS±HH:MM`), so the line reads apart from where it was rendered. The
+shared rule behind the merged transcript's two renderings: text artefacts are
+zoned, each naming its own zone, while an on-screen pane renders bare wall
+time in the viewer's zone, which is the context there.
+_Avoid_: "UTC stamp" (true only of the server's artefact). ADR-0026.
+
 ## Candidate languages · language pin
 
 The operator's declaration of **which languages to expect** in a recording —

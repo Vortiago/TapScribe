@@ -24,6 +24,7 @@ import {
   fmtDur,
   fmtMs,
   fmtClock,
+  fmtClockZ,
   fmtMmSs,
   truncMid,
   fmtSessionLabel,
@@ -120,6 +121,31 @@ test("fmtClock renders a parseable instant as hh:mm:ss", () => {
   // Zone-dependent (viewer's timezone, by design), so pin the SHAPE, not the
   // digits — the guard cases above are what carry the literal expectations.
   assert.match(fmtClock("2026-05-12T09:19:55Z"), /^\d{2}:\d{2}:55$/);
+});
+
+// ── fmtClockZ (the zoned artefact clock) ──
+// The optional zone parameter is what lets these pin LITERAL strings on any
+// runner: no `process.env.TZ` games, no env pollution across `node --test`
+// per-file processes. The offset is the INSTANT's — resolved per instant, so
+// DST is the instant's, not today's.
+
+test("fmtClockZ stamps the instant's own UTC offset", () => {
+  assert.equal(fmtClockZ("2026-05-12T12:05:12Z", "UTC"), "12:05:12+00:00");
+  // Half-hour zones keep their minutes.
+  assert.equal(fmtClockZ("2026-05-12T12:05:12Z", "Asia/Kolkata"), "17:35:12+05:30");
+});
+
+test("fmtClockZ resolves the DST offset of the instant, not of today", () => {
+  assert.equal(fmtClockZ("2026-01-12T12:05:12Z", "America/New_York"), "07:05:12-05:00");
+  assert.equal(fmtClockZ("2026-07-12T12:05:12Z", "America/New_York"), "08:05:12-04:00");
+});
+
+test("fmtClockZ returns ? for missing or unparseable input", () => {
+  // Never "?+00:00" — an unknown time cannot name a zone.
+  assert.equal(fmtClockZ(null), "?");
+  assert.equal(fmtClockZ(undefined), "?");
+  assert.equal(fmtClockZ(""), "?");
+  assert.equal(fmtClockZ("not-a-timestamp"), "?");
 });
 
 // ---- fmtMmSs -------------------------------------------------------------

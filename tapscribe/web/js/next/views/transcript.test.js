@@ -2,14 +2,15 @@
 // a selected file to its recording, and recordingVariants flattens a
 // recording's original + stripped-region cached transcripts into one tagged
 // list. Plus buildExportSegments, the subtitle-export clock: the merged
-// schema's absolute ISO stamps -> the relative seconds toSRT/toVTT take.
-// Node's built-in runner, no DOM — importing transcript.js is
+// schema's absolute ISO stamps -> the relative seconds toSRT/toVTT take. And
+// buildCopyText, the clipboard/.txt artefact: every line carries a zoned
+// clock. Node's built-in runner, no DOM — importing transcript.js is
 // side-effect-free (it only references `document` inside functions).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { recordingFor, recordingVariants, buildExportSegments } from "./transcript.js";
+import { recordingFor, recordingVariants, buildExportSegments, buildCopyText } from "./transcript.js";
 import { toSRT } from "../subtitles.js";
 
 const wav = (name, transcripts = [], regions = []) => ({
@@ -167,4 +168,37 @@ test("an unparseable abs_start drops ITS cue instead of NaN-poisoning the whole 
 test("buildExportSegments tolerates a body with no segments at all", () => {
   assert.deepEqual(buildExportSegments({ plain_text: "", suppressed: [] }, meta()), []);
   assert.deepEqual(buildExportSegments(merged([]), {}), []);
+});
+
+// ---- buildCopyText: the clipboard/.txt artefact clock ----------------------
+// A copy leaves the pane, so its clock names its zone (#447): the line is
+// `[HH:MM:SS±HH:MM] Alias: text`. The runner's zone is not a literal, so the
+// SHAPE is pinned here — the offset must be there, whatever it resolves to —
+// and the offset's own digits are pinned in formatters.test.js (fmtClockZ).
+
+test("buildCopyText stamps every line with a zone", () => {
+  const out = buildCopyText(
+    merged([
+      seg("2025-02-01T09:00:00+00:00", "2025-02-01T09:00:03+00:00", "one"),
+      seg("2025-02-01T09:00:05+00:00", "2025-02-01T09:00:08+00:00", "two", "Spk1"),
+    ]),
+    meta({ Spk0: "Alice" }),
+  );
+  const lines = out.split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^\[\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] Alice: one$/);
+  assert.match(lines[1], /^\[\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] Spk1: two$/);
+});
+
+test("buildCopyText keeps the [uncertain] marker on low-confidence lines", () => {
+  const uncertain = { ...seg("2025-02-01T09:00:00+00:00", "2025-02-01T09:00:03+00:00", "one"), low_confidence: true };
+  const out = buildCopyText(merged([uncertain]), meta({ Spk0: "Alice" }));
+  assert.match(out, /^\[\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] Alice: one \[uncertain\]$/);
+});
+
+test("buildCopyText falls back to plain_text when no segment yields a line", () => {
+  // An old stored body (merged before the zoned clock) renders as stored —
+  // honest old data, not wrong data.
+  const body = { segments: [], plain_text: "[09:00:00] Alice: old body", suppressed: [] };
+  assert.equal(buildCopyText(body, meta()), "[09:00:00] Alice: old body");
 });
