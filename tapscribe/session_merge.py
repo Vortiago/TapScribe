@@ -307,20 +307,22 @@ _LOW_CONFIDENCE_LOGPROB_THRESHOLD = -0.5
 
 
 def _clock(abs_start: Any) -> str:
-    """`HH:MM:SS` from either a datetime (mid-merge) or its ISO string (read
-    back off `session-transcript.json`).
+    """The zoned clock `HH:MM:SS±HH:MM` from either a datetime (mid-merge) or
+    its ISO string (read back off `session-transcript.json`). It keeps the
+    instant's own offset and reads a naive stamp as UTC, as `parse_iso` does.
 
     An unreadable stamp renders `??:??:??` rather than raising: `parse_iso`
     raises on malformed input, and this runs over a file on disk, so one bad
     segment would fail a whole summarize instead of costing one line its clock.
     """
-    if isinstance(abs_start, datetime):
-        return abs_start.strftime("%H:%M:%S")
+    stamp = abs_start.isoformat() if isinstance(abs_start, datetime) else str(abs_start or "")
     try:
-        dt = parse_iso(str(abs_start or ""))
+        dt = parse_iso(stamp)
     except ValueError:
+        dt = None
+    if dt is None:
         return "??:??:??"
-    return dt.strftime("%H:%M:%S") if dt else "??:??:??"
+    return dt.strftime("%H:%M:%S%:z")
 
 
 def render_transcript_text(
@@ -328,7 +330,10 @@ def render_transcript_text(
     *,
     names: Mapping[str, str] | None = None,
 ) -> str:
-    """The merged transcript as `[HH:MM:SS] Speaker: text` lines.
+    """The merged transcript as `[HH:MM:SS±HH:MM] Speaker: text` lines.
+
+    The clock names its zone, because this text leaves the screen (stored
+    file, summarizer input). The JS twin is `formatters.fmtClockZ` (ADR-0026).
 
     The ONE spelling of that format on this side of the wire: `merge_session`
     builds `plain_text` through it, and `batch_summarize` re-renders the stored

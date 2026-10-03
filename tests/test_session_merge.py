@@ -16,8 +16,11 @@ from wav_builders import seed_wav  # type: ignore[import-not-found]
 from tapscribe.session_merge import (
     SessionTranscript,
     merge_session,
+    render_transcript_text,
     select_session_wavs,
+    write_merged_transcript,
 )
+from tapscribe.session_paths import FILENAME_TRANSCRIPT_TXT
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
@@ -309,3 +312,51 @@ def test_merge_session_mixes_primaries_across_wavs(tmp_path: Path):
     transcript = merge_session(select_session_wavs(session_dir))
     texts = [s.text for s in transcript.segments]
     assert texts == [f"FROM_B {wavs[0].name}", f"hello from {wavs[1].name}"]
+
+
+# ── the zoned artefact clock (#447) ─────────────────────────────────────────
+# A text artefact leaves its rendering context, so its clock must name the
+# zone it is in: `[HH:MM:SS±HH:MM]`. The stamp keeps the instant's own offset,
+# as `parse_iso` does for a stored ISO. The JS twin is `formatters.fmtClockZ`.
+
+
+def _one_line(abs_start: object) -> str:
+    return render_transcript_text([{"abs_start": abs_start, "speaker": "Alice", "text": "hi"}])
+
+
+def test_clock_stamps_an_aware_utc_instant_with_its_offset():
+    assert _one_line(datetime(2026, 5, 12, 12, 5, 12, tzinfo=UTC)) == "[12:05:12+00:00] Alice: hi"
+
+
+def test_clock_names_the_offset_an_iso_string_already_carries():
+    # The stamp names the zone it holds; it never converts to UTC.
+    assert _one_line("2026-05-12T14:05:12+02:00") == "[14:05:12+02:00] Alice: hi"
+    assert _one_line("2026-05-12T07:05:12-05:00") == "[07:05:12-05:00] Alice: hi"
+
+
+def test_clock_renders_an_unknown_time_without_a_zone():
+    # An unknown time cannot name a zone, so the bare placeholder stays.
+    assert _one_line("not-a-timestamp") == "[??:??:??] Alice: hi"
+    assert _one_line(None) == "[??:??:??] Alice: hi"
+
+
+def test_clock_treats_a_naive_stamp_as_utc():
+    # The `parse_iso` naive-is-UTC convention: a naive stamp's zone is +00:00.
+    assert _one_line(datetime(2026, 5, 12, 12, 5, 12)) == "[12:05:12+00:00] Alice: hi"
+    assert _one_line("2026-05-12T12:05:12") == "[12:05:12+00:00] Alice: hi"
+
+
+def test_merged_transcript_txt_on_disk_carries_the_zoned_clock(tmp_path: Path):
+    """The stored artefact, byte for byte: `write_merged_transcript` writes
+    `plain_text` verbatim, so the zoned stamp lands on disk, not just in the
+    in-memory merge."""
+    session_dir = tmp_path / "s"
+    session_dir.mkdir()
+    (wav,) = _seed(session_dir, n=1)
+    cached_transcribe(wav, _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
+
+    transcript = merge_session(select_session_wavs(session_dir))
+    write_merged_transcript(session_dir, transcript)
+
+    txt = (session_dir / FILENAME_TRANSCRIPT_TXT).read_text(encoding="utf-8")
+    assert txt == f"[09:19:55+00:00] alice: hello from {wav.name}"

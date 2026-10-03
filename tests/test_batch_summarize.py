@@ -482,3 +482,33 @@ async def test_summarize_reads_the_transcript_under_its_mapped_voice_names(recor
     assert "Them#B" not in summary
     # An undiarized tap is untouched by any of this.
     assert "Alice: Where are we on the migration?" in summary
+
+
+async def test_summarize_input_clock_names_its_zone(recorder_under_test):
+    """The clock in the text the model reads names its zone (#447).
+
+    The flow that surfaced this (#438) is a model reading and quoting these
+    times into notes nobody reads beside a clock, and a bare `09:00:00` there is
+    an ambiguous instant. `_CAT` echoes stdin, so the summary IS the text
+    handed to the summarizer, zoned stamp and all."""
+    rec = recorder_under_test.recordings_dir
+    sd = seed_merged_transcript(rec, "s")
+    transcript = json.loads((sd / "session-transcript.json").read_text(encoding="utf-8"))
+    transcript["segments"] = [
+        {
+            "abs_start": "2026-01-01T09:00:00+00:00",
+            "abs_end": "2026-01-01T09:00:04+00:00",
+            "speaker": "Alice",
+            "text": "Where are we on the migration?",
+            "source_wav": "w.wav",
+            "low_confidence": False,
+        }
+    ]
+    (sd / "session-transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt="Summarize"),
+    )
+
+    assert "[09:00:00+00:00] Alice: Where are we on the migration?" in out["summary"]

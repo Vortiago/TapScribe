@@ -1,7 +1,8 @@
 // @ts-check
 // Pure formatters used across the dashboard — the APP layer next to the
 // vendored toolkit formatters (lib/format.js): fmtClock renders viewer-zone
-// wall clock via its own module-scope Intl formatter (see its docstring); the
+// wall clock via its own module-scope Intl formatter (see its docstring), and
+// fmtClockZ names that zone for text artefacts (see its docstring); the
 // dense terminal-style number/duration forms (fmtDur, fmtMs, fmtMmSs,
 // fmtBytes) are a deliberate Stages aesthetic and stay hand-rolled.
 // No DOM dependency, no shared state — safe to unit-test in isolation.
@@ -45,27 +46,59 @@ export function fmtMs(ms) {
 }
 
 /** Wall-clock hh:mm:ss for an absolute instant (ISO-with-offset), rendered in
- * the VIEWER's timezone (toolkit browser-timezone rule) — the old version
- * sliced the ISO string, which showed every viewer the origin-encoded (UTC)
- * wall time. The instant is unambiguous; the viewer's zone is the right
- * display zone. Uses a module-scope Intl formatter instead of lib/format.js's
- * `time()`: fmtClock runs once per merged-transcript segment (thousands per
- * rebuild), and dfmt() only reference-caches its own two singletons — a
- * custom options object pays a JSON.stringify cache-key per call.
+ * the VIEWER's timezone (toolkit browser-timezone rule). Uses a module-scope
+ * Intl formatter, not lib/format.js's `time()`: fmtClock runs once per
+ * merged-transcript segment, and dfmt() pays a JSON.stringify cache key per
+ * call for a custom options object.
  * @param {string | null | undefined} iso */
 export function fmtClock(iso) {
-  if (!iso) return "?";
-  // Guard unparseable timestamps: Intl's format() throws RangeError on an
-  // Invalid Date, and fmtClock runs inside whole-transcript row loops — a
-  // single corrupt sidecar value must garble one cell ("?"), never abort the
-  // entire render/copy (the old slice(11,19) form never threw either).
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "?";
-  return CLOCK_FMT.format(d);
+  const d = toInstant(iso);
+  return d ? CLOCK_FMT.format(d) : "?";
 }
-const CLOCK_FMT = new Intl.DateTimeFormat(undefined, {
-  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+/** A 00-23 hour: `hourCycle`, not `hour12: false`, which some ICU builds
+ * resolve to h24 and so render midnight as 24:mm:ss. */
+const CLOCK_PARTS = /** @type {const} */ ({
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
 });
+const CLOCK_FMT = new Intl.DateTimeFormat(undefined, CLOCK_PARTS);
+
+/** The Date for `iso`, or null when it is missing or unparseable. Intl's
+ * format() throws RangeError on an Invalid Date, and the clocks run inside
+ * whole-transcript row loops: one corrupt sidecar value must garble one cell
+ * ("?"), never abort the entire render or copy.
+ * @param {string | null | undefined} iso */
+function toInstant(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Zoned clock `HH:MM:SS±HH:MM` for a transcript line that leaves the screen
+ * (clipboard copy, .txt download): the reading `fmtClock` shows, plus the
+ * instant's own offset. The server twin is `session_merge._clock` (ADR-0026).
+ * `timeZone` defaults to the viewer's zone.
+ * @param {string | null | undefined} iso
+ * @param {string} [timeZone] */
+export function fmtClockZ(iso, timeZone) {
+  const d = toInstant(iso && NAIVE_ISO.test(iso) ? `${iso}Z` : iso);
+  if (!d) return "?";
+  const parts = Object.fromEntries(clockZFormatter(timeZone).formatToParts(d).map((p) => [p.type, p.value]));
+  // ICU spells a zero offset as a bare "GMT".
+  const offset = String(parts.timeZoneName).replace(/^GMT/, "") || "+00:00";
+  return `${parts.hour}:${parts.minute}:${parts.second}${offset}`;
+}
+/** A date-time with no offset, which `new Date` reads as viewer-local time.
+ * The server's `parse_iso` reads it as UTC, so fmtClockZ does too. */
+const NAIVE_ISO = /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
+// "en-US", not undefined: the viewer locale localises the offset (da-DK writes
+// `GMT+01.00`, fr-FR `UTC+01:00`), and an artefact needs stable ASCII.
+const CLOCK_Z_PARTS = /** @type {const} */ ({ ...CLOCK_PARTS, timeZoneName: "longOffset" });
+const CLOCK_Z_FMT = new Intl.DateTimeFormat("en-US", CLOCK_Z_PARTS);
+/** The viewer-zone formatter, or a fresh one pinned to `timeZone`.
+ * @param {string} [timeZone] */
+function clockZFormatter(timeZone) {
+  return timeZone ? new Intl.DateTimeFormat("en-US", { ...CLOCK_Z_PARTS, timeZone }) : CLOCK_Z_FMT;
+}
 
 /**
  * Elapsed seconds → compact "m:ss" (90 → "1:30"). Distinct from `fmtDur`
