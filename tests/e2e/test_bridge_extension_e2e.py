@@ -44,6 +44,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
     pytest.skip("playwright not installed", allow_module_level=True)
 
 import websockets  # noqa: E402
+from change_signal import CHANGES  # type: ignore[import-not-found]  # noqa: E402  # tests/ is on sys.path
 
 from .harness import WAIT_POLLING_MS, launch_bridge_context, playwright_session, wait_until  # noqa: E402
 
@@ -113,6 +114,11 @@ class FakeTapServer:
         # "ok" state once, THEN flip refuse_connections=True for the
         # blip.
         self._handshakes_seen: int = 0
+        # While set, an incoming handshake is held (the browser's WS stays
+        # CONNECTING) until `release_handshakes()`. Counted, and signalled on
+        # `CHANGES`, so a test can wait for the bridge's redial as an event.
+        self._handshake_gate: asyncio.Event | None = None
+        self.held_handshakes: int = 0
 
     async def start(self) -> None:
         async def handler(ws):
@@ -138,10 +144,13 @@ class FakeTapServer:
             )
             self.connections.append(conn)
             self._open_ws[conn.identity] = ws
+            # Each change here is state a test waits on: see `change_signal`.
+            CHANGES.bump()
             try:
                 async for msg in ws:
                     if isinstance(msg, bytes):
                         conn.frames.append(msg)
+                        CHANGES.bump()
             except websockets.exceptions.ConnectionClosed:
                 # The tap client closing ends this receive loop — the normal
                 # end-of-connection signal for a websockets server handler, not
@@ -153,6 +162,7 @@ class FakeTapServer:
                 conn.close_code = ws.close_code
                 if self._open_ws.get(conn.identity) is ws:
                     del self._open_ws[conn.identity]
+                CHANGES.bump()
 
         # Subprotocol negotiation: echo back any tapscribe.v1.tap.<token>
         # offer whose token matches `expected_token`. When expected_token
@@ -165,12 +175,30 @@ class FakeTapServer:
                     return proto
             return None
 
+        async def process_request(connection, request):
+            gate = self._handshake_gate
+            if gate is not None:
+                self.held_handshakes += 1
+                CHANGES.bump()
+                await gate.wait()
+            return None  # carry on with the normal handshake
+
         self._server = await websockets.serve(
             handler,
             "localhost",
             self.port,
             select_subprotocol=select_subprotocol,
+            process_request=process_request,
         )
+
+    def hold_handshakes(self) -> None:
+        """Hold every new handshake until `release_handshakes()`."""
+        self._handshake_gate = asyncio.Event()
+
+    def release_handshakes(self) -> None:
+        gate, self._handshake_gate = self._handshake_gate, None
+        if gate is not None:
+            gate.set()
 
     async def stop(self) -> None:
         if self._server is None:
@@ -448,9 +476,7 @@ async def test_pill_transitions_idle_to_ok_to_warn_on_tap_drop(
 
     # Wait until at least one frame has reached the server — proves the
     # ws is genuinely OPEN, not just constructed.
-    await asyncio.sleep(0.3)
-    conn = fake_tap_server.connection_for("alice-id")
-    assert conn is not None and len(conn.frames) > 0
+    await frames_flowing(fake_tap_server, "alice-id")
 
     # Drop the WS abnormally (code 1006 = transport blip) AND refuse
     # future connection attempts so the bridge can't immediately heal
@@ -474,6 +500,21 @@ async def test_pill_transitions_idle_to_ok_to_warn_on_tap_drop(
     )
     pill = await read_pill(page)
     assert pill["kind"] in ("warn", "err"), f"post-drop pill must be warn/err, got {pill}"
+
+
+async def frames_flowing(server: FakeTapServer, identity: str) -> TapConnection:
+    """The latest /tap WS for `identity`, once it is open and has carried at least
+    one PCM frame: proof the WS is genuinely OPEN, not just constructed. Waited
+    for as an event (each frame signals `CHANGES`), not slept for."""
+
+    def flowing() -> bool:
+        c = server.connection_for(identity)
+        return c is not None and not c.closed and len(c.frames) > 0
+
+    assert await wait_until(flowing, timeout=10.0), f"no PCM frame reached /tap for {identity}"
+    conn = server.connection_for(identity)
+    assert conn is not None
+    return conn
 
 
 def _capture_console(page) -> list[str]:
@@ -521,9 +562,7 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
 
     # Sam's /tap WS must actually open and start receiving frames.
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
-    await asyncio.sleep(0.3)
-    sam_conn = fake_tap_server.connection_for("speaker-id")
-    assert sam_conn is not None
+    sam_conn = await frames_flowing(fake_tap_server, "speaker-id")
     assert not sam_conn.closed, "Sam's /tap WS should still be open"
     initial_frames = len(sam_conn.frames)
     assert initial_frames > 0
@@ -609,9 +648,7 @@ async def test_pcm_frames_carry_resolved_display_name_after_sidebar_rerender(
 
     # Wait for the first WS open + at least one PCM frame on the wire.
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
-    await asyncio.sleep(0.4)
-    conn = fake_tap_server.connection_for("carol-id")
-    assert conn is not None
+    conn = await frames_flowing(fake_tap_server, "carol-id")
     assert conn.name == "Carol", (
         f"/tap was dialed with name={conn.name!r} — display-name resolution broken; #35-style regression"
     )
@@ -668,9 +705,7 @@ async def test_popup_token_rotation_triggers_reconnect_with_new_subprotocol(
     # fixture starts in). The fake server accepts any offered protocol.
     await add_speaker(page, "dave-id", "Dave")
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
-    await asyncio.sleep(0.3)
-    first = fake_tap_server.connection_for("dave-id")
-    assert first is not None
+    first = await frames_flowing(fake_tap_server, "dave-id")
     # With no token, the bridge constructs the WS without a subprotocol;
     # websockets-server replies with None. (The `select_subprotocol`
     # hook returns offered[0] when expected_token == ""; an empty
@@ -739,30 +774,33 @@ async def test_mute_drain_reconnect_continues_same_utterance(
     # Bring up a speaker, get bytes flowing.
     await add_speaker(page, "ellie-id", "Ellie")
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
-    await asyncio.sleep(0.3)
-    first = fake_tap_server.connection_for("ellie-id")
-    assert first is not None
+    first = await frames_flowing(fake_tap_server, "ellie-id")
     initial_utt = first.utterance_id
     initial_frames = len(first.frames)
     assert initial_frames > 0
 
     # Drop the WS abnormally so the bridge enters reconnect-with-buffer
-    # mode. Frames produced while the WS is down get buffered in
-    # ch.buffer.
+    # mode, and hold its redial's handshake so the new WS stays CONNECTING.
+    # Frames produced while the WS is down get buffered in ch.buffer.
+    fake_tap_server.hold_handshakes()
     assert await fake_tap_server.drop_connection("ellie-id")
 
-    # Brief wait so the bridge's onclose actually fires + a few PCM
-    # frames from the still-running worklet land in ch.buffer. Without
-    # this, mute can race ahead of the close handler — the bridge then
-    # sees ws.readyState==OPEN with no buffered frames and takes the
-    # endUtteranceImmediate path (no drain to test).
-    await asyncio.sleep(0.15)
+    # The redial arriving is the event that onclose has fired. The bridge waits
+    # out its reconnect backoff before redialling, and keeps buffering the
+    # worklet's PCM all the while. So mute cannot race ahead of the close
+    # handler and find an OPEN WS with nothing buffered, which would take the
+    # endUtteranceImmediate path and leave no drain to test.
+    assert await wait_until(lambda: fake_tap_server.held_handshakes >= 1, timeout=15.0), (
+        "the bridge never redialled after the drop"
+    )
 
-    # While the bridge is buffering frames against a closed WS, the
-    # speaker mutes. The bridge's mute handler sees a non-empty buffer
-    # and ch.tapWs==null and enters DRAIN mode rather than closing
-    # immediately. (This was the #17 bug — drain trailing PCM on mute.)
-    await page.evaluate("() => window.__tsTest.muteSpeaker('ellie-id')")
+    # While the bridge is buffering frames against a WS that is not open, the
+    # speaker mutes. The bridge's mute handler sees a non-empty buffer and enters
+    # DRAIN mode rather than closing immediately. (This was the #17 bug — drain
+    # trailing PCM on mute.) Its log line is the proof the drain branch ran.
+    async with page.expect_console_message(lambda m: "draining before close" in m.text, timeout=10000):
+        await page.evaluate("() => window.__tsTest.muteSpeaker('ellie-id')")
+    fake_tap_server.release_handshakes()
 
     # The reconnect ladder fires (~200 ms first attempt). When the new
     # WS opens the buffered frames flush, then the bridge close()s
@@ -829,9 +867,7 @@ async def test_window_room_cleared_without_disconnect_closes_taps(
     # Bring up a tapped speaker; frames must be flowing on a live WS.
     await add_speaker(page, "ghost-id", "Ghost")
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
-    await asyncio.sleep(0.3)
-    conn = fake_tap_server.connection_for("ghost-id")
-    assert conn is not None
+    conn = await frames_flowing(fake_tap_server, "ghost-id")
     assert not conn.closed, "the /tap WS should be open while the speaker is tapped"
     assert len(conn.frames) > 0
 
@@ -881,7 +917,7 @@ async def test_closed_spatialchat_tab_flips_popup_to_no_active_tab(
     # A live tap — bridgeStatus now carries Amy's channel with a fresh ts.
     await add_speaker(page, "amy-id", "Amy")
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
-    await asyncio.sleep(0.3)
+    await frames_flowing(fake_tap_server, "amy-id")
 
     popup = await loaded_bridge.open_popup()
     try:
