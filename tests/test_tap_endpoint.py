@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import wave
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -51,13 +51,18 @@ def recorder_with_fake_wlk(
     return build_tap_recorder(tmp_path, port=fake_wlk.port, gate_kind="backend", live_running=True)
 
 
+def _attach(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    """Point the global app at this test's Recorder through monkeypatch, so the
+    app gets its own state back even when the test fails."""
+    monkeypatch.setitem(app.dependency_overrides, get_recorder, lambda: recorder)
+    monkeypatch.setattr(app.state, "recorder", recorder, raising=False)
+
+
 @pytest.fixture
-def client(recorder_with_fake_wlk: Recorder) -> Iterator[TestClient]:
-    app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
-    app.state.recorder = recorder_with_fake_wlk
+def client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    _attach(monkeypatch, recorder_with_fake_wlk)
     with TestClient(app) as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -67,11 +72,9 @@ def auth_client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatc
     /api/tap/new-session tap-bearer check
     (TestTapNewSession)."""
     monkeypatch.setattr(_config, "AUTH_ENABLED", True)
-    app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
-    app.state.recorder = recorder_with_fake_wlk
+    _attach(monkeypatch, recorder_with_fake_wlk)
     with TestClient(app) as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -463,13 +466,33 @@ def test_tap_distinct_utterance_ids_produce_distinct_wavs(
     assert len(wavs) == 2
 
 
+class _StepClock:
+    """A UTC clock the test moves by hand, for `UtteranceIndex.clock`."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, *, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
 def test_tap_resume_past_window_starts_fresh_wav(
     client: TestClient,
     recorder_with_fake_wlk: Recorder,
 ):
     """If the bridge reconnects long after the resume window has elapsed,
     we treat it as a new utterance and write a new WAV."""
-    recorder_with_fake_wlk.live._proc = None
+    # WAV-side focus: the live leg off for this identity, through the public
+    # per-identity preference rather than by unplugging the channel.
+    assert client.put("/api/tap-settings", json={"identity": "alice", "live": False}).status_code == 200
+    index = recorder_with_fake_wlk.utterances
+    clock = _StepClock()
+    # The index's public clock seam, stepped past the window below instead of
+    # sleeping through it.
+    index.clock = clock
     pcm_frame = b"\x10\x00" * 320
     utt = "expiring-utt"
 
@@ -478,12 +501,7 @@ def test_tap_resume_past_window_starts_fresh_wav(
     ) as ws:
         ws.send_bytes(pcm_frame)
     assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
-    # The resume window elapses by moving the record's close stamp back past it,
-    # not by sleeping through it: the condition under test is "closed longer ago
-    # than the window", and the stamp is the clock the index reads it from.
-    closed = recorder_with_fake_wlk.utterances.snapshot()[utt]
-    assert closed.last_close is not None
-    closed.last_close -= timedelta(seconds=recorder_with_fake_wlk.utterances.RESUME_WINDOW_SECONDS + 1)
+    clock.advance(seconds=index.RESUME_WINDOW_SECONDS + 1)
 
     with client.websocket_connect(
         f"/tap?identity=alice&name=Alice&utterance_id={utt}",
@@ -1057,17 +1075,18 @@ class TestTapSessionParam:
         assert list(recorder_with_fake_wlk.recordings_dir.rglob("*.wav")) == []
 
     def test_open_tap_keeps_its_session_across_rotation(
-        self, client: TestClient, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
     ):
         """Session affiliation snapshots at WS open: a rotation
         mid-utterance never re-homes the open tap — frames sent after the
-        rotation keep landing in the WAV in the original session folder."""
-        recorder_with_fake_wlk.live._proc = None
+        rotation keep landing in the WAV in the original session folder.
+
+        No clock pinning: the rotation happens only once the tap's WAV is on
+        disk, and the Recorder never re-mints an id whose folder exists, so a
+        same-second rotation still lands on a distinct id."""
+        # WAV-side focus: live off for this identity via its public preference.
+        assert client.put("/api/tap-settings", json={"identity": "alice", "live": False}).status_code == 200
         original_dir = recorder_with_fake_wlk.session_dir
-        # Session ids have 1s resolution, so a same-second rotation would
-        # re-mint the SAME id and the two dirs couldn't be told apart. Pin
-        # the clock boundary so the rotation lands on a distinct id.
-        monkeypatch.setattr("tapscribe.recorder._utc_session_id", lambda: "2099-01-01T00-00-00Z")
         pcm = b"\x10\x00" * 320
         with client.websocket_connect("/tap?identity=alice&name=Alice") as ws:
             ws.send_bytes(pcm)
