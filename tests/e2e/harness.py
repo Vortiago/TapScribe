@@ -202,6 +202,20 @@ class RecorderServer:
         # Suppress uvicorn's signal handlers so a botched test can't
         # hijack the runner's SIGINT/SIGTERM.
         self._server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+        # Set the moment uvicorn's startup has an outcome: `started` is True on
+        # success, and a bind or lifespan failure raises SystemExit out of the same
+        # call. `start()` blocks on this instead of polling `started` on a clock.
+        self._startup_done = threading.Event()
+        startup = self._server.startup
+        done = self._startup_done
+
+        async def _startup_then_signal(sockets: Any = None) -> None:
+            try:
+                await startup(sockets=sockets)
+            finally:
+                done.set()
+
+        self._server.startup = _startup_then_signal  # type: ignore[method-assign]
 
     @property
     def base_url(self) -> str:
@@ -223,6 +237,10 @@ class RecorderServer:
             self._server.run()
         except (OSError, SystemExit) as e:
             self._bind_error = e
+        finally:
+            # A thread that ends before startup has an outcome (config load,
+            # event-loop setup) must still wake `start()`.
+            self._startup_done.set()
 
     def start(self, *, ready_timeout: float = 5.0) -> None:
         # free_port() reserves the port on IPv4 only, but uvicorn binds the
@@ -238,14 +256,9 @@ class RecorderServer:
             self._bind_error = None
             self._thread = threading.Thread(target=self._run_server, daemon=True)
             self._thread.start()
-            deadline = time.time() + ready_timeout
-            while time.time() < deadline:
-                if self._bind_error is not None or not self._thread.is_alive():
-                    break
-                if getattr(self._server, "started", False):
-                    return
-                time.sleep(0.02)
-            if getattr(self._server, "started", False):
+            # One wait on startup's outcome; `ready_timeout` only bounds a hang.
+            self._startup_done.wait(ready_timeout)
+            if self._server.started and self._bind_error is None:
                 return
             # Not started: a captured bind error, a thread that exited before
             # startup, or a timeout. Stop the old server, then retry fresh.
