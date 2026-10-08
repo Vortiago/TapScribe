@@ -8009,6 +8009,14 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             await browser.close()
 
 
+def _sign_every_session_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a Recorder restart does to a session, without restarting the server
+    the browser is attached to: the store is replaced, so every cookie it issued
+    is now unknown. Through `monkeypatch`, so the global app gets the lifespan's
+    store back when the test ends."""
+    monkeypatch.setattr(_app.state, "login_links", LoginLinks())
+
+
 async def _mint_login_link(base: str, password: str) -> str:
     """What the tray does on Open dashboard: ask the Recorder for a one-shot link
     with the password it read off disk, and answer the path to open."""
@@ -8190,6 +8198,7 @@ async def test_a_link_signed_in_dashboard_can_still_write(
 
 async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
     running_recorder_auth_on: RunningRecorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The half of ADR-0023 that only a browser can show: what a signed-in tab
     does once its session stops existing.
@@ -8252,12 +8261,10 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
             errbar = page.locator("#errbar")
             assert await errbar.is_hidden(), await errbar.inner_text()
 
-            # What a Recorder restart does to a session, without restarting the
-            # server the browser is attached to: the store is replaced, so every
-            # cookie it issued is now unknown. Same observable state, and the page
-            # keeps its connection, so the POLL's own answer is what is under test
-            # rather than a dropped socket.
-            _app.state.login_links = LoginLinks()
+            # A Recorder restart's effect on the session. Same observable state, and
+            # the page keeps its connection, so the POLL's own answer is what is
+            # under test rather than a dropped socket.
+            _sign_every_session_out(monkeypatch)
 
             # The cue arrives on a poll pass, not on a click.
             try:
@@ -8298,6 +8305,7 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
 
 async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
     running_recorder_auth_on: RunningRecorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The rest of a signed-out spell, beyond the cue.
 
@@ -8334,7 +8342,7 @@ async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
             await page.locator(f'#viewRoot [data-wav="{second}"]').wait_for(state="visible", timeout=15000)
 
             # What a Recorder restart does to a session (see the test above).
-            _app.state.login_links = LoginLinks()
+            _sign_every_session_out(monkeypatch)
             await page.wait_for_function(
                 """() => {
                     const el = document.querySelector('#errbar');
