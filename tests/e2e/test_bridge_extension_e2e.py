@@ -254,10 +254,14 @@ class LoadedExtension:
     page: Any
     ext_id: str
 
-    async def open_popup(self) -> Any:
+    async def open_popup(self, *, fake_clock: bool = False) -> Any:
         """Open the bridge popup.html so a test can call into
-        `chrome.storage.local` (only available from extension contexts)."""
+        `chrome.storage.local` (only available from extension contexts).
+        `fake_clock=True` installs Playwright's clock in the popup first, so a
+        test can move the popup's time forward instead of waiting for it."""
         popup = await self.ctx.new_page()
+        if fake_clock:
+            await popup.clock.install()
         await popup.goto(f"chrome-extension://{self.ext_id}/popup.html")
         return popup
 
@@ -938,7 +942,7 @@ async def test_closed_spatialchat_tab_flips_popup_to_no_active_tab(
     await wait_for_pill_kind(page, "ok", timeout_ms=5000)
     await frames_flowing(fake_tap_server, "amy-id")
 
-    popup = await loaded_bridge.open_popup()
+    popup = await loaded_bridge.open_popup(fake_clock=True)
     try:
         # While the tab is alive the popup shows Amy's row.
         await popup.wait_for_function(
@@ -954,8 +958,12 @@ async def test_closed_spatialchat_tab_flips_popup_to_no_active_tab(
 
         # Close the SpatialChat tab: content.js stops refreshing `ts`, so the
         # leftover snapshot ages past STALE_AFTER_MS and the popup must fall
-        # back to the no-tab empty state instead of the frozen tap rows.
+        # back to the no-tab empty state instead of the frozen tap rows. The
+        # popup's clock is moved past that window (its poll timer fires on the
+        # way) instead of the test waiting the window out in real time.
+        stale_after_ms = await popup.evaluate("async () => (await import('./taps-view.js')).STALE_AFTER_MS")
         await page.close()
+        await popup.clock.fast_forward(stale_after_ms + 2_000)
         await popup.wait_for_function(
             """
             () => {
