@@ -173,6 +173,25 @@ def free_port() -> int:
 _PORT_RETRY_ATTEMPTS = 5
 
 
+def signal_startup(server: uvicorn.Server) -> threading.Event:
+    """An Event set the moment `server`'s startup has an outcome: `started` is
+    True on success, and a bind or lifespan failure raises SystemExit out of the
+    same call. Lets a caller wait for a server in a thread without polling
+    `started` on a clock. A caller whose thread can die BEFORE startup should
+    also set it when that thread exits."""
+    done = threading.Event()
+    startup = server.startup
+
+    async def _startup_then_signal(sockets: Any = None) -> None:
+        try:
+            await startup(sockets=sockets)
+        finally:
+            done.set()
+
+    server.startup = _startup_then_signal  # type: ignore[method-assign]
+    return done
+
+
 class RecorderServer:
     """Runs the FastAPI app + Recorder on a real uvicorn server in a
     background daemon thread."""
@@ -202,20 +221,8 @@ class RecorderServer:
         # Suppress uvicorn's signal handlers so a botched test can't
         # hijack the runner's SIGINT/SIGTERM.
         self._server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-        # Set the moment uvicorn's startup has an outcome: `started` is True on
-        # success, and a bind or lifespan failure raises SystemExit out of the same
-        # call. `start()` blocks on this instead of polling `started` on a clock.
-        self._startup_done = threading.Event()
-        startup = self._server.startup
-        done = self._startup_done
-
-        async def _startup_then_signal(sockets: Any = None) -> None:
-            try:
-                await startup(sockets=sockets)
-            finally:
-                done.set()
-
-        self._server.startup = _startup_then_signal  # type: ignore[method-assign]
+        # `start()` blocks on this instead of polling `started` on a clock.
+        self._startup_done = signal_startup(self._server)
 
     @property
     def base_url(self) -> str:
@@ -427,6 +434,31 @@ async def wait_until(predicate, *, timeout: float = 5.0) -> bool:
     except TimeoutError:
         return False
     return True
+
+
+@dataclass
+class TapFrameLedger:
+    """How many /tap frames the in-process Recorder has fully handled (written to
+    the WAV, gated, relayed), across every tap. Each one signals `CHANGES`, so a
+    test can wait for "the server has taken every frame I sent" as an event."""
+
+    handled: int = 0
+
+
+def count_tap_frames(monkeypatch: pytest.MonkeyPatch) -> TapFrameLedger:
+    """Count completed `TapFanOut.write_frame` calls for the rest of the test."""
+    from tapscribe.tap_fan_out import TapFanOut
+
+    ledger = TapFrameLedger()
+    write_frame = TapFanOut.write_frame
+
+    async def counted(self: TapFanOut, buf: bytes) -> None:
+        await write_frame(self, buf)
+        ledger.handled += 1
+        CHANGES.bump()
+
+    monkeypatch.setattr(TapFanOut, "write_frame", counted)
+    return ledger
 
 
 async def streams_drained(recorder: Recorder) -> bool:

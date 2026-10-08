@@ -15,12 +15,10 @@ reachable over https://.
 
 from __future__ import annotations
 
-import asyncio
 import socket
 import ssl
 import sys as _sys
 import threading
-import time
 import wave
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -48,6 +46,7 @@ from .harness import (
     SAMPLE_RATE,
     frame_pcm,
     read_wav_as_pcm_bytes,
+    signal_startup,
     streams_drained,
     synth_speech_like_wav,
     wait_until,
@@ -125,15 +124,20 @@ def tls_running_recorder(
     server = uvicorn.Server(cfg)
     server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
 
-    thread = threading.Thread(target=server.run, daemon=True)
+    started = signal_startup(server)
+
+    def _run() -> None:
+        try:
+            server.run()
+        finally:
+            started.set()  # a thread that dies before startup must still wake us
+
+    thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if getattr(server, "started", False):
-            break
-        time.sleep(0.02)
-    else:
+    # One wait on uvicorn's startup outcome (see `harness.signal_startup`);
+    # the timeout only bounds a hang.
+    if not (started.wait(5.0) and server.started):
         raise RuntimeError("TLS uvicorn didn't report started within timeout")
 
     try:
@@ -199,7 +203,6 @@ async def test_tls_happy_path_wav_lands_and_api_state_reachable(
     async with websockets.connect(url, ssl=ssl_ctx) as ws:
         for frame in frames:
             await ws.send(frame)
-            await asyncio.sleep(0.005)
     assert await wait_until(lambda: streams_drained(rec), timeout=3.0)
 
     wavs = list(rec.session_dir.glob("*.wav"))

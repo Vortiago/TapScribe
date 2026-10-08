@@ -42,12 +42,12 @@ from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explic
     repoint_config_files,
 )
 
-from .harness import RecorderServer
+from .harness import RecorderServer, TapFrameLedger, count_tap_frames
 
 # Public re-exports: sibling e2e modules do `from .conftest import <name>`.
 # Declaring them here marks the otherwise locally-unused `FakeAliveProc`
 # re-export as intentional API — for readers and for static analysis alike.
-__all__ = ["FakeAliveProc", "RunningRecorder"]
+__all__ = ["FakeAliveProc", "RunningRecorder", "TapFrameLedger"]
 
 
 @pytest.fixture(autouse=True)
@@ -149,3 +149,11 @@ def running_recorder_auth_on(
     Against the auth-off fixture that test would pass without the feature
     existing."""
     yield from _serve_recorder(tmp_path, monkeypatch, fake_wlk, auth=True)
+
+
+@pytest.fixture
+def tap_frames(monkeypatch: pytest.MonkeyPatch) -> TapFrameLedger:
+    """Counts the /tap frames the Recorder has fully handled (see
+    `harness.count_tap_frames`), for tests that must not act before the server
+    has taken what they sent."""
+    return count_tap_frames(monkeypatch)
