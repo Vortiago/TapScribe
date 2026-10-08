@@ -18,7 +18,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 
 import {
   fmtBytes,
@@ -148,20 +147,28 @@ test("fmtClockZ reads a naive stamp as UTC, as the server's parse_iso does", () 
   assert.equal(fmtClockZ("2026-05-12T12:05:12.250", "UTC"), "12:05:12+00:00");
 });
 
-test("fmtClockZ keeps the ASCII spelling under a non-English viewer locale", () => {
-  // The runner is en-US, so only a child process with another locale sees a
-  // formatter that follows the viewer locale (da-DK writes `+01.00`).
-  const script = `
-    import { fmtClockZ } from ${JSON.stringify(new URL("./formatters.js", import.meta.url).href)};
-    const locale = new Intl.DateTimeFormat().resolvedOptions().locale;
-    process.stdout.write(JSON.stringify([locale, fmtClockZ("2026-01-12T12:05:12Z", "Europe/Copenhagen")]));`;
-  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
-    env: { ...process.env, LANG: "da_DK.UTF-8", LC_ALL: "da_DK.UTF-8" },
-    encoding: "utf8",
-  });
-  const [locale, clock] = JSON.parse(out);
-  assert.equal(locale, "da-DK", "the child must run under da-DK, or this test proves nothing");
-  assert.equal(clock, "13:05:12+01:00");
+test("fmtClockZ keeps the ASCII spelling under a non-English viewer locale", async (t) => {
+  // The viewer locale is what Intl.DateTimeFormat falls back to when it is given
+  // none, so a da-DK viewer is that fallback set to da-DK. In-process: the module
+  // is imported afresh under it, since fmtClockZ builds its formatter at load.
+  const Real = Intl.DateTimeFormat;
+  const daOffset = new Real("da-DK", { timeZone: "Europe/Copenhagen", timeZoneName: "longOffset" })
+    .formatToParts(new Date("2026-01-12T12:05:12Z"))
+    .find((p) => p.type === "timeZoneName")?.value;
+  assert.equal(daOffset, "GMT+01.00", "this runtime has no da-DK data, so the test would prove nothing");
+
+  /** @param {string | string[] | undefined} locales @param {Intl.DateTimeFormatOptions} [options] */
+  function ViewerDaDk(locales, options) {
+    return new Real(locales ?? "da-DK", options);
+  }
+  ViewerDaDk.prototype = Real.prototype;
+  ViewerDaDk.supportedLocalesOf = Real.supportedLocalesOf;
+  Intl.DateTimeFormat = /** @type {any} */ (ViewerDaDk);
+  t.after(() => { Intl.DateTimeFormat = Real; });
+  assert.equal(new Intl.DateTimeFormat().resolvedOptions().locale, "da-DK");
+
+  const { fmtClockZ: underDaDk } = await import("./formatters.js?viewer=da-DK");
+  assert.equal(underDaDk("2026-01-12T12:05:12Z", "Europe/Copenhagen"), "13:05:12+01:00");
 });
 
 test("fmtClockZ returns ? for missing or unparseable input", () => {
