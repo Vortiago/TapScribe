@@ -11,6 +11,7 @@ or a Force Quit would end the real one.
 from __future__ import annotations
 
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -56,6 +57,17 @@ def _eventually(predicate: Callable[[], bool], timeout: float = 15.0) -> bool:
     return predicate()
 
 
+def _read_pids(recorder: subprocess.Popen[str], timeout: float = 15.0) -> tuple[int, int]:
+    """The stand-in Recorder's one line, waited for with a deadline: a child that
+    hangs before printing fails the test instead of hanging the run."""
+    assert recorder.stdout is not None
+    with selectors.DefaultSelector() as sel:
+        sel.register(recorder.stdout, selectors.EVENT_READ)
+        assert sel.select(timeout), f"the stand-in Recorder printed nothing in {timeout}s"
+    server_pid, guard_pid = (int(field) for field in recorder.stdout.readline().split())
+    return server_pid, guard_pid
+
+
 def _kill_quietly(pid: int) -> None:
     if pid <= 0:
         return
@@ -72,8 +84,7 @@ def test_the_server_dies_with_a_recorder_that_is_killed():
     recorder = subprocess.Popen([sys.executable, "-c", STAND_IN_RECORDER], stdout=subprocess.PIPE, text=True)
     server_pid = guard_pid = 0
     try:
-        assert recorder.stdout is not None
-        server_pid, guard_pid = (int(field) for field in recorder.stdout.readline().split())
+        server_pid, guard_pid = _read_pids(recorder)
         assert guard_pid, "the guard did not start"
         assert _running(server_pid)
 
@@ -103,7 +114,9 @@ def test_a_normal_stop_ends_the_guard_with_the_server():
         os.killpg(server.pid, signal.SIGTERM)
 
         server.wait(timeout=10)
-        assert guard.wait(timeout=10) is not None
+        # Ended BY that signal, not by noticing the server gone on a later poll
+        # (which exits 0): the guard is in the group, so the SIGTERM is its end too.
+        assert guard.wait(timeout=10) == -signal.SIGTERM
     finally:
         _kill_quietly(server.pid)
         _kill_quietly(guard.pid if guard else 0)
@@ -111,19 +124,25 @@ def test_a_normal_stop_ends_the_guard_with_the_server():
 
 @posix_only
 def test_the_guard_leaves_when_the_server_exits_on_its_own():
+    # The server exits when the test closes its stdin, not after a fixed sleep, so
+    # it is the test and not the clock that decides the guard is already watching.
     server = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(1)"],
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
         process_group=0,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
     )
     guard = spawn_live_guard(server)
     try:
         assert guard is not None
 
-        server.wait(timeout=10)
+        assert server.stdin is not None
+        server.stdin.close()
+        assert server.wait(timeout=10) == 0
 
         assert guard.wait(timeout=10) == 0
     finally:
+        if server.poll() is None:
+            _kill_quietly(server.pid)
         _kill_quietly(guard.pid if guard else 0)
 
 
