@@ -10,12 +10,13 @@ landed in recorder.transcripts.
 from __future__ import annotations
 
 import re
-import time
 import wave
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from change_signal import CHANGES  # type: ignore[import-not-found]
 from conftest import (
     FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
     build_tap_recorder,
@@ -314,19 +315,14 @@ def test_old_live_transcript_post_route_is_gone(
 # ---------------------------------------------------------------------------
 
 
-def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.02) -> bool:
-    """Generic polling helper. Replaces hand-rolled `time.sleep(...)` waits
-    sprinkled through this module — those raced the relay's drain task
-    and flaked on loaded CI runners. Use this anywhere a test needs to
-    wait for state to settle, with the actual condition spelled out.
-    Returns True if the predicate ever returned truthy within `timeout`,
-    False if it timed out."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return bool(predicate())
+def _wait_until(predicate, *, timeout: float = 5.0) -> bool:
+    """Wait for state to settle, with the actual condition spelled out. Replaces
+    hand-rolled `time.sleep(...)` waits, which raced the relay's drain task and
+    flaked on loaded CI runners. Event-driven: the condition is re-read each time
+    the Recorder (built by `build_tap_recorder`) or the fake WlK signals a change
+    (`change_signal.CHANGES`), so it may read only that state. `timeout` bounds a
+    hang. Returns whether the condition became true."""
+    return CHANGES.wait_until(predicate, timeout=timeout)
 
 
 def _wait_for_utterance_closed(recorder: Recorder, utt: str, timeout: float = 5.0) -> bool:
@@ -470,7 +466,6 @@ def test_tap_distinct_utterance_ids_produce_distinct_wavs(
 def test_tap_resume_past_window_starts_fresh_wav(
     client: TestClient,
     recorder_with_fake_wlk: Recorder,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """If the bridge reconnects long after the resume window has elapsed,
     we treat it as a new utterance and write a new WAV."""
@@ -478,25 +473,17 @@ def test_tap_resume_past_window_starts_fresh_wav(
     pcm_frame = b"\x10\x00" * 320
     utt = "expiring-utt"
 
-    # Shrink the resume window so the test doesn't sleep for a minute.
-    monkeypatch.setattr(
-        recorder_with_fake_wlk.utterances,
-        "RESUME_WINDOW_SECONDS",
-        0.05,
-    )
-
     with client.websocket_connect(
         f"/tap?identity=alice&name=Alice&utterance_id={utt}",
     ) as ws:
         ws.send_bytes(pcm_frame)
     assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
-    # Deliberate sleep, not a race-hiding one: the test condition IS that
-    # the resume window has elapsed, and there's no observable event to
-    # poll on for "the window has aged past 0.05 s wall-clock." 5× the
-    # window so we don't race the ~100-ms-resolution clock on Windows
-    # under CI load — the matrix runs three OS × four Python versions
-    # in parallel so the runner can easily slip past a tighter margin.
-    time.sleep(0.25)
+    # The resume window elapses by moving the record's close stamp back past it,
+    # not by sleeping through it: the condition under test is "closed longer ago
+    # than the window", and the stamp is the clock the index reads it from.
+    closed = recorder_with_fake_wlk.utterances.snapshot()[utt]
+    assert closed.last_close is not None
+    closed.last_close -= timedelta(seconds=recorder_with_fake_wlk.utterances.RESUME_WINDOW_SECONDS + 1)
 
     with client.websocket_connect(
         f"/tap?identity=alice&name=Alice&utterance_id={utt}",
@@ -1087,10 +1074,10 @@ class TestTapSessionParam:
             # The WAV materialises during the open; wait for it so the
             # rotate endpoint's empty-session idempotency guard sees a
             # non-empty current session and actually rotates.
-            deadline = time.time() + 5
-            while not list(original_dir.glob("*.wav")) and time.time() < deadline:
-                time.sleep(0.01)
-            assert list(original_dir.glob("*.wav")), "tap WAV never materialised before rotation"
+            # The WAV is opened before the stream registers, which signals.
+            assert _wait_until(lambda: list(original_dir.glob("*.wav"))), (
+                "tap WAV never materialised before rotation"
+            )
             assert client.post("/api/tap/new-session").json()["rotated"] is True
             ws.send_bytes(pcm)
 
