@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 import websockets
+from change_signal import CHANGES, notify_after  # type: ignore[import-not-found]  # tests/ is on sys.path
 
 # Make the in-tree package importable when pytest is invoked from the repo
 # root without an editable install (CI's most common shape).
@@ -496,11 +497,14 @@ class FakeWlkThread:
         per_conn_received: list[bytes] = []
         self.received_by_connection.append(per_conn_received)
         self._lines_acc_by_connection.append([])
+        # A relay connecting, sending and going away is state tests wait on.
+        CHANGES.bump()
         try:
             async for msg in ws:
                 if isinstance(msg, bytes):
                     self.received.append(msg)
                     per_conn_received.append(msg)
+                    CHANGES.bump()
         finally:
             if ws in self.connections:
                 idx = self.connections.index(ws)
@@ -509,6 +513,7 @@ class FakeWlkThread:
                 self.connections.pop(idx)
                 self.received_by_connection.pop(idx)
                 self._lines_acc_by_connection.pop(idx)
+            CHANGES.bump()
 
 
 @pytest.fixture
@@ -730,6 +735,23 @@ def build_tap_recorder(
     )
     if live_running:
         recorder.live._proc = FakeAliveProc()
+    # Every change to the state a test waits on signals `CHANGES`, so the e2e
+    # `wait_until` re-reads its condition on a change instead of on a clock.
+    notify_after(
+        recorder.streams,
+        "register",
+        "remove",
+        "update_bytes",
+        "update_lag",
+        "update_gate_open",
+        "update_buffer_transcription",
+    )
+    notify_after(recorder.utterances, "try_resume", "register_new", "release")
+    notify_after(recorder.tap_settings, "set")
+    notify_after(recorder.jobs, "claim", "update", "release")
+    notify_after(recorder.pipelines, "begin", "finish_done", "finish_failed")
+    notify_after(recorder.transcripts, "append", "clear")
+    notify_after(recorder, "toggle_recording", "rotate_session", "create_detached_session")
     return recorder
 
 

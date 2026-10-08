@@ -71,6 +71,7 @@ from .harness import (
     stream_wav_via_tap,
     streams_drained,
     synth_speech_like_wav,
+    utterance_released,
     wait_until,
     word_tokens,
 )
@@ -1903,16 +1904,17 @@ async def test_transcript_transcribe_saves_languages_first_wysiwyg(
                 timeout=10000,
             )
             await page.select_option('[data-slot="txLanguages"]', "no")
-            await page.locator('#viewRoot [data-slot="txRangeBtn"]').click()
-
             # The PUT to session-meta runs before the transcribe POST, so the
-            # override lands regardless of the transcribe outcome. Poll it.
-            async def _meta_pins_no() -> bool:
-                async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
-                    r = await client.get(f"/api/session-meta/{sid}")
-                    return r.status_code == 200 and r.json().get("languages") == ["no"]
-
-            assert await wait_until(_meta_pins_no, timeout=10.0), "transcribe did not save languages first"
+            # override lands regardless of the transcribe outcome. Its response is
+            # the event: once it has answered, the meta is on disk.
+            async with page.expect_response(
+                lambda r: r.request.method == "PUT" and f"/api/session-meta/{sid}" in r.url, timeout=10000
+            ) as saved:
+                await page.locator('#viewRoot [data-slot="txRangeBtn"]').click()
+            assert (await saved.value).ok, "transcribe did not save languages first"
+            async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
+                r = await client.get(f"/api/session-meta/{sid}")
+            assert r.status_code == 200 and r.json().get("languages") == ["no"], r.text
         finally:
             await browser.close()
 
@@ -2772,10 +2774,11 @@ async def test_dashboard_live_channel_start_stop(
                 wav_path=synth_speech_like_wav(tmp_path / "bob.wav", seconds=0.5, freq_hz=330.0),
                 utterance_id="utt-live-off",
             )
-            assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
-            assert await wait_until(
-                lambda: len(list(rec.session_dir.glob("*.wav"))) == before + 1, timeout=5.0
-            ), "recording must continue with the live channel stopped"
+            # Released means the WAV is closed and on disk (see `utterance_released`).
+            assert await wait_until(lambda: utterance_released(rec, "utt-live-off"), timeout=5.0)
+            assert len(list(rec.session_dir.glob("*.wav"))) == before + 1, (
+                "recording must continue with the live channel stopped"
+            )
         finally:
             await browser.close()
 
@@ -3253,17 +3256,19 @@ async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
 
             # Back to Recordings, whose watcher missed that land. The third row must
             # be there: the swap from held rows to the stamp's own rows has to cross
-            # the render gate on its own. `wait_until` rather than
-            # `wait_for_function` so a failure reports the rows actually on screen.
+            # the render gate on its own. A timeout is caught so the failure below
+            # can report the rows actually on screen.
             await page.evaluate("() => window.gotoView('recordings')")
-            got_third = await wait_until(
-                lambda: page.evaluate(
+            try:
+                await page.wait_for_function(
                     """(name) => !!document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`)""",
-                    third,
-                ),
-                timeout=15.0,
-                interval=0.25,
-            )
+                    arg=third,
+                    timeout=15000,
+                )
+                got_third = True
+            except Exception:
+                # Playwright's TimeoutError; the assertion below names the rows.
+                got_third = False
             rows = await page.evaluate(
                 """() => Array.from(document.querySelectorAll('#viewRoot .wavrow[data-wav]'))
                         .map((r) => r.dataset.wav)"""
@@ -5429,7 +5434,7 @@ async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
             assert body.get("state") != "failed", f"pipeline failed: {body}"
             return body.get("state") == "done"
 
-        assert await wait_until(_pipeline_done, timeout=60.0, interval=0.25), "pipeline did not finish"
+        assert await wait_until(_pipeline_done, timeout=60.0), "pipeline did not finish"
 
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)

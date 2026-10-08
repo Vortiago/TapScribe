@@ -20,7 +20,6 @@ import os
 import re
 import socket
 import threading
-import time
 import wave
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -32,6 +31,7 @@ import numpy as np
 import pytest
 import uvicorn
 import websockets
+from change_signal import CHANGES  # type: ignore[import-not-found]  # tests/ is on sys.path
 
 from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
 from tapscribe.recorder import Recorder
@@ -402,21 +402,31 @@ async def stream_wav_via_tap(
     )
 
 
-async def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05) -> bool:
-    """Poll `predicate` (sync or async) until truthy or timeout. Returns
-    the final value so callers can `assert await wait_until(...)`."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        result = predicate()
-        if asyncio.iscoroutine(result):
-            result = await result
-        if result:
-            return True
-        await asyncio.sleep(interval)
-    result = predicate()
-    if asyncio.iscoroutine(result):
-        result = await result
-    return bool(result)
+async def wait_until(predicate, *, timeout: float = 5.0) -> bool:
+    """Wait until `predicate` (sync or async) is truthy. Returns whether it became
+    so, so callers can `assert await wait_until(...)`.
+
+    Event-driven, not a poll: the predicate is re-read only when watched state
+    changes (`change_signal.CHANGES`: a Recorder built by `build_tap_recorder`, or
+    the fake WlK). So it may read only that state. A condition on anything else
+    (the DOM, a file, a response) waits on that thing's own event instead.
+    `timeout` bounds a hang; it is not a polling deadline."""
+
+    async def _until_true() -> None:
+        while True:
+            seen = CHANGES.version
+            result = predicate()
+            if asyncio.iscoroutine(result):
+                result = await result
+            if result:
+                return
+            await CHANGES.changed_since(seen)
+
+    try:
+        await asyncio.wait_for(_until_true(), timeout)
+    except TimeoutError:
+        return False
+    return True
 
 
 async def streams_drained(recorder: Recorder) -> bool:
