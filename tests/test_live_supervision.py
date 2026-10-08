@@ -30,7 +30,6 @@ import queue
 import signal
 import subprocess
 import threading
-import time
 from contextlib import contextmanager
 from dataclasses import replace
 from itertools import islice
@@ -60,19 +59,6 @@ def _make_channel(*, gate_kind: str = "tapscribe", **overrides) -> WhisperLiveKi
     return WhisperLiveKitChannel(config=cfg, use_mlx=False)
 
 
-def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.005) -> None:
-    """Event-driven busy-poll: returns as soon as `predicate()` is
-    true, raises if it never is. Used instead of a fixed sleep so
-    these tests don't pay (or risk under-paying) a hardcoded delay
-    while a background pump thread catches up."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(interval)
-    raise AssertionError(f"condition not met within {timeout}s")
-
-
 class _QueueStdout:
     """Stand-in for `Popen(text=True).stdout`: an iterator that blocks
     on `push`ed lines and raises StopIteration once `close`d (EOF).
@@ -81,17 +67,35 @@ class _QueueStdout:
 
     def __init__(self) -> None:
         self._q: queue.Queue[str | None] = queue.Queue()
+        # How many lines were pushed, and how many times the reader came back
+        # for one. A reader asks again only once it has fully handled the line
+        # before, so `asked > pushed` is the event "every pushed line is done".
+        self._seen = threading.Condition()
+        self._pushed = 0
+        self._asked = 0
 
     def push(self, line: str) -> None:
+        with self._seen:
+            self._pushed += 1
         self._q.put(line)
 
     def close(self) -> None:
         self._q.put(None)
 
+    def wait_processed(self, timeout: float = 5.0) -> None:
+        """Block until the reader has handled every pushed line and come back
+        for more. `timeout` bounds a hang; it is not a polling deadline."""
+        with self._seen:
+            done = self._seen.wait_for(lambda: self._asked > self._pushed, timeout)
+        assert done, f"the reader handled {self._asked - 1} of {self._pushed} line(s)"
+
     def __iter__(self):
         return self
 
     def __next__(self):
+        with self._seen:
+            self._asked += 1
+            self._seen.notify_all()
         item = self._q.get()
         if item is None:
             raise StopIteration
@@ -133,6 +137,31 @@ def _pumping(chan: WhisperLiveKitChannel, proc: _FakeChildProc):
     assert not t.is_alive()
 
 
+@contextmanager
+def _pump_threads(chan: WhisperLiveKitChannel):
+    """Collect the pump thread(s) `start()` spawns for `chan`, so a test can join
+    the one it started instead of waiting for its effect on a clock."""
+    real_thread = threading.Thread
+    pumps: list[threading.Thread] = []
+
+    def spawn(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        if kwargs.get("target") == chan._pump_logs:
+            pumps.append(thread)
+        return thread
+
+    with patch("tapscribe.live.threading.Thread", side_effect=spawn):
+        yield pumps
+
+
+def _join(threads: list[threading.Thread], timeout: float = 5.0) -> None:
+    """Join each thread; `timeout` bounds a hang, it is not a poll."""
+    assert threads, "start() spawned no pump thread"
+    for thread in threads:
+        thread.join(timeout)
+        assert not thread.is_alive(), "the pump thread did not exit at EOF"
+
+
 # ---------------------------------------------------------------------------
 # _pump_logs — starting->running promotion, device overwrite, crash capture
 # ---------------------------------------------------------------------------
@@ -145,7 +174,8 @@ def test_pump_logs_promotes_starting_to_running_on_uvicorn_banner():
     chan._proc = proc  # mirrors what start() would have set
     with _pumping(chan, proc):
         proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)")
-        _wait_until(lambda: chan.info["state"] == "running")
+        proc.stdout.wait_processed()
+        assert chan.info["state"] == "running"
     # rc=0 on exit overwrites the promoted "running" with a graceful stop.
     assert chan.info["state"] == "stopped"
 
@@ -157,7 +187,8 @@ def test_pump_logs_promotes_on_application_startup_complete_line_too():
     chan._proc = proc
     with _pumping(chan, proc):
         proc.stdout.push("INFO:     Application startup complete.")
-        _wait_until(lambda: chan.info["state"] == "running")
+        proc.stdout.wait_processed()
+        assert chan.info["state"] == "running"
 
 
 def test_pump_logs_overwrites_seeded_device_with_child_accelerator_report():
@@ -167,7 +198,8 @@ def test_pump_logs_overwrites_seeded_device_with_child_accelerator_report():
     chan._proc = proc
     with _pumping(chan, proc):
         proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
-        _wait_until(lambda: chan.info["device"] == "CUDA (NVIDIA A100)")
+        proc.stdout.wait_processed()
+        assert chan.info["device"] == "CUDA (NVIDIA A100)"
 
 
 def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit():
@@ -184,7 +216,8 @@ def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit():
     with _pumping(chan, proc):
         for line in lines:
             proc.stdout.push(line)
-        _wait_until(lambda: len(chan.log) == len(lines))
+        proc.stdout.wait_processed()
+        assert len(chan.log) == len(lines)
 
     assert chan.info["state"] == "error"
     assert chan.info["last_error"] == " | ".join(lines)
@@ -232,7 +265,8 @@ def test_pump_logs_skips_info_update_when_proc_was_replaced():
         chan._proc = new_proc
         old_proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
         old_proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
-        _wait_until(lambda: len(chan.log) == 2)
+        old_proc.stdout.wait_processed()
+        assert len(chan.log) == 2
 
     # The stale child's banner lines were tailed into the log (so the pump
     # really did process them) but changed none of the new child's info.
@@ -252,16 +286,19 @@ def test_start_wires_a_background_pump_that_promotes_state_to_running():
     with (
         patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
         patch("tapscribe.live.subprocess.Popen", return_value=proc),
+        _pump_threads(chan) as pumps,
     ):
         ok, _msg = chan.start()
     assert ok is True
     assert chan.info["state"] == "starting"
 
     proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
-    _wait_until(lambda: chan.info["state"] == "running")
+    proc.stdout.wait_processed()
+    assert chan.info["state"] == "running"
 
     proc.stdout.close()
-    _wait_until(lambda: chan.info["state"] == "stopped")
+    _join(pumps)
+    assert chan.info["state"] == "stopped"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
@@ -275,6 +312,7 @@ def test_start_gives_the_server_a_process_group_not_a_session():
     with (
         patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
         patch("tapscribe.live.subprocess.Popen", return_value=proc) as popen,
+        _pump_threads(chan) as pumps,
     ):
         ok, _msg = chan.start()
     assert ok is True
@@ -285,7 +323,8 @@ def test_start_gives_the_server_a_process_group_not_a_session():
     assert kwargs.get("stdin") == subprocess.DEVNULL
 
     proc.stdout.close()
-    _wait_until(lambda: chan.info["state"] == "stopped")
+    _join(pumps)
+    assert chan.info["state"] == "stopped"
 
 
 # ---------------------------------------------------------------------------
@@ -676,18 +715,23 @@ def test_log_iteration_is_safe_while_a_thread_appends():
     routes use must survive a concurrent append storm."""
     chan = _make_channel()
     stop = threading.Event()
+    full = threading.Event()
 
     def writer() -> None:
         n = 0
         while not stop.is_set():
             chan.log.append(f"line {n}")
             n += 1
+            if n == 200:
+                full.set()  # past maxlen: from here every append also evicts
 
     t = threading.Thread(target=writer, daemon=True)
     t.start()
     try:
-        deadline = time.monotonic() + 0.3
-        while time.monotonic() < deadline:
+        # A fixed number of reads against an append storm that is already
+        # evicting, not "as many as fit in 0.3 s": the same work on every runner.
+        assert full.wait(timeout=5.0), "the writer never filled the log"
+        for _ in range(2_000):
             # The exact two reader forms tapscribe.app uses.
             list(islice(chan.log, max(0, len(chan.log) - 30), None))
             list(chan.log)
