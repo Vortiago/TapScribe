@@ -64,7 +64,7 @@ from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_ROSTER_JSON
 from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
 from tapscribe.text import parse_wav_speaker_slug
 
-from .conftest import FakeAliveProc, RunningRecorder
+from .conftest import RunningRecorder
 from .fake_transcriber import FakeTranscriber
 from .harness import (
     playwright_session,
@@ -1907,6 +1907,9 @@ async def test_transcript_transcribe_saves_languages_first_wysiwyg(
             async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
                 r = await client.get(f"/api/session-meta/{sid}")
             assert r.status_code == 200 and r.json().get("languages") == ["no"], r.text
+            # The click also started a transcribe job. Let it finish (its release
+            # signals) so it cannot run on into the next test's teardown.
+            assert await wait_until(lambda: not rec.jobs.snapshot(), timeout=30.0), rec.jobs.snapshot()
         finally:
             await browser.close()
 
@@ -1922,8 +1925,8 @@ async def test_transcript_transcribe_saves_languages_first_wysiwyg(
 # (real report: Edge tab, climbing "DOM Nodes"/"JS event listeners", 47 s LCP).
 #
 # This guard measures the exact metrics the browser's Performance Monitor shows
-# (Nodes incl. detached, JSEventListeners) via CDP, across ~10 s of TRUE idle
-# (no taps, empty live feed). Listener growth must be ~0 (any growth = a
+# (Nodes incl. detached, JSEventListeners) via CDP, across six counted ticks of
+# TRUE idle (no taps, empty live feed). Listener growth must be ~0 (any growth = a
 # component re-attaching listeners each tick); node growth gets a benign
 # baseline but must not regress to the per-tick-churn range that the
 # live-feed ascii / spine / active-taps produced before they were sig-gated.
@@ -2693,21 +2696,22 @@ async def test_dashboard_live_channel_start_stop(
     rec = rr.recorder
     fake_wlk = rr.fake_wlk
 
-    # The fixture pre-marks the channel alive; begin from a clean STOPPED state.
-    rec.live._proc = None
-    rec.live.info["state"] = "stopped"
+    # The channel's whole public surface for this criterion is `start`, `stop`,
+    # `running()` and its `info`; the fakes stand in for a spawned child through
+    # those alone (config.port stays aimed at the fake WlK, so the relay
+    # connects). The fixture pre-marks the channel alive; begin STOPPED.
+    alive = [False]
+    monkeypatch.setattr(rec.live, "running", lambda: alive[0])
+    monkeypatch.setitem(rec.live.info, "state", "stopped")
 
     def _fake_start(*, model=None, language=None):  # noqa: ARG001
-        # Stand in for a fully-started child: alive proc (`FakeAliveProc` —
-        # poll() is None) + running state, config.port still aimed at the fake
-        # WlK so the relay connects.
-        rec.live._proc = FakeAliveProc()
+        alive[0] = True
         rec.live.info["state"] = "running"
         rec.live.info["pid"] = "fake"
         return True, "started (faked spawn)"
 
     def _fake_stop(*, timeout=5.0):  # noqa: ARG001
-        rec.live._proc = None
+        alive[0] = False
         rec.live.info["state"] = "stopped"
         rec.live.info["pid"] = ""
         return True, "stopped (faked)"
@@ -5466,9 +5470,10 @@ async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
         "import sys; t = sys.stdin.read();"
         f" sys.stdout.write({marker!r} + (' quick' if 'quick' in t else ' NO_TRANSCRIPT'))"
     )
-    rec.config_dir.joinpath("summarizer.json").write_text(
-        json.dumps({"source": "command", "command": summary_cmd}), encoding="utf-8"
-    )
+    # Through the route the Settings card saves with, not by writing the file.
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=10.0) as client:
+        r = await client.put("/api/summarize/config", json={"source": "command", "command": summary_cmd})
+        assert r.status_code == 200, r.text
 
     # Capture: one real /tap recording into the current session.
     await stream_wav_via_tap(
