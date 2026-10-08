@@ -756,6 +756,11 @@ setSessionLabelRepaint(() => { refresh(); });
 
 // Expose a screenshot/automation hook (parity with the prototype's gotoView).
 /** @type {any} */ (window).gotoView = gotoView;
+// Boot is over: every module, template and component the dashboard loads arrived
+// in the awaits above, and nothing is imported after this point. Marked on the
+// page so automation that must not act mid-boot can wait on it (the e2e suite
+// signs a tab out only once its imports are in, or the IMPORTS fail, not the poll).
+document.documentElement.dataset.booted = "";
 
 let _catalogLoaded = false;
 (async () => {

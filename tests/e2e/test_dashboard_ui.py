@@ -8230,31 +8230,17 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
 
             traffic: list[str] = []
             page.on("response", lambda r: traffic.append(f"{r.status} {r.url}"))
-            modules = lambda: len([line for line in traffic if "/web/js/" in line])  # noqa: E731
 
             await page.goto(base + await _mint_login_link(base, password), wait_until="domcontentloaded")
             await page.wait_for_selector("#tapsRailBody", timeout=10000)
 
             # Let the module graph finish arriving before killing the session. The
-            # dashboard imports views and components lazily, so invalidating mid-boot
-            # fails those dynamic imports rather than the poll — a different (and
+            # dashboard imports its views and components during boot, so invalidating
+            # mid-boot fails those imports rather than the poll: a different (and
             # much louder) failure than the one under test, and not one an operator
-            # meets, their tab having been open for minutes. Quiescence is measured
-            # on MODULE fetches specifically: /api/state never goes quiet, that being
-            # the point of it.
-            settled, stable = -1, 0
-            for _ in range(40):
-                # THREE consecutive stable readings, not one: a single 0.5 s gap
-                # mid-boot is a pause, not an end, and on a loaded runner declaring
-                # it settled lands a late import 401 after the store is gone — which
-                # is a flake, and a flake is a bug to fix at the source.
-                stable = stable + 1 if modules() == settled else 0
-                if stable == 3:
-                    break
-                settled = modules()
-                await asyncio.sleep(0.5)
-            else:
-                raise AssertionError(f"the dashboard never finished importing: {traffic[-5:]}")
+            # meets, their tab having been open for minutes. Boot marks
+            # `<html data-booted>` once every import is in, and nothing loads later.
+            await page.locator("html[data-booted]").wait_for(state="attached", timeout=10000)
 
             # Signed in and polling: #errbar is for real trouble, so it must be
             # empty here or its appearance later would say nothing.
