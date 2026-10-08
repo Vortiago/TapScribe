@@ -123,10 +123,12 @@ def test_an_unspent_link_expires_even_when_the_sweep_never_runs():
 
 def test_an_unknown_token_is_refused():
     links, _ = store()
-    links.mint()
+    token = links.mint()
 
     assert links.spend("nope") is None
     assert links.spend("") is None
+    # Refused, not broken: the real link minted beside them still spends.
+    assert links.validate(links.spend(token))
 
 
 def test_validate_refuses_a_cookie_this_store_never_issued():
