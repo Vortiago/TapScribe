@@ -94,12 +94,14 @@ def tapscribe_gate_recorder(
 
 
 @pytest.fixture
-def gate_client(tapscribe_gate_recorder: Recorder) -> Iterator[TestClient]:
-    app.dependency_overrides[get_recorder] = lambda: tapscribe_gate_recorder
-    app.state.recorder = tapscribe_gate_recorder
+def gate_client(tapscribe_gate_recorder: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # Both through monkeypatch, so the global app gets its own state back even
+    # when the test fails: a dependency override or a recorder left on `app`
+    # would leak into whichever test touches the app next.
+    monkeypatch.setitem(app.dependency_overrides, get_recorder, lambda: tapscribe_gate_recorder)
+    monkeypatch.setattr(app.state, "recorder", tapscribe_gate_recorder, raising=False)
     with TestClient(app) as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 @dataclass
@@ -155,11 +157,13 @@ def _received_len(fw: FakeWlkThread) -> int:
     return sum(len(chunk) for chunk in fw.received)
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("faster_whisper") is None,
+    reason="faster_whisper not installed — install with `pip install -e .[whisper-cpu]`",
+)
 def test_tapscribe_gate_forwards_real_speech_and_drops_silence_end_to_end(
     gate_client: TestClient, fake_wlk: FakeWlkThread, relay_ledger: RelayLedger
 ):
-    if importlib.util.find_spec("faster_whisper") is None:
-        pytest.skip("faster_whisper not installed — install with `pip install -e .[whisper-cpu]`")
 
     frames, sent = _bracketed_frames()
     with gate_client.websocket_connect("/tap?identity=alice&name=Alice") as ws:
