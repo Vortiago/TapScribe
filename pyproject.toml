@@ -130,9 +130,9 @@ Issues = "https://github.com/Vortiago/TapScribe/issues"
 # Silicon once already; `test_pyproject_whisper_mlx_admits_a_real_release`
 # pins it).
 whisper-live = ["whisperlivekit>=0.1"]
-# `av<19`: faster-whisper 1.2.1 calls `av.open(..., metadata_errors=)`, and
+# `av<20`: faster-whisper 1.2.1 calls `av.open(..., metadata_errors=)`, and
 # PyAV 19 removes that argument, so every transcribe fails with a TypeError.
-whisper-cpu = ["faster-whisper>=1.0,<2", "av<19"]
+whisper-cpu = ["faster-whisper>=1.0,<2", "av<20"]
 whisper-mlx = ["mlx-whisper>=0.4,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 # --- Voxtral (Mistral) ------------------------------------------------------
