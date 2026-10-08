@@ -3686,19 +3686,18 @@ async def test_renderlist_holds_focused_row_and_lands_after_blur(running_recorde
                 json.dumps({"label": "renamed elsewhere"}), encoding="utf-8"
             )
 
-            # CONTROL: wait until the SERVER is actually serving the new label, so
-            # the hold assertion below cannot pass vacuously because nothing changed.
-            await page.wait_for_function(
-                """async (sid) => {
-                    const r = await fetch('/api/state', { cache: 'no-store' });
-                    if (!r.ok) return false;
-                    const j = await r.json();
-                    const s = (j.sessions || []).find((x) => x.session === sid);
-                    return !!s && (s.session_meta || {}).label === 'renamed elsewhere';
-                }""",
-                arg=sid,
-                timeout=10000,
+            # CONTROL: the SERVER is serving the new label, so the hold assertion
+            # below cannot pass vacuously because nothing changed. One read, not a
+            # wait: the sidecar is on disk before this line, and /api/state builds
+            # from disk. (This used to be an `async` predicate to wait_for_function,
+            # which Playwright takes as truthy at once — a control that never ran.)
+            async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
+                served = (await client.get("/api/state")).json()
+            meta = (
+                next((x for x in served.get("sessions", []) if x["session"] == sid), {}).get("session_meta")
+                or {}
             )
+            assert meta.get("label") == "renamed elsewhere", meta
 
             # Polls that carry the new label must now cross with the row NOT
             # updated — the label cell is written by fillRow, which the seam holds
@@ -7987,16 +7986,20 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             # setting, which is what an NDI bridge (#54) would need. It does not
             # retro-fit the OPEN tap: the Roster stamped its mode at open, and
             # diarization is a property of the recording.
-            await page.click(
-                '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="multi"]'
-            )
-            await page.wait_for_function(
-                """async () => {
-                  const j = await (await fetch('/api/state')).json();
-                  return (j.active || []).some((a) => a.identity === 'mic-alice' && a.mode === 'multi');
-                }""",
-                timeout=8000,
-            )
+            # The override's PUT answering is the event that it is stored. (This
+            # used to be an `async` predicate to wait_for_function, which Playwright
+            # takes as truthy at once, so it never checked anything.)
+            async with page.expect_response(
+                lambda r: r.request.method == "PUT" and r.url.endswith("/api/tap-mode"), timeout=8000
+            ) as overridden:
+                await page.click(
+                    '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="multi"]'
+                )
+            assert (await overridden.value).ok, "the tap-mode override was refused"
+            state = await page.evaluate("async () => (await fetch('/api/state')).json()")
+            assert any(
+                a["identity"] == "mic-alice" and a["mode"] == "multi" for a in state.get("active", [])
+            ), state.get("active")
             await page.click(
                 '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="single"]'
             )

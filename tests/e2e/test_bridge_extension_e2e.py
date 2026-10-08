@@ -517,6 +517,21 @@ async def frames_flowing(server: FakeTapServer, identity: str) -> TapConnection:
     return conn
 
 
+#: Mirrors chrome.storage.local into `window.__storage` in an extension page,
+#: kept current by `chrome.storage.onChanged`. `wait_for_function` needs a SYNC
+#: predicate: an `async` one returns a Promise, which Playwright takes as truthy
+#: at once, so a wait written that way never waits. The mirror makes "the bridge
+#: wrote X to storage" a plain read that the storage event keeps fresh.
+_MIRROR_STORAGE_JS = """async () => {
+  if (window.__storage) return;
+  window.__storage = await chrome.storage.local.get(null);
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    for (const [key, { newValue }] of Object.entries(changes)) window.__storage[key] = newValue;
+  });
+}"""
+
+
 def _capture_console(page) -> list[str]:
     """Collect the page's console messages for failure diagnosis.
 
@@ -596,10 +611,14 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
         # Wait for the post-disconnect publishStatus() to write the
         # cleared channel list to storage. If cleanupAllTaps iterated
         # `taps` alone, Lee's channel would remain.
+        # A SYNC predicate over a storage mirror: an `async` one returns a Promise,
+        # which Playwright takes as truthy at once, so this wait used to check
+        # nothing. `_MIRROR_STORAGE_JS` keeps the mirror fresh from onChanged.
+        await popup.evaluate(_MIRROR_STORAGE_JS)
         await popup.wait_for_function(
             """
-            async () => {
-              const { bridgeStatus } = await chrome.storage.local.get(['bridgeStatus']);
+            () => {
+              const bridgeStatus = window.__storage.bridgeStatus;
               if (!bridgeStatus) return false;
               const ids = (bridgeStatus.channels || []).map(c => c.identity);
               return !ids.includes('listener-id') && !ids.includes('speaker-id');
