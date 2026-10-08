@@ -3,20 +3,20 @@
 `LiveChannel` starts `whisperlivekit-server` in a process group of its own, which
 also puts it out of the macOS Bundle tray's reach (the tray reaps by killing ITS
 group). `tapscribe.live_guard` sits in the server's group and ends it when the
-Recorder is gone. These run real processes: a stand-in "server" that sleeps, and
+Recorder is gone. These run real processes: a stand-in "server" that waits, and
 for the headline case a stand-in Recorder that is SIGKILLed the way an OOM kill
-or a Force Quit would end the real one.
+or a Force Quit would end the real one. Every wait is on a real event (a process's
+exit notice, a pipe turning readable), never a condition polled against a clock.
 """
 
 from __future__ import annotations
 
 import os
+import select
 import selectors
 import signal
 import subprocess
 import sys
-import time
-from collections.abc import Callable
 
 import pytest
 
@@ -24,41 +24,75 @@ from tapscribe.live import build_live_guard_cmd, spawn_live_guard
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
 
-SLEEPER = [sys.executable, "-c", "import time; time.sleep(120)"]
+#: Blocks until a signal ends it. No timer: these processes end when a test says so.
+PAUSER = [sys.executable, "-c", "import signal; signal.pause()"]
 
 #: A Recorder in miniature: it starts a server the way `LiveChannel.start` does
 #: (its own process group, no stdin), guards it, reports both pids, and waits.
 STAND_IN_RECORDER = f"""
-import subprocess, sys, time
+import signal, subprocess
 from tapscribe.live import spawn_live_guard
-server = subprocess.Popen({SLEEPER!r}, process_group=0, stdin=subprocess.DEVNULL)
+server = subprocess.Popen({PAUSER!r}, process_group=0, stdin=subprocess.DEVNULL)
 guard = spawn_live_guard(server)
 print(server.pid, guard.pid if guard else 0, flush=True)
-time.sleep(120)
+signal.pause()
 """
 
-
-def _running(pid: int) -> bool:
-    """Alive and not a zombie. A process whose parent died is reaped by whoever
-    adopts it, and inside a container that can be nobody, so an ENDED process can
-    linger as a zombie that `os.kill(pid, 0)` still finds."""
-    stat = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
-    ).stdout.strip()
-    return bool(stat) and not stat.startswith("Z")
+#: How long one exit may take before the test fails instead of hanging. It bounds a
+#: single wait on the kernel's exit notification, not a poll: the guard looks once a
+#: second (`live_guard.POLL_S`) and gives a server `TERM_GRACE_S` to honour SIGTERM.
+EXIT_BUDGET_S = 15.0
 
 
-def _eventually(predicate: Callable[[], bool], timeout: float = 15.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.1)
-    return predicate()
+class _ExitWatch:
+    """The kernel's own notice that `pid` has exited: a pidfd on Linux, a kqueue
+    `NOTE_EXIT` on macOS. Both fire on exit, before anyone reaps the process, so a
+    zombie that nobody reaps (a re-parented process inside a container) counts as
+    gone. Opened while the process is known to be alive, so a reused pid cannot
+    answer for it later."""
+
+    def __init__(self, pid: int) -> None:
+        self._fd: int | None = None
+        self._kq: select.kqueue | None = None
+        if hasattr(os, "pidfd_open"):
+            self._fd = os.pidfd_open(pid)
+        else:
+            self._kq = select.kqueue()
+            self._kq.control(
+                [
+                    select.kevent(
+                        pid,
+                        filter=select.KQ_FILTER_PROC,
+                        flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                        fflags=select.KQ_NOTE_EXIT,
+                    )
+                ],
+                0,
+                0,
+            )
+        self._exited = False
+
+    def exited(self, timeout: float = EXIT_BUDGET_S) -> bool:
+        """Block until the exit notice arrives, or `timeout` passes without one.
+        `timeout=0` asks without waiting."""
+        if not self._exited:
+            if self._fd is not None:
+                ready, _, _ = select.select([self._fd], [], [], timeout)
+            else:
+                assert self._kq is not None
+                ready = self._kq.control(None, 1, timeout)
+            self._exited = bool(ready)
+        return self._exited
+
+    def close(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+        if self._kq is not None:
+            self._kq.close()
 
 
-def _read_pids(recorder: subprocess.Popen[str], timeout: float = 15.0) -> tuple[int, int]:
-    """The stand-in Recorder's one line, waited for with a deadline: a child that
+def _read_pids(recorder: subprocess.Popen[str], timeout: float = EXIT_BUDGET_S) -> tuple[int, int]:
+    """The stand-in Recorder's one line, waited for as a readable pipe: a child that
     hangs before printing fails the test instead of hanging the run."""
     assert recorder.stdout is not None
     with selectors.DefaultSelector() as sel:
@@ -82,44 +116,58 @@ def _kill_quietly(pid: int) -> None:
 @posix_only
 def test_the_server_dies_with_a_recorder_that_is_killed():
     recorder = subprocess.Popen([sys.executable, "-c", STAND_IN_RECORDER], stdout=subprocess.PIPE, text=True)
-    server_pid = guard_pid = 0
+    watches: dict[int, _ExitWatch] = {}
     try:
         server_pid, guard_pid = _read_pids(recorder)
         assert guard_pid, "the guard did not start"
-        assert _running(server_pid)
+        # Both are the Recorder's children, not ours, so they cannot be waited on;
+        # the exit notice is the event that can.
+        server = watches[server_pid] = _ExitWatch(server_pid)
+        guard = watches[guard_pid] = _ExitWatch(guard_pid)
+        assert not server.exited(timeout=0), "the server was gone before its Recorder"
 
         os.kill(recorder.pid, signal.SIGKILL)
-        recorder.wait(timeout=10)
+        assert recorder.wait() == -signal.SIGKILL
 
-        assert _eventually(lambda: not _running(server_pid)), "the server outlived its Recorder"
-        assert _eventually(lambda: not _running(guard_pid)), "the guard outlived its work"
+        assert server.exited(), "the server outlived its Recorder"
+        assert guard.exited(), "the guard outlived its work"
     finally:
-        _kill_quietly(recorder.pid)
-        _kill_quietly(server_pid)
-        _kill_quietly(guard_pid)
+        # Only what has not exited: a pid already gone may name someone else now.
+        for pid, watch in watches.items():
+            if not watch.exited(timeout=0):
+                _kill_quietly(pid)
+            watch.close()
+        if recorder.poll() is None:
+            _kill_quietly(recorder.pid)
+        recorder.wait()
         if recorder.stdout is not None:
             recorder.stdout.close()
-        recorder.wait(timeout=10)
 
 
 @posix_only
 def test_a_normal_stop_ends_the_guard_with_the_server():
     """`LiveChannel.stop` SIGTERMs the server's group. The guard is in it, so it
     goes with the same signal instead of lingering beside nothing."""
-    server = subprocess.Popen(SLEEPER, process_group=0, stdin=subprocess.DEVNULL)
+    server = subprocess.Popen(PAUSER, process_group=0, stdin=subprocess.DEVNULL)
     guard = spawn_live_guard(server)
+    assert guard is not None
+    server_exit, guard_exit = _ExitWatch(server.pid), _ExitWatch(guard.pid)
     try:
-        assert guard is not None
-
         os.killpg(server.pid, signal.SIGTERM)
 
-        server.wait(timeout=10)
+        assert server_exit.exited(), "the server ignored its group's SIGTERM"
+        assert server.wait() == -signal.SIGTERM
         # Ended BY that signal, not by noticing the server gone on a later poll
         # (which exits 0): the guard is in the group, so the SIGTERM is its end too.
-        assert guard.wait(timeout=10) == -signal.SIGTERM
+        assert guard_exit.exited(), "the guard outlived its group's SIGTERM"
+        assert guard.wait() == -signal.SIGTERM
     finally:
-        _kill_quietly(server.pid)
-        _kill_quietly(guard.pid if guard else 0)
+        if not server_exit.exited(timeout=0):
+            _kill_quietly(server.pid)
+        if not guard_exit.exited(timeout=0):
+            _kill_quietly(guard.pid)
+        server_exit.close()
+        guard_exit.close()
 
 
 @posix_only
@@ -132,18 +180,24 @@ def test_the_guard_leaves_when_the_server_exits_on_its_own():
         stdin=subprocess.PIPE,
     )
     guard = spawn_live_guard(server)
+    assert guard is not None
+    server_exit, guard_exit = _ExitWatch(server.pid), _ExitWatch(guard.pid)
     try:
-        assert guard is not None
-
         assert server.stdin is not None
         server.stdin.close()
-        assert server.wait(timeout=10) == 0
+        assert server_exit.exited(), "the server did not exit when its stdin closed"
+        # Reaped here, which is what the guard's next look sees as "gone".
+        assert server.wait() == 0
 
-        assert guard.wait(timeout=10) == 0
+        assert guard_exit.exited(), "the guard outlived the server it was guarding"
+        assert guard.wait() == 0
     finally:
-        if server.poll() is None:
+        if not server_exit.exited(timeout=0):
             _kill_quietly(server.pid)
-        _kill_quietly(guard.pid if guard else 0)
+        if not guard_exit.exited(timeout=0):
+            _kill_quietly(guard.pid)
+        server_exit.close()
+        guard_exit.close()
 
 
 def test_no_guard_for_a_child_that_is_not_a_real_process():
