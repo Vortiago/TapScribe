@@ -64,13 +64,14 @@ from tapscribe.session_paths import FILENAME_META_JSON, FILENAME_ROSTER_JSON
 from tapscribe.tap_mode import TAP_MODE_MULTI, TAP_MODE_SINGLE
 from tapscribe.text import parse_wav_speaker_slug
 
-from .conftest import FakeAliveProc, RunningRecorder
+from .conftest import RunningRecorder
 from .fake_transcriber import FakeTranscriber
 from .harness import (
     playwright_session,
     stream_wav_via_tap,
     streams_drained,
     synth_speech_like_wav,
+    utterance_released,
     wait_until,
     word_tokens,
 )
@@ -1546,12 +1547,10 @@ async def test_lazy_transcript_fetch_is_cached_not_per_poll(
 # 500ms poll must not clobber.
 _NEXT_VIEWS = ("capture", "recordings", "transcript", "summary", "taps", "sessions", "people", "settings")
 
+
 # > one poll period (500ms in next/main.js) so the sweep crosses at least
 # one re-render boundary. The sweep also asserts a poll actually fired during
 # this window, so a vacuous pass (polls somehow stalled) can't hide a regression.
-_NEXT_POLL_CROSS_MS = 750
-
-
 async def test_next_poll_render_does_not_clobber_open_controls(
     running_recorder: RunningRecorder,
     fake_transcriber: FakeTranscriber,
@@ -1715,18 +1714,12 @@ async def test_next_poll_render_does_not_clobber_open_controls(
                     if not took_focus:
                         continue
 
-                    polls_before = await page.evaluate("() => window.__statePolls || 0")
-                    # Cross more than one poll period with this control focused.
-                    # renderRegion must keep its node in place; a clobbering
-                    # re-render would build a fresh node (no __persistMark) and
-                    # drop focus.
-                    await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
-                    polls_after = await page.evaluate("() => window.__statePolls || 0")
-                    assert polls_after > polls_before, (
-                        f"view {view!r} control {mark}: no /api/state poll fired during the "
-                        f"{_NEXT_POLL_CROSS_MS}ms window ({polls_before} → {polls_after}); "
-                        "the sweep would pass vacuously"
-                    )
+                    # Cross a whole poll with this control focused. renderRegion
+                    # must keep its node in place; a clobbering re-render would
+                    # build a fresh node (no __persistMark) and drop focus. A
+                    # poll that never comes fails here, so the sweep cannot pass
+                    # vacuously.
+                    await _cross_polls(page)
 
                     # Same live node (JS property survives — a node minted by
                     # replaceChildren never would) AND still focused.
@@ -1903,16 +1896,20 @@ async def test_transcript_transcribe_saves_languages_first_wysiwyg(
                 timeout=10000,
             )
             await page.select_option('[data-slot="txLanguages"]', "no")
-            await page.locator('#viewRoot [data-slot="txRangeBtn"]').click()
-
             # The PUT to session-meta runs before the transcribe POST, so the
-            # override lands regardless of the transcribe outcome. Poll it.
-            async def _meta_pins_no() -> bool:
-                async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
-                    r = await client.get(f"/api/session-meta/{sid}")
-                    return r.status_code == 200 and r.json().get("languages") == ["no"]
-
-            assert await wait_until(_meta_pins_no, timeout=10.0), "transcribe did not save languages first"
+            # override lands regardless of the transcribe outcome. Its response is
+            # the event: once it has answered, the meta is on disk.
+            async with page.expect_response(
+                lambda r: r.request.method == "PUT" and f"/api/session-meta/{sid}" in r.url, timeout=10000
+            ) as saved:
+                await page.locator('#viewRoot [data-slot="txRangeBtn"]').click()
+            assert (await saved.value).ok, "transcribe did not save languages first"
+            async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
+                r = await client.get(f"/api/session-meta/{sid}")
+            assert r.status_code == 200 and r.json().get("languages") == ["no"], r.text
+            # The click also started a transcribe job. Let it finish (its release
+            # signals) so it cannot run on into the next test's teardown.
+            assert await wait_until(lambda: not rec.jobs.snapshot(), timeout=30.0), rec.jobs.snapshot()
         finally:
             await browser.close()
 
@@ -1928,8 +1925,8 @@ async def test_transcript_transcribe_saves_languages_first_wysiwyg(
 # (real report: Edge tab, climbing "DOM Nodes"/"JS event listeners", 47 s LCP).
 #
 # This guard measures the exact metrics the browser's Performance Monitor shows
-# (Nodes incl. detached, JSEventListeners) via CDP, across ~10 s of TRUE idle
-# (no taps, empty live feed). Listener growth must be ~0 (any growth = a
+# (Nodes incl. detached, JSEventListeners) via CDP, across six counted ticks of
+# TRUE idle (no taps, empty live feed). Listener growth must be ~0 (any growth = a
 # component re-attaching listeners each tick); node growth gets a benign
 # baseline but must not regress to the per-tick-churn range that the
 # live-feed ascii / spine / active-taps produced before they were sig-gated.
@@ -1968,23 +1965,18 @@ async def test_dashboard_idle_polling_does_not_churn_dom(running_recorder: Runni
             # deltas are trivially 0 and the guard passes vacuously.
             await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base, wait_until="domcontentloaded")
-            # Settle: let first-paint + the first couple of polls land.
-            await page.wait_for_timeout(2500)
+            # Settle: boot is over, and first paint plus a couple of polls landed.
+            await page.locator("html[data-booted]").wait_for(state="attached", timeout=10000)
+            await _cross_polls(page, 2)
             n0, l0 = await _perf_metrics(client)
             polls_0 = await page.evaluate("() => window.__statePolls || 0")
-            # Idle for ~10 s of wall clock. That is NOT "~20 poll cycles": this
-            # recorder is idle-and-unchanged, so ADR-0013's pacer backs off from
-            # FAST_MS=500 to SLOW_MS=2000 after IDLE_STREAK=4 and the window
-            # really contains ~5-8 ticks. The wall-clock window is deliberate
-            # (the CDP metrics are a rate measurement), but the poll floor below
-            # is what makes it non-vacuous.
-            await page.wait_for_timeout(10000)
+            # Six whole idle ticks, counted, not a wall-clock window. This recorder
+            # is idle and unchanged, so ADR-0013's pacer backs off from FAST_MS=500
+            # to SLOW_MS=2000; the old ~10 s window held ~5-8 ticks, and the churn
+            # bounds below are per that many ticks.
+            await _cross_polls(page, 6, timeout=30000)
             n1, l1 = await _perf_metrics(client)
             polls_1 = await page.evaluate("() => window.__statePolls || 0")
-            assert polls_1 >= polls_0 + 4, (
-                f"only {polls_1 - polls_0} /api/state tick(s) crossed the idle window "
-                f"({polls_0} → {polls_1}) — per-tick churn can't be measured across no ticks"
-            )
             dn, dl = n1 - n0, l1 - l0
             print(f"[idle-churn] /: dNodes={dn:+.0f}  dListeners={dl:+.0f}  polls={polls_1 - polls_0}")
             if dl > _IDLE_MAX_LISTENER_GROWTH:
@@ -2014,6 +2006,50 @@ window.fetch = (...args) => {
   const p = _fetch.apply(window, args);
   if (isState) p.then((r) => { if (r.status === 304) window.__state304s++; }).catch(() => {});
   return p;
+};
+"""
+
+
+async def _cross_polls(page, ticks: int = 1, *, timeout: int = 20000) -> None:
+    """Wait until `ticks` more dashboard polls have run to completion, render pass
+    included. Needs a script that counts poll STARTS in `window.__statePolls`
+    (`_COUNT_STATE_304S_JS`, installed before `page.goto`).
+
+    The poll loop runs one tick at a time (`await tick()`, then the paced sleep),
+    so a poll starting means the tick before it has finished. `ticks + 1` more
+    starts therefore mean `ticks` complete ticks, all of which began after this
+    call. A poll that crosses a server-side change made before the call
+    therefore carries that change. These are event waits on the page's own
+    traffic, never a fixed sleep."""
+    start = await page.evaluate("() => window.__statePolls")
+    assert start is not None, "install _COUNT_STATE_304S_JS before page.goto"
+    await page.wait_for_function(
+        "(want) => window.__statePolls >= want", arg=start + ticks + 1, timeout=timeout
+    )
+
+
+#: Counts /api/live/log bodies the dashboard has finished HANDLING. The JSON is
+#: wrapped so the count is bumped from a task queued once the body resolves,
+#: which runs after the page's own continuation (renderLogInto) has finished.
+#: Keyed by the fetch's start sequence, so a test can ask for "a log fetch that
+#: started after X has been handled".
+_COUNT_LIVE_LOG_HANDLED_JS = """
+window.__logStarted = 0;
+window.__logHandled = 0;
+const _logFetch = window.fetch;
+window.fetch = (...args) => {
+  const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+  const p = _logFetch.apply(window, args);
+  if (!u.includes('/api/live/log')) return p;
+  const seq = ++window.__logStarted;
+  return p.then((r) => {
+    const json = r.json.bind(r);
+    r.json = () => json().then((v) => {
+      setTimeout(() => { window.__logHandled = Math.max(window.__logHandled, seq); }, 0);
+      return v;
+    });
+    return r;
+  });
 };
 """
 
@@ -2660,21 +2696,22 @@ async def test_dashboard_live_channel_start_stop(
     rec = rr.recorder
     fake_wlk = rr.fake_wlk
 
-    # The fixture pre-marks the channel alive; begin from a clean STOPPED state.
-    rec.live._proc = None
-    rec.live.info["state"] = "stopped"
+    # The channel's whole public surface for this criterion is `start`, `stop`,
+    # `running()` and its `info`; the fakes stand in for a spawned child through
+    # those alone (config.port stays aimed at the fake WlK, so the relay
+    # connects). The fixture pre-marks the channel alive; begin STOPPED.
+    alive = [False]
+    monkeypatch.setattr(rec.live, "running", lambda: alive[0])
+    monkeypatch.setitem(rec.live.info, "state", "stopped")
 
     def _fake_start(*, model=None, language=None):  # noqa: ARG001
-        # Stand in for a fully-started child: alive proc (`FakeAliveProc` —
-        # poll() is None) + running state, config.port still aimed at the fake
-        # WlK so the relay connects.
-        rec.live._proc = FakeAliveProc()
+        alive[0] = True
         rec.live.info["state"] = "running"
         rec.live.info["pid"] = "fake"
         return True, "started (faked spawn)"
 
     def _fake_stop(*, timeout=5.0):  # noqa: ARG001
-        rec.live._proc = None
+        alive[0] = False
         rec.live.info["state"] = "stopped"
         rec.live.info["pid"] = ""
         return True, "stopped (faked)"
@@ -2772,10 +2809,11 @@ async def test_dashboard_live_channel_start_stop(
                 wav_path=synth_speech_like_wav(tmp_path / "bob.wav", seconds=0.5, freq_hz=330.0),
                 utterance_id="utt-live-off",
             )
-            assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
-            assert await wait_until(
-                lambda: len(list(rec.session_dir.glob("*.wav"))) == before + 1, timeout=5.0
-            ), "recording must continue with the live channel stopped"
+            # Released means the WAV is closed and on disk (see `utterance_released`).
+            assert await wait_until(lambda: utterance_released(rec, "utt-live-off"), timeout=5.0)
+            assert len(list(rec.session_dir.glob("*.wav"))) == before + 1, (
+                "recording must continue with the live channel stopped"
+            )
         finally:
             await browser.close()
 
@@ -2825,7 +2863,7 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
                 document.querySelector('{_MERGED_FIRST_LINE}').__guardMark = 1;
             }}""")
 
-            # Five job ticks, each crossing at least one 500ms poll. Direct
+            # Five job ticks, each one rendered before the next is written. Direct
             # dict write — the same field /api/state reads via jobs.snapshot();
             # going through the tracker's asyncio.Lock from this loop would
             # race the server loop's.
@@ -2839,7 +2877,12 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
                     current_file=f"f{n}.wav",
                     model="tiny.en",
                 )
-                await page.wait_for_timeout(600)
+                # The job bar showing this tick is the event: its poll has rendered.
+                await page.wait_for_function(
+                    """(want) => document.querySelector('#viewRoot [data-slot="jobCount"]')?.textContent === want""",
+                    arg=f"{n} / 9",
+                    timeout=10000,
+                )
 
             # Non-vacuous: the job bar must have rendered the final tick…
             await page.wait_for_function(
@@ -2997,6 +3040,7 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
 
             # Focus the seeded session and open its Recordings stage.
@@ -3093,6 +3137,7 @@ async def test_next_sessions_list_survives_a_sibling_sessions_per_tick_change(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/#sessions", wait_until="domcontentloaded")
 
             for sid in (sid_untouched, sid_moving):
@@ -3241,8 +3286,13 @@ async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
                         break
                     r = await c.put(f"/api/session-meta/{sid}", json={"label": f"nudge{i}"})
                     assert r.status_code == 200, r.text
-                    await page.wait_for_timeout(250)
-            assert retried.is_set(), "the paced retry never fired — nothing was staged"
+                    # One nudge is one render: wait for the label to be on screen
+                    # (that render is when a paced retry can fire), not 250 ms.
+                    await page.wait_for_function(
+                        "(label) => document.body.innerText.includes(label)", arg=f"nudge{i}", timeout=10000
+                    )
+            # The last render's retry, if it fired, is a request the route has yet to see.
+            await asyncio.wait_for(retried.wait(), timeout=10.0)
             # The retry must have LANDED, not merely been issued, before switching
             # back — gated on the picker showing the third track.
             await page.wait_for_function(
@@ -3253,17 +3303,19 @@ async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
 
             # Back to Recordings, whose watcher missed that land. The third row must
             # be there: the swap from held rows to the stamp's own rows has to cross
-            # the render gate on its own. `wait_until` rather than
-            # `wait_for_function` so a failure reports the rows actually on screen.
+            # the render gate on its own. A timeout is caught so the failure below
+            # can report the rows actually on screen.
             await page.evaluate("() => window.gotoView('recordings')")
-            got_third = await wait_until(
-                lambda: page.evaluate(
+            try:
+                await page.wait_for_function(
                     """(name) => !!document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`)""",
-                    third,
-                ),
-                timeout=15.0,
-                interval=0.25,
-            )
+                    arg=third,
+                    timeout=15000,
+                )
+                got_third = True
+            except Exception:
+                # Playwright's TimeoutError; the assertion below names the rows.
+                got_third = False
             rows = await page.evaluate(
                 """() => Array.from(document.querySelectorAll('#viewRoot .wavrow[data-wav]'))
                         .map((r) => r.dataset.wav)"""
@@ -3316,6 +3368,7 @@ async def test_next_voices_sig_flip_does_not_blank_the_other_taps_rows(running_r
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
             await page.wait_for_function(
                 """(sid) => {
@@ -3386,6 +3439,7 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
 
             await page.wait_for_function(
@@ -3613,6 +3667,7 @@ async def test_renderlist_holds_focused_row_and_lands_after_blur(running_recorde
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/#sessions", wait_until="domcontentloaded")
 
             await page.wait_for_selector(row_sel, timeout=15000)
@@ -3635,23 +3690,23 @@ async def test_renderlist_holds_focused_row_and_lands_after_blur(running_recorde
                 json.dumps({"label": "renamed elsewhere"}), encoding="utf-8"
             )
 
-            # CONTROL: wait until the SERVER is actually serving the new label, so
-            # the hold assertion below cannot pass vacuously because nothing changed.
-            await page.wait_for_function(
-                """async (sid) => {
-                    const r = await fetch('/api/state', { cache: 'no-store' });
-                    if (!r.ok) return false;
-                    const j = await r.json();
-                    const s = (j.sessions || []).find((x) => x.session === sid);
-                    return !!s && (s.session_meta || {}).label === 'renamed elsewhere';
-                }""",
-                arg=sid,
-                timeout=10000,
+            # CONTROL: the SERVER is serving the new label, so the hold assertion
+            # below cannot pass vacuously because nothing changed. One read, not a
+            # wait: the sidecar is on disk before this line, and /api/state builds
+            # from disk. (This used to be an `async` predicate to wait_for_function,
+            # which Playwright takes as truthy at once — a control that never ran.)
+            async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
+                served = (await client.get("/api/state")).json()
+            meta = (
+                next((x for x in served.get("sessions", []) if x["session"] == sid), {}).get("session_meta")
+                or {}
             )
+            assert meta.get("label") == "renamed elsewhere", meta
 
-            # Several polls must now cross with the row NOT updated — the label cell
-            # is written by fillRow, which the seam holds for a focused row.
-            await page.wait_for_timeout(2500)
+            # Polls that carry the new label must now cross with the row NOT
+            # updated — the label cell is written by fillRow, which the seam holds
+            # for a focused row.
+            await _cross_polls(page, 2)
             label_held = await page.evaluate(
                 """(sel) => {
                     const el = document.querySelector(sel + ' [data-slot="label"]');
@@ -3707,6 +3762,7 @@ async def test_renderlist_keeps_focused_row_that_left_the_list(running_recorder:
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/#sessions", wait_until="domcontentloaded")
 
             await page.wait_for_selector(row_sel, timeout=15000)
@@ -3773,6 +3829,7 @@ async def test_renderlist_selection_hold_defers_reconcile_without_advancing_sig(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
             await page.wait_for_function(
                 """(sid) => {
@@ -3802,7 +3859,7 @@ async def test_renderlist_selection_hold_defers_reconcile_without_advancing_sig(
             # A third WAV on disk → a new files_sig → the list wants to reconcile.
             extra = f"{sid}_spk9_id9_0000aa99.wav"
             synth_speech_like_wav(session_dir / extra, seconds=0.4, freq_hz=300.0)
-            await page.wait_for_timeout(3000)  # crosses several polls
+            await _cross_polls(page, 2)  # polls that see the new files_sig, held
 
             still = await page.evaluate("() => window.getSelection().toString()")
             assert still == selected, (
@@ -3956,6 +4013,7 @@ async def test_next_retranscribe_does_not_blank_merged_pane(running_recorder: Ru
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
             await page.wait_for_function(
                 """(sid) => {
@@ -4212,6 +4270,7 @@ async def test_live_log_dialog_refresh_preserves_text_selection(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_LIVE_LOG_HANDLED_JS)
             await page.goto(rr.base_url + "/#capture", wait_until="domcontentloaded")
 
             # The "view logs" button renders once live_log is non-empty.
@@ -4240,7 +4299,12 @@ async def test_live_log_dialog_refresh_preserves_text_selection(
             # A fresh server-side line means the next 1s refresh would REWRITE
             # the <pre> — exactly what must not happen while text is selected.
             rr.recorder.live.log.append("INFO:whisperlivekit:line landed while selecting")
-            await page.wait_for_timeout(2500)  # crosses >2 dialog refresh ticks
+            # Two dialog refreshes that fetched the new line have been handled
+            # (renderLogInto ran and held), counted on the page, not slept for.
+            started = await page.evaluate("() => window.__logStarted")
+            await page.wait_for_function(
+                "(want) => window.__logHandled >= want", arg=started + 2, timeout=15000
+            )
 
             still = await page.evaluate("() => window.getSelection().toString()")
             assert still == selected, (
@@ -4350,6 +4414,7 @@ async def test_recordings_list_virtualized_rows_survive_select_and_poll(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(rr.base_url + "/#recordings", wait_until="domcontentloaded")
             await page.wait_for_function(
                 f"() => document.querySelectorAll('#viewRoot .wavlist .wavrow').length >= {n_wavs}",
@@ -4389,7 +4454,7 @@ async def test_recordings_list_virtualized_rows_survive_select_and_poll(
                 arg=target,
                 timeout=6000,
             )
-            await asyncio.sleep(1.2)  # cross at least one 500ms /api/state poll
+            await _cross_polls(page)  # a whole /api/state tick after the select
             stamped = await page.evaluate(
                 """(want) => {
                   const r = document.querySelector(`#viewRoot .wavlist .wavrow[data-wav="${want}"]`);
@@ -4431,6 +4496,7 @@ async def test_recordings_waveform_renders_real_canvas_not_mock(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(rr.base_url + "/#recordings", wait_until="domcontentloaded")
             await page.wait_for_selector("#viewRoot .wavlist .wavrow", timeout=8000)
 
@@ -4485,6 +4551,7 @@ async def test_recordings_name_selects_waveform_rest_of_row_toggles_expand(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(rr.base_url + "/#recordings", wait_until="domcontentloaded")
             await page.wait_for_function(
                 "() => document.querySelectorAll('#viewRoot .wavlist .wavrow').length >= 2",
@@ -5403,9 +5470,10 @@ async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
         "import sys; t = sys.stdin.read();"
         f" sys.stdout.write({marker!r} + (' quick' if 'quick' in t else ' NO_TRANSCRIPT'))"
     )
-    rec.config_dir.joinpath("summarizer.json").write_text(
-        json.dumps({"source": "command", "command": summary_cmd}), encoding="utf-8"
-    )
+    # Through the route the Settings card saves with, not by writing the file.
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=10.0) as client:
+        r = await client.put("/api/summarize/config", json={"source": "command", "command": summary_cmd})
+        assert r.status_code == 200, r.text
 
     # Capture: one real /tap recording into the current session.
     await stream_wav_via_tap(
@@ -5429,7 +5497,7 @@ async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
             assert body.get("state") != "failed", f"pipeline failed: {body}"
             return body.get("state") == "done"
 
-        assert await wait_until(_pipeline_done, timeout=60.0, interval=0.25), "pipeline did not finish"
+        assert await wait_until(_pipeline_done, timeout=60.0), "pipeline did not finish"
 
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -6365,20 +6433,24 @@ async def test_people_view_registry_auto_binds_renames_merges_detaches(
 
             # 2. Rename Alice's row → persists to people.json + propagates.
             alice_row = page.locator(row, has=page.locator('[data-slot="tok"]', has_text="Alice"))
-            await alice_row.locator('[data-slot="name"]').fill("Alice Anderson")
-            await alice_row.locator('[data-slot="name"]').blur()
+            # The saver's PUT answering is the event that the rename is stored.
+            async with page.expect_response(
+                lambda r: (
+                    r.request.method == "PUT"
+                    and "/api/people/" in r.url
+                    and "Alice Anderson" in (r.request.post_data or "")
+                ),
+                timeout=10000,
+            ) as saved:
+                await alice_row.locator('[data-slot="name"]').fill("Alice Anderson")
+                await alice_row.locator('[data-slot="name"]').blur()
+            assert (await saved.value).ok, "the rename PUT was refused"
             async with httpx.AsyncClient(base_url=base) as client:
-                people = []
-                for _ in range(40):
-                    people = (await client.get("/api/people")).json()["people"]
-                    if any(
-                        p["name"] == "Alice Anderson" and p["named"] and p["identities"] == ["Alice"]
-                        for p in people
-                    ):
-                        break
-                    await asyncio.sleep(0.25)
-                else:
-                    raise AssertionError(f"rename did not persist to people.json: {people}")
+                people = (await client.get("/api/people")).json()["people"]
+                assert any(
+                    p["name"] == "Alice Anderson" and p["named"] and p["identities"] == ["Alice"]
+                    for p in people
+                ), f"rename did not persist to people.json: {people}"
                 state = (await client.get("/api/state")).json()
             sess = next(s for s in state["sessions"] if s["session"] == s_alice)
             assert sess["names"]["Alice"] == "Alice Anderson", sess.get("names")
@@ -6617,6 +6689,7 @@ async def test_sessions_view_inline_label_rename_persists(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/#sessions", wait_until="domcontentloaded")
             await page.locator(row).wait_for(state="visible", timeout=10000)
 
@@ -7105,6 +7178,7 @@ async def test_next_player_is_shell_owned_and_survives_a_stage_switch(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base + "/#recordings", wait_until="domcontentloaded")
             await _focus_session(page, sid, stage="recordings")
 
@@ -7147,7 +7221,7 @@ async def test_next_player_is_shell_owned_and_survives_a_stage_switch(
             # re-mounted — which is what would pause a per-view player.
             for stage in ("transcript", "recordings"):
                 await _goto_stage(page, stage)
-                await asyncio.sleep(1.2)
+                await _cross_polls(page)
 
             assert await page.evaluate(
                 """() => document.querySelector('[data-slot="player"]')?.__guardMark === 1"""
@@ -7753,9 +7827,17 @@ async def test_next_playhead_still_works_after_a_stage_walk(running_recorder: Ru
             await row.locator('[data-slot="play"]').click()
             await page.wait_for_selector('[data-slot="playhead"]:not([hidden])', timeout=15000)
 
-            # Walk away and back while it keeps playing.
+            # Walk away and back while it keeps playing. Away, the shell's player
+            # must actually advance: that is the event to wait for, not a second.
             await _goto_stage(page, "transcript")
-            await asyncio.sleep(1.0)
+            left_at = await page.evaluate(
+                "() => document.querySelector('[data-slot=\"player\"]').currentTime"
+            )
+            await page.wait_for_function(
+                """(t) => document.querySelector('[data-slot="player"]').currentTime > t + 0.25""",
+                arg=left_at,
+                timeout=10000,
+            )
             await _goto_stage(page, "recordings")
 
             # The playhead must be LIVE, not merely left visible with a stale
@@ -7909,16 +7991,20 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             # setting, which is what an NDI bridge (#54) would need. It does not
             # retro-fit the OPEN tap: the Roster stamped its mode at open, and
             # diarization is a property of the recording.
-            await page.click(
-                '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="multi"]'
-            )
-            await page.wait_for_function(
-                """async () => {
-                  const j = await (await fetch('/api/state')).json();
-                  return (j.active || []).some((a) => a.identity === 'mic-alice' && a.mode === 'multi');
-                }""",
-                timeout=8000,
-            )
+            # The override's PUT answering is the event that it is stored. (This
+            # used to be an `async` predicate to wait_for_function, which Playwright
+            # takes as truthy at once, so it never checked anything.)
+            async with page.expect_response(
+                lambda r: r.request.method == "PUT" and r.url.endswith("/api/tap-mode"), timeout=8000
+            ) as overridden:
+                await page.click(
+                    '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="multi"]'
+                )
+            assert (await overridden.value).ok, "the tap-mode override was refused"
+            state = await page.evaluate("async () => (await fetch('/api/state')).json()")
+            assert any(
+                a["identity"] == "mic-alice" and a["mode"] == "multi" for a in state.get("active", [])
+            ), state.get("active")
             await page.click(
                 '#viewRoot [data-slot="modeList"] [data-identity="mic-alice"] [data-mode="single"]'
             )
@@ -8007,6 +8093,14 @@ async def test_diarized_voices_map_to_people_and_rename_the_transcript(
             await _shot(page, "voices-05-people.png")
         finally:
             await browser.close()
+
+
+def _sign_every_session_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a Recorder restart does to a session, without restarting the server
+    the browser is attached to: the store is replaced, so every cookie it issued
+    is now unknown. Through `monkeypatch`, so the global app gets the lifespan's
+    store back when the test ends."""
+    monkeypatch.setattr(_app.state, "login_links", LoginLinks())
 
 
 async def _mint_login_link(base: str, password: str) -> str:
@@ -8190,6 +8284,7 @@ async def test_a_link_signed_in_dashboard_can_still_write(
 
 async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
     running_recorder_auth_on: RunningRecorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The half of ADR-0023 that only a browser can show: what a signed-in tab
     does once its session stops existing.
@@ -8221,43 +8316,27 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
 
             traffic: list[str] = []
             page.on("response", lambda r: traffic.append(f"{r.status} {r.url}"))
-            modules = lambda: len([line for line in traffic if "/web/js/" in line])  # noqa: E731
 
             await page.goto(base + await _mint_login_link(base, password), wait_until="domcontentloaded")
             await page.wait_for_selector("#tapsRailBody", timeout=10000)
 
             # Let the module graph finish arriving before killing the session. The
-            # dashboard imports views and components lazily, so invalidating mid-boot
-            # fails those dynamic imports rather than the poll — a different (and
+            # dashboard imports its views and components during boot, so invalidating
+            # mid-boot fails those imports rather than the poll: a different (and
             # much louder) failure than the one under test, and not one an operator
-            # meets, their tab having been open for minutes. Quiescence is measured
-            # on MODULE fetches specifically: /api/state never goes quiet, that being
-            # the point of it.
-            settled, stable = -1, 0
-            for _ in range(40):
-                # THREE consecutive stable readings, not one: a single 0.5 s gap
-                # mid-boot is a pause, not an end, and on a loaded runner declaring
-                # it settled lands a late import 401 after the store is gone — which
-                # is a flake, and a flake is a bug to fix at the source.
-                stable = stable + 1 if modules() == settled else 0
-                if stable == 3:
-                    break
-                settled = modules()
-                await asyncio.sleep(0.5)
-            else:
-                raise AssertionError(f"the dashboard never finished importing: {traffic[-5:]}")
+            # meets, their tab having been open for minutes. Boot marks
+            # `<html data-booted>` once every import is in, and nothing loads later.
+            await page.locator("html[data-booted]").wait_for(state="attached", timeout=10000)
 
             # Signed in and polling: #errbar is for real trouble, so it must be
             # empty here or its appearance later would say nothing.
             errbar = page.locator("#errbar")
             assert await errbar.is_hidden(), await errbar.inner_text()
 
-            # What a Recorder restart does to a session, without restarting the
-            # server the browser is attached to: the store is replaced, so every
-            # cookie it issued is now unknown. Same observable state, and the page
-            # keeps its connection, so the POLL's own answer is what is under test
-            # rather than a dropped socket.
-            _app.state.login_links = LoginLinks()
+            # A Recorder restart's effect on the session. Same observable state, and
+            # the page keeps its connection, so the POLL's own answer is what is
+            # under test rather than a dropped socket.
+            _sign_every_session_out(monkeypatch)
 
             # The cue arrives on a poll pass, not on a click.
             try:
@@ -8298,6 +8377,7 @@ async def test_a_dead_session_cookie_tells_the_operator_instead_of_going_quiet(
 
 async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
     running_recorder_auth_on: RunningRecorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The rest of a signed-out spell, beyond the cue.
 
@@ -8334,7 +8414,7 @@ async def test_a_signed_out_tab_is_never_challenged_and_recovers_whole(
             await page.locator(f'#viewRoot [data-wav="{second}"]').wait_for(state="visible", timeout=15000)
 
             # What a Recorder restart does to a session (see the test above).
-            _app.state.login_links = LoginLinks()
+            _sign_every_session_out(monkeypatch)
             await page.wait_for_function(
                 """() => {
                     const el = document.querySelector('#errbar');

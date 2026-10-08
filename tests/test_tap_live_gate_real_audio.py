@@ -39,13 +39,14 @@ same lane as `tests/e2e/test_pipeline_e2e.py::test_pipeline_with_real_whisper`.
 from __future__ import annotations
 
 import importlib.util
-import time
 import wave
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pytest
+from change_signal import CHANGES  # type: ignore[import-not-found]
 from conftest import (
     FakeWlkThread,  # type: ignore[import-not-found]  # tests/ is on sys.path — resolves tests/conftest.py
     build_tap_recorder,
@@ -54,7 +55,9 @@ from fastapi.testclient import TestClient
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
+from tapscribe.live_relay import WlKRelay
 from tapscribe.recorder import Recorder
+from tapscribe.tap_fan_out import TapFanOut
 
 pytestmark = pytest.mark.real_audio
 
@@ -91,56 +94,86 @@ def tapscribe_gate_recorder(
 
 
 @pytest.fixture
-def gate_client(tapscribe_gate_recorder: Recorder) -> Iterator[TestClient]:
-    app.dependency_overrides[get_recorder] = lambda: tapscribe_gate_recorder
-    app.state.recorder = tapscribe_gate_recorder
+def gate_client(tapscribe_gate_recorder: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # Both through monkeypatch, so the global app gets its own state back even
+    # when the test fails: a dependency override or a recorder left on `app`
+    # would leak into whichever test touches the app next.
+    monkeypatch.setitem(app.dependency_overrides, get_recorder, lambda: tapscribe_gate_recorder)
+    monkeypatch.setattr(app.state, "recorder", tapscribe_gate_recorder, raising=False)
     with TestClient(app) as c:
         yield c
-    app.dependency_overrides.clear()
+
+
+@dataclass
+class RelayLedger:
+    """What the server has done with the tap's frames, counted where it happens:
+    frames the /tap loop has fully handled (written, gated, relayed), and bytes
+    the relay has handed to the fake WlK. Each count signals `CHANGES`."""
+
+    frames_handled: int = 0
+    bytes_relayed: int = 0
+
+
+@pytest.fixture
+def relay_ledger(monkeypatch: pytest.MonkeyPatch) -> RelayLedger:
+    ledger = RelayLedger()
+    write_frame = TapFanOut.write_frame
+    send = WlKRelay.send
+
+    async def counted_write_frame(self: TapFanOut, buf: bytes) -> None:
+        await write_frame(self, buf)
+        ledger.frames_handled += 1
+        CHANGES.bump()
+
+    async def counted_send(self: WlKRelay, data: bytes) -> bool:
+        ok = await send(self, data)
+        if ok:
+            ledger.bytes_relayed += len(data)
+        return ok
+
+    monkeypatch.setattr(TapFanOut, "write_frame", counted_write_frame)
+    monkeypatch.setattr(WlKRelay, "send", counted_send)
+    return ledger
+
+
+def _relay_drained(ledger: RelayLedger, fw: FakeWlkThread, frames: int, *, timeout_s: float = 20.0) -> bool:
+    """Wait, with the tap still open, until the server has handled all `frames`
+    and the fake WlK holds every byte the relay sent for them.
+
+    Inside the `websocket_connect` block on purpose: leaving it makes TestClient
+    cancel the app, which drops whatever frames are still queued. Once the loop
+    has handled the last frame, the relay has sent every survivor, so the byte
+    count it reports is final; the fake WlK signals as each frame lands.
+
+    This replaces a no-growth plateau (three equal 0.2 s polls). It waits on
+    `change_signal.CHANGES`, never on a clock; `timeout_s` only bounds a hang."""
+    return CHANGES.wait_until(
+        lambda: ledger.frames_handled == frames and _received_len(fw) == ledger.bytes_relayed,
+        timeout=timeout_s,
+    )
 
 
 def _received_len(fw: FakeWlkThread) -> int:
     return sum(len(chunk) for chunk in fw.received)
 
 
-def _wait_until_relay_settles(fw: FakeWlkThread, *, timeout_s: float = 20.0) -> bytes:
-    """Poll until the relay has forwarded the gated frames and stopped growing
-    (stable across three 0.2 s polls), then return the received bytes. The gate
-    streams survivors live as it decides them, so this converges once the last
-    speech frame has been gated + forwarded.
-
-    Why a no-growth plateau is a safe completion signal here (not a flake dodge):
-    the fixture is ONE contiguous utterance, so the only lasting plateau is the
-    real end — trailing silence produces no more survivors. And the completion
-    signal isn't load-bearing for correctness anyway: the assertions are wide
-    RANGES (`0 < got < 0.6*sent`), so even a premature break on some
-    hypothetical mid-clip pause would still land in range and still transcribe
-    to words — it can't turn a real regression green or a green run red. The
-    `timeout_s` is the backstop; a stuck relay fails loudly, never hangs."""
-    deadline = time.monotonic() + timeout_s
-    stable = 0
-    last = -1
-    while time.monotonic() < deadline:
-        cur = _received_len(fw)
-        stable = stable + 1 if (cur == last and cur > 0) else 0
-        if stable >= 3:
-            break
-        last = cur
-        time.sleep(0.2)
-    return b"".join(fw.received)
-
-
+@pytest.mark.skipif(
+    importlib.util.find_spec("faster_whisper") is None,
+    reason="faster_whisper not installed — install with `pip install -e .[whisper-cpu]`",
+)
 def test_tapscribe_gate_forwards_real_speech_and_drops_silence_end_to_end(
-    gate_client: TestClient, fake_wlk: FakeWlkThread
+    gate_client: TestClient, fake_wlk: FakeWlkThread, relay_ledger: RelayLedger
 ):
-    if importlib.util.find_spec("faster_whisper") is None:
-        pytest.skip("faster_whisper not installed — install with `pip install -e .[whisper-cpu]`")
 
     frames, sent = _bracketed_frames()
     with gate_client.websocket_connect("/tap?identity=alice&name=Alice") as ws:
         for frame in frames:
             ws.send_bytes(frame)
-        received = _wait_until_relay_settles(fake_wlk)
+        assert _relay_drained(relay_ledger, fake_wlk, len(frames)), (
+            f"handled {relay_ledger.frames_handled}/{len(frames)} frames; "
+            f"the fake WlK holds {_received_len(fake_wlk)}/{relay_ledger.bytes_relayed} relayed bytes"
+        )
+        received = b"".join(fake_wlk.received)
 
     got = len(received)
 

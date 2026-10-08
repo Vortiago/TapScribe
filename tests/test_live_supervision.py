@@ -30,9 +30,7 @@ import queue
 import signal
 import subprocess
 import threading
-import time
-from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from unittest.mock import patch
@@ -60,19 +58,6 @@ def _make_channel(*, gate_kind: str = "tapscribe", **overrides) -> WhisperLiveKi
     return WhisperLiveKitChannel(config=cfg, use_mlx=False)
 
 
-def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.005) -> None:
-    """Event-driven busy-poll: returns as soon as `predicate()` is
-    true, raises if it never is. Used instead of a fixed sleep so
-    these tests don't pay (or risk under-paying) a hardcoded delay
-    while a background pump thread catches up."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(interval)
-    raise AssertionError(f"condition not met within {timeout}s")
-
-
 class _QueueStdout:
     """Stand-in for `Popen(text=True).stdout`: an iterator that blocks
     on `push`ed lines and raises StopIteration once `close`d (EOF).
@@ -81,17 +66,35 @@ class _QueueStdout:
 
     def __init__(self) -> None:
         self._q: queue.Queue[str | None] = queue.Queue()
+        # How many lines were pushed, and how many times the reader came back
+        # for one. A reader asks again only once it has fully handled the line
+        # before, so `asked > pushed` is the event "every pushed line is done".
+        self._seen = threading.Condition()
+        self._pushed = 0
+        self._asked = 0
 
     def push(self, line: str) -> None:
+        with self._seen:
+            self._pushed += 1
         self._q.put(line)
 
     def close(self) -> None:
         self._q.put(None)
 
+    def wait_processed(self, timeout: float = 5.0) -> None:
+        """Block until the reader has handled every pushed line and come back
+        for more. `timeout` bounds a hang; it is not a polling deadline."""
+        with self._seen:
+            done = self._seen.wait_for(lambda: self._asked > self._pushed, timeout)
+        assert done, f"the reader handled {self._asked - 1} of {self._pushed} line(s)"
+
     def __iter__(self):
         return self
 
     def __next__(self):
+        with self._seen:
+            self._asked += 1
+            self._seen.notify_all()
         item = self._q.get()
         if item is None:
             raise StopIteration
@@ -99,81 +102,145 @@ class _QueueStdout:
 
 
 class _FakeChildProc:
-    """Minimal Popen lookalike for `_pump_logs` tests: `stdout` is a
-    `_QueueStdout` the test drives directly; `wait()` (called from the
-    method's `finally`, after the stdout iterator raises
-    StopIteration on `close()`) returns the fixed exit code the test
-    configured."""
+    """Minimal Popen lookalike the patched `subprocess.Popen` hands to
+    `start()`: `stdout` is a `_QueueStdout` the test drives directly; `wait()`
+    (called by the log pump once stdout reaches EOF) returns the fixed exit code
+    the test configured. `exited=True` makes `poll()` report an exited child
+    whose buffered output is still readable, which is how a pipe behaves."""
 
-    def __init__(self, *, pid: int = 4242, rc: int = 0) -> None:
+    def __init__(self, *, pid: int = 4242, rc: int = 0, exited: bool = False) -> None:
         self.pid = pid
         self.stdout = _QueueStdout()
         self._rc = rc
+        self.exited = exited
 
     def poll(self):
-        return None  # not consulted by _pump_logs directly
+        return self._rc if self.exited else None
 
     def wait(self, timeout=None):
         return self._rc
 
 
-@contextmanager
-def _pumping(chan: WhisperLiveKitChannel, proc: _FakeChildProc):
-    """Run `chan._pump_logs(proc)` on a background thread for the body
-    of the `with`, then EOF the fake stdout and join — the shared
-    scaffolding of every _pump_logs test. Post-`with` assertions run
-    after the pump has fully exited (its `finally` included)."""
-    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
-    t.start()
-    try:
-        yield
-    finally:
-        proc.stdout.close()
-        t.join(timeout=2)
-    assert not t.is_alive()
+@dataclass
+class _Started:
+    """What `start()` did with a fake child: the Popen kwargs it passed, and the
+    pump thread(s) it spawned, so a test can join the pump at EOF instead of
+    waiting for its effect on a clock."""
+
+    popen_kwargs: dict
+    pumps: list[threading.Thread]
+
+    def join(self, timeout: float = 5.0) -> None:
+        """Join the pump; `timeout` bounds a hang, it is not a poll."""
+        assert self.pumps, "start() spawned no pump thread"
+        for thread in self.pumps:
+            thread.join(timeout)
+            assert not thread.is_alive(), "the pump thread did not exit at EOF"
+
+
+@pytest.fixture
+def start_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Drive the public `start()` against a fake child, through public seams only:
+
+    - a `whisperlivekit-server` on PATH, which is how `start()` finds the real
+      one (the `.exe` twin is what Windows' PATHEXT lookup finds);
+    - `subprocess.Popen` patched to hand back the fake, for the length of the
+      call, the boundary where the real process would start;
+    - every thread `start()` creates is recorded. With a fake child no live
+      guard is spawned, so that is exactly the log pump.
+
+    The log pump (`_pump_logs`) is a private method, so these tests drive it the
+    way production does, through `start()` and the channel's public `info`
+    and `log`, instead of calling it directly."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("whisperlivekit-server", "whisperlivekit-server.exe"):
+        exe = bin_dir / name
+        exe.write_text("")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    def _start(chan: WhisperLiveKitChannel, proc: _FakeChildProc) -> _Started:
+        calls: list[dict] = []
+        pumps: list[threading.Thread] = []
+        real_thread = threading.Thread
+
+        def popen(cmd, **kwargs):
+            calls.append(kwargs)
+            return proc
+
+        def thread(*args, **kwargs):
+            t = real_thread(*args, **kwargs)
+            pumps.append(t)
+            return t
+
+        with (
+            patch("tapscribe.live.subprocess.Popen", side_effect=popen),
+            patch("tapscribe.live.threading.Thread", side_effect=thread),
+        ):
+            ok, msg = chan.start()
+        assert ok is True, msg
+        assert len(calls) == 1
+        return _Started(popen_kwargs=calls[0], pumps=pumps)
+
+    return _start
 
 
 # ---------------------------------------------------------------------------
-# _pump_logs — starting->running promotion, device overwrite, crash capture
+# The log pump start() spawns — starting->running promotion, device overwrite,
+# crash capture
 # ---------------------------------------------------------------------------
 
 
-def test_pump_logs_promotes_starting_to_running_on_uvicorn_banner():
+def test_pump_logs_promotes_starting_to_running_on_uvicorn_banner(start_with):
     chan = _make_channel()
-    chan.info["state"] = "starting"
     proc = _FakeChildProc(rc=0)
-    chan._proc = proc  # mirrors what start() would have set
-    with _pumping(chan, proc):
-        proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)")
-        _wait_until(lambda: chan.info["state"] == "running")
+    started = start_with(chan, proc)
+    assert chan.info["state"] == "starting"
+
+    proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)")
+    proc.stdout.wait_processed()
+    assert chan.info["state"] == "running"
+
+    proc.stdout.close()
+    started.join()
     # rc=0 on exit overwrites the promoted "running" with a graceful stop.
     assert chan.info["state"] == "stopped"
 
 
-def test_pump_logs_promotes_on_application_startup_complete_line_too():
+def test_pump_logs_promotes_on_application_startup_complete_line_too(start_with):
     """The promotion check ORs two uvicorn phrasings — pin both."""
     chan = _make_channel()
     proc = _FakeChildProc(rc=0)
-    chan._proc = proc
-    with _pumping(chan, proc):
-        proc.stdout.push("INFO:     Application startup complete.")
-        _wait_until(lambda: chan.info["state"] == "running")
+    started = start_with(chan, proc)
+
+    proc.stdout.push("INFO:     Application startup complete.")
+    proc.stdout.wait_processed()
+    assert chan.info["state"] == "running"
+
+    proc.stdout.close()
+    started.join()
 
 
-def test_pump_logs_overwrites_seeded_device_with_child_accelerator_report():
+def test_pump_logs_overwrites_seeded_device_with_child_accelerator_report(start_with):
     chan = _make_channel()
-    chan.info["device"] = "CPU"  # the parent's seeded prediction
     proc = _FakeChildProc(rc=0)
-    chan._proc = proc
-    with _pumping(chan, proc):
-        proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
-        _wait_until(lambda: chan.info["device"] == "CUDA (NVIDIA A100)")
+    started = start_with(chan, proc)
+    # The parent's own prediction, seeded by start() itself.
+    assert chan.info["device"] != "CUDA (NVIDIA A100)"
+
+    proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
+    proc.stdout.wait_processed()
+    assert chan.info["device"] == "CUDA (NVIDIA A100)"
+
+    proc.stdout.close()
+    started.join()
 
 
-def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit():
+def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit(start_with):
     chan = _make_channel()
     proc = _FakeChildProc(rc=1)
-    chan._proc = proc
+    started = start_with(chan, proc)
     lines = [
         "booting",
         "ERROR: something broke",
@@ -181,29 +248,32 @@ def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit():
         "  File x, line 1",
         "RuntimeError: boom",
     ]
-    with _pumping(chan, proc):
-        for line in lines:
-            proc.stdout.push(line)
-        _wait_until(lambda: len(chan.log) == len(lines))
+    for line in lines:
+        proc.stdout.push(line)
+    proc.stdout.wait_processed()
+    assert len(chan.log) == len(lines)
 
+    proc.stdout.close()
+    started.join()
     assert chan.info["state"] == "error"
     assert chan.info["last_error"] == " | ".join(lines)
 
 
-def test_pump_logs_falls_back_to_exit_code_message_when_log_is_empty():
+def test_pump_logs_falls_back_to_exit_code_message_when_log_is_empty(start_with):
     """If the child dies before printing anything (e.g. instant crash
     on import), the tail-join is empty and last_error must still be
     informative rather than a blank string."""
     chan = _make_channel()
     proc = _FakeChildProc(rc=17)
-    chan._proc = proc
-    with _pumping(chan, proc):
-        pass  # push nothing — the child "exits" without a single log line
+    started = start_with(chan, proc)
+
+    proc.stdout.close()  # the child "exits" without a single log line
+    started.join()
     assert chan.info["state"] == "error"
     assert chan.info["last_error"] == "exited with code 17"
 
 
-def test_pump_logs_skips_info_update_when_proc_was_replaced():
+def test_pump_logs_skips_info_update_when_proc_was_replaced(start_with):
     """A stale pump thread whose proc has been superseded by a fresh
     start() must not clobber the newer proc's info — otherwise a fast
     Apply-model click flaps the dashboard's state back to "error"
@@ -215,29 +285,36 @@ def test_pump_logs_skips_info_update_when_proc_was_replaced():
     are block-buffered — a superseded child's buffered stdout is still
     readable AFTER it exited, so an unguarded promotion shows the live
     channel up ~30 s before the NEW child has bound anything.
-    """
+
+    Driven the way it happens: the old child has exited (so `start()` is
+    allowed again) with its tail still unread, and a second `start()` spawns
+    the new child before the old pump has drained that tail."""
     chan = _make_channel()
     old_proc = _FakeChildProc(pid=1, rc=1)
-    new_proc = _FakeChildProc(pid=2, rc=0)
-    chan._proc = old_proc
-    # The state/device the FRESH child owns — a start() that has spawned
-    # but not yet been promoted by its own pump.
-    chan.info["state"] = "starting"
-    chan.info["device"] = "CPU"
+    old = start_with(chan, old_proc)
+    old_proc.exited = True
 
-    with _pumping(chan, old_proc):
-        # Simulate a fresh start() swapping in a new proc while the stale
-        # pump is still draining the old child's tail; the EOF at `with`
-        # exit is the old child "exiting" with rc=1.
-        chan._proc = new_proc
-        old_proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
-        old_proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
-        _wait_until(lambda: len(chan.log) == 2)
+    new_proc = _FakeChildProc(pid=2, rc=0)
+    new = start_with(chan, new_proc)
+    # The state/device the FRESH child owns: spawned, not yet promoted.
+    assert chan.info["state"] == "starting"
+    seeded_device = chan.info["device"]
+
+    old_proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
+    old_proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
+    old_proc.stdout.wait_processed()
+    assert len(chan.log) == 2
+    old_proc.stdout.close()  # the old child's EOF, with rc=1
+    old.join()
 
     # The stale child's banner lines were tailed into the log (so the pump
     # really did process them) but changed none of the new child's info.
     assert chan.info["state"] == "starting"
-    assert chan.info["device"] == "CPU"
+    assert chan.info["device"] == seeded_device
+    assert chan.info["pid"] == "2"
+
+    new_proc.stdout.close()
+    new.join()
 
 
 # ---------------------------------------------------------------------------
@@ -245,47 +322,39 @@ def test_pump_logs_skips_info_update_when_proc_was_replaced():
 # ---------------------------------------------------------------------------
 
 
-def test_start_wires_a_background_pump_that_promotes_state_to_running():
+def test_start_wires_a_background_pump_that_promotes_state_to_running(start_with):
     chan = _make_channel()
     proc = _FakeChildProc(pid=24680, rc=0)
-
-    with (
-        patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
-        patch("tapscribe.live.subprocess.Popen", return_value=proc),
-    ):
-        ok, _msg = chan.start()
-    assert ok is True
+    started = start_with(chan, proc)
     assert chan.info["state"] == "starting"
+    assert chan.info["pid"] == "24680"
 
     proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
-    _wait_until(lambda: chan.info["state"] == "running")
+    proc.stdout.wait_processed()
+    assert chan.info["state"] == "running"
 
     proc.stdout.close()
-    _wait_until(lambda: chan.info["state"] == "stopped")
+    started.join()
+    assert chan.info["state"] == "stopped"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
-def test_start_gives_the_server_a_process_group_not_a_session():
+def test_start_gives_the_server_a_process_group_not_a_session(start_with):
     """`tapscribe.live_guard` joins the server's group, and a process can only
     join a group in its own session: `start_new_session` would make every guard
     spawn fail. No stdin, so the background group never touches the terminal."""
     chan = _make_channel()
     proc = _FakeChildProc()
+    started = start_with(chan, proc)
 
-    with (
-        patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
-        patch("tapscribe.live.subprocess.Popen", return_value=proc) as popen,
-    ):
-        ok, _msg = chan.start()
-    assert ok is True
-
-    kwargs = popen.call_args.kwargs
+    kwargs = started.popen_kwargs
     assert kwargs.get("process_group") == 0
     assert "start_new_session" not in kwargs
     assert kwargs.get("stdin") == subprocess.DEVNULL
 
     proc.stdout.close()
-    _wait_until(lambda: chan.info["state"] == "stopped")
+    started.join()
+    assert chan.info["state"] == "stopped"
 
 
 # ---------------------------------------------------------------------------
@@ -676,18 +745,23 @@ def test_log_iteration_is_safe_while_a_thread_appends():
     routes use must survive a concurrent append storm."""
     chan = _make_channel()
     stop = threading.Event()
+    full = threading.Event()
 
     def writer() -> None:
         n = 0
         while not stop.is_set():
             chan.log.append(f"line {n}")
             n += 1
+            if n == 200:
+                full.set()  # past maxlen: from here every append also evicts
 
     t = threading.Thread(target=writer, daemon=True)
     t.start()
     try:
-        deadline = time.monotonic() + 0.3
-        while time.monotonic() < deadline:
+        # A fixed number of reads against an append storm that is already
+        # evicting, not "as many as fit in 0.3 s": the same work on every runner.
+        assert full.wait(timeout=5.0), "the writer never filled the log"
+        for _ in range(2_000):
             # The exact two reader forms tapscribe.app uses.
             list(islice(chan.log, max(0, len(chan.log) - 30), None))
             list(chan.log)

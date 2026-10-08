@@ -19,6 +19,7 @@ import asyncio
 import os
 import secrets
 from collections import deque
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
@@ -502,8 +503,11 @@ class UtteranceIndex:
 
     RESUME_WINDOW_SECONDS = 60.0
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
         self._by_id: dict[str, UtteranceRecord] = {}
+        #: Where "now" comes from for close stamps and the resume window. Public
+        #: so a test can step it past the window instead of sleeping through it.
+        self.clock = clock
 
     def try_resume(
         self, utterance_id: str, *, identity: str, session_dir: Path, owner: str
@@ -571,13 +575,13 @@ class UtteranceIndex:
             return
         rec.open = False
         rec.bytes_received = bytes_received
-        rec.last_close = datetime.now(UTC)
+        rec.last_close = self.clock()
 
     def snapshot(self) -> dict[str, UtteranceRecord]:
         return dict(self._by_id)
 
     def _prune_expired(self) -> None:
-        cutoff = datetime.now(UTC).timestamp() - self.RESUME_WINDOW_SECONDS
+        cutoff = self.clock().timestamp() - self.RESUME_WINDOW_SECONDS
         stale = [
             uid
             for uid, rec in self._by_id.items()

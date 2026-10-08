@@ -28,7 +28,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import urllib.request
 import wave
 from collections.abc import AsyncIterator, Iterator
@@ -119,16 +119,22 @@ def _running_recorder(batch_model: str) -> Iterator[dict[str, Any]]:
                 "--no-auto-live",
             ],
             env=env,
-            stdout=log_fh,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+        ready = threading.Event()
+        pump = threading.Thread(target=_pump_output, args=(proc, log_fh, ready), daemon=True)
+        pump.start()
         try:
-            _wait_for_health(port, proc, timeout_s=40)
+            _wait_for_ready(port, proc, ready, timeout_s=40)
             yield {"port": port, "base": base, "log": log_path}
         finally:
             proc.terminate()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=10)
+            pump.join(timeout=10)
+            if proc.stdout is not None:
+                proc.stdout.close()
             log_fh.close()
 
 
@@ -145,19 +151,33 @@ def recorder_multilingual() -> AsyncIterator[dict[str, Any]]:  # type: ignore[mi
     yield from _running_recorder("base")
 
 
-def _wait_for_health(port: int, proc: subprocess.Popen, *, timeout_s: float) -> None:
-    deadline = time.time() + timeout_s
-    url = f"http://127.0.0.1:{port}/health"
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"recorder exited early (code {proc.returncode})")
-        try:
-            with urllib.request.urlopen(url, timeout=1) as r:
-                if r.status == 200:
-                    return
-        except Exception:
-            time.sleep(0.3)
-    raise RuntimeError("recorder did not become healthy in time")
+#: What uvicorn prints once it has bound its socket, after the app's startup.
+_READY_LINE = b"Uvicorn running on"
+
+
+def _pump_output(proc: subprocess.Popen, log_fh, ready: threading.Event) -> None:
+    """Copy the Recorder's output into its log file, and set `ready` when uvicorn
+    reports it is listening, or when the output ends (an early exit), so the
+    fixture waits on the process's own word, not on a polled /health."""
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            log_fh.write(line)
+            log_fh.flush()
+            if _READY_LINE in line:
+                ready.set()
+    finally:
+        ready.set()
+
+
+def _wait_for_ready(port: int, proc: subprocess.Popen, ready: threading.Event, *, timeout_s: float) -> None:
+    """One wait on the ready line (`timeout_s` only bounds a hang), then one /health."""
+    if not ready.wait(timeout_s):
+        raise RuntimeError("recorder did not report it was listening in time")
+    if proc.poll() is not None:
+        raise RuntimeError(f"recorder exited early (code {proc.returncode})")
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
+        assert r.status == 200, f"/health answered {r.status}"
 
 
 # ---------------------------------------------------------------------------
@@ -165,21 +185,63 @@ def _wait_for_health(port: int, proc: subprocess.Popen, *, timeout_s: float) -> 
 # ---------------------------------------------------------------------------
 
 
-async def _await_pipeline(port: int, session: str, *, timeout_s: float) -> dict[str, Any]:
-    """Poll GET /api/tap/sessions/{session}/pipeline until done/failed/timeout."""
+async def _await_pipeline(popup, port: int, session: str, *, timeout_s: float) -> dict[str, Any]:
+    """Wait for the popup's meeting card to show the pipeline's outcome (the
+    summary, or a failure), then read the Recorder's own record of it once.
+
+    The card is what the operator watches, and its update is a page event the
+    test can wait on; this used to poll the endpoint every second itself."""
+    await popup.wait_for_function(
+        """() => {
+            const summary = document.querySelector('[data-slot="summary"]');
+            const failure = document.querySelector('[data-slot="failure"]');
+            return (!!summary && !summary.hidden) || (!!failure && !failure.hidden);
+        }""",
+        timeout=timeout_s * 1000,
+    )
     url = f"http://127.0.0.1:{port}/api/tap/sessions/{session}/pipeline"
-    deadline = time.time() + timeout_s
-    last: dict[str, Any] = {}
-    while time.time() < deadline:
-        try:
-            body = await asyncio.to_thread(_get_json, url)
-            last = body
-            if body.get("state") in ("done", "failed"):
-                return body
-        except Exception as e:  # pragma: no cover
-            last = {"state": "poll-error", "error": str(e)}
-        await asyncio.sleep(1.0)
-    return last
+    return await asyncio.to_thread(_get_json, url)
+
+
+#: Mirrors chrome.storage.local into `window.__storage` in an extension page,
+#: kept current by `chrome.storage.onChanged`. `wait_for_function` needs a SYNC
+#: predicate: an `async` one returns a Promise, which Playwright takes as truthy
+#: at once, so a wait written that way never waits. The mirror makes "the bridge
+#: wrote X to storage" a plain read that the storage event keeps fresh.
+_MIRROR_STORAGE_JS = """async () => {
+  if (window.__storage) return;
+  window.__storage = await chrome.storage.local.get(null);
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    for (const [key, { newValue }] of Object.entries(changes)) window.__storage[key] = newValue;
+  });
+}"""
+
+
+async def _until_streaming(popup, *, channels: int, timeout_ms: int = 20_000) -> None:
+    """Wait until the bridge's published status (content.js `buildStatusSnapshot`)
+    shows `channels` tapped channels that have streamed frames to the Recorder."""
+    await popup.wait_for_function(
+        """(want) => {
+            const snap = window.__storage.bridgeStatus;
+            return ((snap && snap.channels) || []).filter((c) => (c.framesSent || 0) > 0).length >= want;
+        }""",
+        arg=channels,
+        timeout=timeout_ms,
+    )
+
+
+async def _until_taps_closed(popup, *, timeout_ms: int = 20_000) -> None:
+    """Wait until every channel is muted and its /tap WS is closed (drain done)."""
+    await popup.wait_for_function(
+        """() => {
+            const snap = window.__storage.bridgeStatus;
+            return ((snap && snap.channels) || []).every(
+                (c) => c.muted && !c.draining && (c.tapWs === null || c.tapWs === 'CLOSED'),
+            );
+        }""",
+        timeout=timeout_ms,
+    )
 
 
 def _get_json(url: str) -> dict[str, Any]:
@@ -254,11 +316,12 @@ async def _open_meeting(ctx, recorder, *, fixture_index, fixture_mock, speech_b6
 
     popup = await ctx.new_page()
     await popup.goto(f"chrome-extension://{ext_id}/popup.html")
+    await popup.evaluate(_MIRROR_STORAGE_JS)
     await popup.get_by_role("button", name="Start meeting").click()
     await popup.wait_for_function(
-        """async () => {
-          const { meetingSessionId } = await chrome.storage.local.get(['meetingSessionId']);
-          return typeof meetingSessionId === 'string' && meetingSessionId.length > 0;
+        """() => {
+          const id = window.__storage.meetingSessionId;
+          return typeof id === 'string' && id.length > 0;
         }""",
         timeout=8000,
         polling=WAIT_POLLING_MS,
@@ -295,7 +358,7 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
                 # page-script worklet → WebSocket → detached-Session WAV). We
                 # assert frames actually reached the Recorder.
                 await page.evaluate("() => window.__tsTest.addRemoteSpeaker('alice-id', 'Alice')")
-                await asyncio.sleep(2.0)
+                await _until_streaming(popup, channels=1)
                 snap = await popup.evaluate(
                     "async () => (await chrome.storage.local.get(['bridgeStatus'])).bridgeStatus"
                 )
@@ -303,7 +366,7 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
                 print(f"[e2e] /tap frames streamed to the Recorder: {frames}")
                 assert frames > 0, f"the bridge streamed no /tap frames to the Recorder: {snap}"
                 await page.evaluate("() => window.__tsTest.muteSpeaker('alice-id')")
-                await asyncio.sleep(1.0)
+                await _until_taps_closed(popup)
 
                 # The captured audio is real but headless Web Audio degrades it
                 # enough that the Recorder's silero-VAD strip rejects it as
@@ -321,7 +384,7 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
 
                 # Poll the REAL Recorder pipeline endpoint directly (no auth) so
                 # failures are legible — the card mirrors this.
-                final = await _await_pipeline(recorder["port"], sess, timeout_s=90)
+                final = await _await_pipeline(popup, recorder["port"], sess, timeout_s=90)
                 print(f"[e2e] final pipeline state: {json.dumps(final)[:400]}")
                 print(
                     f"[e2e] session dir now: {sorted(p.name for p in sess_dir.glob('*')) if sess_dir.exists() else 'MISSING'}"
@@ -375,7 +438,7 @@ async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_m
                 # TWO speakers tapped → prove multi-channel capture (frames on both).
                 await page.evaluate("() => window.__tsTest.addRemoteSpeaker('nora-id', 'Nora')")
                 await page.evaluate("() => window.__tsTest.addRemoteSpeaker('ed-id', 'Ed')")
-                await asyncio.sleep(2.5)
+                await _until_streaming(popup, channels=2)
                 snap = await popup.evaluate(
                     "async () => (await chrome.storage.local.get(['bridgeStatus'])).bridgeStatus"
                 )
@@ -385,7 +448,7 @@ async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_m
                 assert len(streamed) >= 2, f"expected ≥2 tapped channels streaming, got {channels}"
                 await page.evaluate("() => window.__tsTest.muteSpeaker('nora-id')")
                 await page.evaluate("() => window.__tsTest.muteSpeaker('ed-id')")
-                await asyncio.sleep(1.0)
+                await _until_taps_closed(popup)
 
                 # Drop two pristine, DIFFERENT-LANGUAGE fixtures as the two speakers'
                 # WAVs (same headless-capture seam as the single-speaker test):
@@ -400,7 +463,7 @@ async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_m
 
                 # End the meeting → real pipeline (strip → transcribe[base] → summarize).
                 await popup.get_by_role("button", name="End meeting").click()
-                final = await _await_pipeline(recorder["port"], sess, timeout_s=180)
+                final = await _await_pipeline(popup, recorder["port"], sess, timeout_s=180)
                 print(f"[e2e] final pipeline state: {json.dumps(final)[:400]}")
                 assert final.get("state") == "done", f"pipeline did not reach done: {final}"
 

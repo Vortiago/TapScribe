@@ -16,7 +16,6 @@ suite can produce without a packet filter.
 
 from __future__ import annotations
 
-import asyncio
 import wave
 from pathlib import Path
 from urllib.parse import urlencode
@@ -28,7 +27,7 @@ import websockets
 from tapscribe import transcribers as _transcribers
 from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
 
-from .conftest import RunningRecorder
+from .conftest import RunningRecorder, TapFrameLedger
 from .fake_transcriber import FakeTranscriber
 from .harness import (
     FRAME_BYTES,
@@ -80,6 +79,7 @@ async def _stream_frames_then_abort(
     name: str,
     utterance_id: str,
     frames: list[bytes],
+    tap_frames: TapFrameLedger,
     tap_token: str = "",
 ) -> int:
     """Open /tap, send `frames`, then `transport.abort()` the underlying
@@ -91,14 +91,18 @@ async def _stream_frames_then_abort(
     url = _tap_url(ws_base_url, identity=identity, name=name, utterance_id=utterance_id)
     subprotocols = [f"{TAP_SUBPROTOCOL_PREFIX}{tap_token}"] if tap_token else None
     sent = 0
+    before = tap_frames.handled
     ws = await websockets.connect(url, subprotocols=subprotocols, close_timeout=0.5)
     try:
         for frame in frames:
             await ws.send(frame)
             sent += 1
-            # Let the server pick up the frame before we yank the cable;
-            # without this the abort can race ahead of the receive loop.
-            await asyncio.sleep(0.005)
+        # Let the server take every frame before we yank the cable; otherwise
+        # the abort can race ahead of the receive loop. The server counting
+        # them handled is the event, not a pause per frame.
+        assert await wait_until(lambda: tap_frames.handled >= before + sent, timeout=5.0), (
+            f"the Recorder handled {tap_frames.handled - before} of {sent} frame(s) before the abort"
+        )
         # Reach past the public API to send an RST. The server's ASGI
         # WS adapter surfaces this as websocket.disconnect (code 1006).
         ws.transport.abort()
@@ -122,6 +126,7 @@ async def _stream_frames_then_abort(
 
 async def test_bridge_reconnect_mid_utterance_preserves_one_wav(
     running_recorder: RunningRecorder,
+    tap_frames: TapFrameLedger,
     fake_transcriber: FakeTranscriber,  # noqa: ARG001 — keeps patched factory ready
     alice_wav: Path,
 ):
@@ -151,6 +156,7 @@ async def test_bridge_reconnect_mid_utterance_preserves_one_wav(
         name=name,
         utterance_id=utt,
         frames=first_chunk,
+        tap_frames=tap_frames,
     )
     assert sent_first == len(first_chunk)
 
@@ -169,7 +175,6 @@ async def test_bridge_reconnect_mid_utterance_preserves_one_wav(
     async with websockets.connect(url) as ws:
         for frame in second_chunk:
             await ws.send(frame)
-            await asyncio.sleep(0.005)
     # Same reasoning: wait for the merged record to release before reading the
     # WAV — release() runs after wave.close(), so this also guarantees the file
     # is flushed for the frame-count assertions below.
@@ -261,6 +266,7 @@ async def test_back_to_back_same_speaker_yields_two_distinct_wavs(
 
 async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
     running_recorder: RunningRecorder,
+    tap_frames: TapFrameLedger,
     fake_transcriber: FakeTranscriber,  # noqa: ARG001
     alice_wav: Path,
 ):
@@ -302,6 +308,7 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
         name=name,
         utterance_id=utt,
         frames=first_chunk,
+        tap_frames=tap_frames,
     )
     assert sent == len(first_chunk)
     # Gate on release (record closed), not ActiveStreams draining — see
@@ -333,7 +340,6 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
                     await ws.send(frame)
                 except websockets.ConnectionClosed:
                     break
-                await asyncio.sleep(0.005)
     except websockets.ConnectionClosed:
         # The recorder is tearing down this tap mid-stream (the reconnect
         # scenario under test); connect()/the context-manager exit can surface
@@ -360,6 +366,7 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
 
 async def test_wlk_crash_mid_utterance_keeps_wav_when_wlk_crashes(
     running_recorder: RunningRecorder,
+    tap_frames: TapFrameLedger,
     fake_transcriber: FakeTranscriber,  # noqa: ARG001
     alice_wav: Path,
 ):
@@ -384,13 +391,14 @@ async def test_wlk_crash_mid_utterance_keeps_wav_when_wlk_crashes(
     async with websockets.connect(url) as ws:
         for frame in frames[:5]:
             await ws.send(frame)
-            await asyncio.sleep(0.005)
+        # The crash lands MID-utterance: only once the Recorder has taken the
+        # first five frames (an event it signals), not after a pause per frame.
+        assert await wait_until(lambda: tap_frames.handled >= 5, timeout=5.0)
         fake_wlk.terminate()
         # Continue streaming Alice's audio — WAV writes must continue
         # uninterrupted (recording is independent of the live channel).
         for frame in frames[5:]:
             await ws.send(frame)
-            await asyncio.sleep(0.005)
     assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
 
     wavs = list(rec.session_dir.glob("*.wav"))

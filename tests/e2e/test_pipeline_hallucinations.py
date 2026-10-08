@@ -266,8 +266,8 @@ async def test_large_session_merge_preserves_all_speakers_in_order(
     # Every speaker has at least one segment.
     segments_by_speaker: dict[str, list[dict]] = {name: [] for _, name, _ in SPEAKERS}
     for seg in merged["segments"]:
-        if seg["speaker"] in segments_by_speaker:
-            segments_by_speaker[seg["speaker"]].append(seg)
+        assert seg["speaker"] in segments_by_speaker, f"segment from an unknown speaker: {seg}"
+        segments_by_speaker[seg["speaker"]].append(seg)
     for name in segments_by_speaker:
         assert segments_by_speaker[name], f"speaker {name!r} has zero segments in merged transcript"
 
@@ -287,11 +287,12 @@ async def test_large_session_merge_preserves_all_speakers_in_order(
     # second so back-to-back WAVs share a wav_start and the same-second
     # tie-break is filename-alphabetical, not stream-order. The
     # load-bearing property is non-decreasing abs_start.
-    timestamps = [
-        line.split("]", 1)[0].lstrip("[")
-        for line in merged["plain_text"].splitlines()
-        if line.startswith("[")
-    ]
+    lines = merged["plain_text"].splitlines()
+    # One stamped line per segment: a line without a stamp would drop out of the
+    # ordering check below, and with none at all `[] == sorted([])` would pass.
+    assert len(lines) == len(merged["segments"]) == 8, merged["plain_text"]
+    assert all(line.startswith("[") for line in lines), merged["plain_text"]
+    timestamps = [line.split("]", 1)[0].lstrip("[") for line in lines]
     assert timestamps == sorted(timestamps), (
         f"plain_text not chronologically ordered by abs_start:\n{merged['plain_text']}"
     )

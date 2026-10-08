@@ -132,9 +132,17 @@ def test_a_same_origin_write_with_a_null_origin_passes(auth_on: TestClient) -> N
     )
     assert same.status_code == 200
 
-    for opaque in ({"Origin": "null", "Sec-Fetch-Site": "cross-site"}, {"Origin": "null"}):
-        refused = auth_on.post("/api/whatever", auth=(_config.AUTH_USER, BASIC_PASS), headers=opaque)
-        assert refused.status_code == 403, opaque
+
+@pytest.mark.parametrize(
+    "opaque",
+    [{"Origin": "null", "Sec-Fetch-Site": "cross-site"}, {"Origin": "null"}],
+    ids=["cross-site", "no-fetch-metadata"],
+)
+def test_an_opaque_null_origin_write_is_refused(auth_on: TestClient, opaque: dict[str, str]) -> None:
+    """The other side of the same rule: `Origin: null` WITHOUT a same-origin
+    `Sec-Fetch-Site` is an opaque initiator, and the write is refused."""
+    refused = auth_on.post("/api/whatever", auth=(_config.AUTH_USER, BASIC_PASS), headers=opaque)
+    assert refused.status_code == 403
 
 
 def test_a_cross_origin_write_is_refused_on_the_basic_scheme(auth_on: TestClient) -> None:
